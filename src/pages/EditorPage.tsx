@@ -4,14 +4,17 @@ import type React from "react"
 import { useEffect, useRef, useState, useCallback } from "react"
 import { Link } from "react-router-dom"
 import { Button } from "@/components/ui/button"
-import { Home, Settings, Save, Upload, Download } from "lucide-react"
+import { Home, Settings, Save, Upload, Download, Music } from "lucide-react"
 import { useTheme } from "@/hooks/use-theme"
 import { useI18n } from "@/lib/i18n/context"
 import * as THREE from "three"
 import * as ADOFAI from "adofai"
 import Hjson from "hjson"
 import createTrackMesh from "@/lib/Geo/mesh_reserve"
+import { Player } from "@/lib/Player/Player"
+import { ILevelData } from "@/lib/Player/types"
 import example from "@/lib/example/line.json"
+import { useAppSettings } from "@/hooks/use-app-settings"
 import type { JSX } from "react/jsx-runtime"
 
 // 声明全局类型
@@ -22,22 +25,6 @@ declare global {
   interface Navigator {
     gpu?: any
   }
-}
-
-// 播放状态枚举
-enum PlaybackState {
-  HOLDING = "holding",
-  PLAYING = "playing",
-}
-
-// 星球接口
-interface Planet {
-  id: number
-  mesh: THREE.Mesh
-  color: THREE.Color
-  angle: number
-  isCenter: boolean
-  tileIndex: number
 }
 
 // 通知系统组件
@@ -79,6 +66,7 @@ function NotificationSystem(): JSX.Element {
   )
 }
 
+// @deprecated - Refactored to src/lib/Player/Player.ts
 class Previewer {
   private container: HTMLElement
   private fpsCounter: HTMLElement
@@ -87,11 +75,26 @@ class Previewer {
   private isDisposed = false
   private frameCount = 0
   private lastTime: number = performance.now()
+  private fpsUpdateTime: number = performance.now()
   private fps = 0
   private isDragging = false
   private previousMousePosition: { x: number; y: number } = { x: 0, y: 0 }
   private cameraPosition: { x: number; y: number } = { x: 0, y: 0 }
   private zoom = 1
+
+  // 播放相关属性
+  private playMode: "preview" | "play" | "pause" = "preview"
+  private playAnimationId: number | null = null
+  private curTile = 0
+  private planetR: THREE.Mesh | null = null
+  private planetB: THREE.Mesh | null = null
+  private playStartTime: number = 0
+  private playElapsedTime: number = 0
+  private isPaused = false
+  private lastPlayTime: number = 0
+  private cameraTargetPosition: { x: number; y: number } = { x: 0, y: 0 }
+  private planetRPosition: { x: number; y: number } = { x: 0, y: 0 }
+  private planetBPosition: { x: number; y: number } = { x: 0, y: 0 }
   private minZoom = 0
   private maxZoom = 240
   private tiles: Map<string, THREE.Mesh> = new Map()
@@ -107,23 +110,8 @@ class Previewer {
   private initialPinchDistance = 0
   private initialZoom = 0
   private t: (key: string) => string
+  
 
-  private playbackState: PlaybackState = PlaybackState.HOLDING
-  private planets: Planet[] = []
-  private planetsCount = 2
-  private currentBpm = 120
-  private rotationSpeed = 0 // 弧度每毫秒
-  private isClockwise = true
-  private centerPlanetIndex = 0
-  private gameStartTime = 0
-  private currentTileIndex = 0
-  private pauseButton: HTMLButtonElement | null = null
-  private onPlaybackStateChange?: (state: PlaybackState) => void
-
-  private particles: THREE.Points[] = []
-  private particleGeometry: THREE.BufferGeometry | null = null
-  private particleMaterial: THREE.PointsMaterial | null = null
-  private planetTrails: Map<number, Array<{ position: THREE.Vector3; time: number }>> = new Map()
 
   constructor(
     adofaiFile: any,
@@ -131,18 +119,12 @@ class Previewer {
     fpsCounter: HTMLElement,
     info: HTMLElement,
     t: (key: string) => string,
-    onPlaybackStateChange?: (state: PlaybackState) => void,
   ) {
     this.container = container
     this.fpsCounter = fpsCounter
     this.info = info
     this.adofaiFile = adofaiFile
     this.t = t
-    this.onPlaybackStateChange = onPlaybackStateChange
-
-    // 获取BPM
-    this.currentBpm = this.adofaiFile?.settings?.bpm || 120
-    this.updateRotationSpeed()
 
     // 绑定事件处理函数到实例
     this.boundEventHandlers = {
@@ -155,7 +137,6 @@ class Previewer {
       touchEnd: this.onTouchEnd.bind(this),
       windowResize: this.onWindowResize.bind(this),
       contextMenu: (e: Event): void => e.preventDefault(),
-      keyDown: this.onKeyDown.bind(this),
     }
 
     this.init()
@@ -163,415 +144,9 @@ class Previewer {
     this.animate()
   }
 
-  // 更新旋转速度
-  private updateRotationSpeed(): void {
-    // 1圈/120BPM = 2π弧度 / (60000ms/120) = 2π / 500ms
-    this.rotationSpeed = (2 * Math.PI) / (60000 / this.currentBpm)
-  }
-
   // 颜色计算函数
-  private calculatePlanetColor(index: number, totalCount: number): THREE.Color {
-    if (index === 0) return new THREE.Color(0xff0000) // 红色
-    if (index === 1) return new THREE.Color(0x0000ff) // 蓝色
-
-
-    const hue = ((index * 360) / totalCount) % 360
-    const color = new THREE.Color()
-    color.setHSL(hue / 360, 1, 0.5)
-    return color
-  }
-
-  private calculatePolygonVertices(
-    centerX: number,
-    centerY: number,
-    radius: number,
-    count: number,
-  ): Array<{ x: number; y: number }> {
-    const vertices = []
-    for (let i = 0; i < count; i++) {
-      const angle = (i * 2 * Math.PI) / count
-      vertices.push({
-        x: centerX + radius * Math.cos(angle),
-        y: centerY + radius * Math.sin(angle),
-      })
-    }
-    return vertices
-  }
-
-  private createPlanets(): void {
-    this.clearPlanets()
-
-    if (!this.scene || !this.adofaiFile?.tiles) {
-      console.log("Scene or tiles not available")
-      return
-    }
-
-    const tileKeys = Object.keys(this.adofaiFile.tiles)
-    if (tileKeys.length < 2) {
-      console.log("Not enough tiles:", tileKeys.length)
-      return
-    }
-
-    const tile0 = this.adofaiFile.tiles[0]
-    const tile1 = this.adofaiFile.tiles[1]
-    if (!tile0 || !tile1) {
-      console.log("Tiles not found:", { tile0, tile1 })
-      return
-    }
-
-    const [x0, y0] = tile0.position
-    const [x1, y1] = tile1.position
-
-    console.log("Creating planets at positions:", { x0, y0, x1, y1 })
-
-    // 创建更大的星球几何体
-    const planetGeometry = new THREE.SphereGeometry(0.8, 32, 32) // 增大球体并提高细节
-
-    for (let i = 0; i < this.planetsCount; i++) {
-      const color = this.calculatePlanetColor(i, this.planetsCount)
-
-      const material = new THREE.MeshLambertMaterial({
-        color,
-        transparent: false,
-        opacity: 1.0,
-      })
-
-      const mesh = new THREE.Mesh(planetGeometry, material)
-
-      if (i === 0) {
-        mesh.position.set(x0, y0, 5)
-      } else if (i === 1) {
-        mesh.position.set(x1, y1, 5)
-      } else {
-        // 其他球暂时隐藏
-        mesh.visible = false
-        mesh.position.set(0, 0, 5)
-      }
-
-      // 确保球体可见
-      mesh.visible = true
-      mesh.castShadow = true
-      mesh.receiveShadow = true
-
-      const planet: Planet = {
-        id: i,
-        mesh,
-        color,
-        angle: i === 0 ? 0 : Math.PI,
-        isCenter: i === 0,
-        tileIndex: i,
-      }
-
-      this.planets.push(planet)
-      this.scene.add(mesh)
-
-      this.planetTrails.set(i, [])
-
-      console.log(`Created planet ${i} at position:`, mesh.position, "Color:", color, "Visible:", mesh.visible)
-    }
-
-    this.initParticleSystem()
-
-    console.log("Total planets created:", this.planets.length)
-    console.log("Scene children count:", this.scene.children.length)
-  }
-
-  private initParticleSystem(): void {
-    this.particleGeometry = new THREE.BufferGeometry()
-
-    this.particleMaterial = new THREE.PointsMaterial({
-      size: 0.05,
-      transparent: true,
-      opacity: 0.8,
-      vertexColors: true,
-      blending: THREE.AdditiveBlending,
-    })
-  }
-
-  private updateParticleTrails(deltaTime: number): void {
-    if (this.playbackState !== PlaybackState.PLAYING) return
-
-    const currentTime = performance.now()
-
-    this.planets.forEach((planet) => {
-      const trailArray = this.planetTrails.get(planet.id) || []
-
-      // 添加当前位置到拖尾
-      trailArray.push({
-        position: planet.mesh.position.clone(),
-        time: currentTime,
-      })
-
-      const filteredTrail = trailArray.filter((point) => currentTime - point.time < 500)
-      this.planetTrails.set(planet.id, filteredTrail)
-
-      this.createTrailParticles(planet, filteredTrail)
-    })
-
-    this.cleanupOldParticles()
-  }
-
-  private createTrailParticles(planet: Planet, trail: Array<{ position: THREE.Vector3; time: number }>): void {
-    if (trail.length < 2 || !this.scene) return
-
-    const positions: number[] = []
-    const colors: number[] = []
-    const currentTime = performance.now()
-
-    trail.forEach((point, index) => {
-      positions.push(point.position.x, point.position.y, point.position.z)
-
-      const age = (currentTime - point.time) / 500 // 0-1
-      const opacity = 1 - age
-
-      colors.push(planet.color.r * opacity, planet.color.g * opacity, planet.color.b * opacity)
-    })
-
-    if (positions.length > 0) {
-      const geometry = new THREE.BufferGeometry()
-      geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3))
-      geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3))
-
-      const material = new THREE.PointsMaterial({
-        size: 0.1,
-        transparent: true,
-        vertexColors: true,
-        blending: THREE.AdditiveBlending,
-      })
-
-      const particles = new THREE.Points(geometry, material)
-      particles.userData = { createdAt: currentTime, planetId: planet.id }
-
-      this.scene.add(particles)
-      this.particles.push(particles)
-    }
-  }
-
-  private cleanupOldParticles(): void {
-    const currentTime = performance.now()
-
-    this.particles = this.particles.filter((particle) => {
-      const age = currentTime - particle.userData.createdAt
-      if (age > 500) {
-        if (this.scene) {
-          this.scene.remove(particle)
-        }
-        particle.geometry.dispose()
-        if (particle.material instanceof THREE.Material) {
-          particle.material.dispose()
-        }
-        return false
-      }
-      return true
-    })
-  }
-
-  private updatePlanets(deltaTime: number): void {
-    if (this.playbackState !== PlaybackState.PLAYING || this.planets.length === 0) return
-
-    const centerPlanet = this.planets[this.centerPlanetIndex]
-    if (!centerPlanet) return
-
-    const centerPos = centerPlanet.mesh.position
-    const rotationDelta = this.rotationSpeed * deltaTime * (this.isClockwise ? 1 : -1)
-
-    this.planets.forEach((planet, index) => {
-      if (index === this.centerPlanetIndex) return
-
-      planet.angle += rotationDelta
-
-      const radius = 3.0
-      const x = centerPos.x + radius * Math.cos(planet.angle)
-      const y = centerPos.y + radius * Math.sin(planet.angle)
-
-      planet.mesh.position.set(x, y, 5)
-
-      this.checkPlanetTileTransition(planet, index)
-    })
-
-    this.updateParticleTrails(deltaTime)
-  }
-
-  private checkPlanetTileTransition(planet: Planet, planetIndex: number): void {
-    const nextTileIndex = this.centerPlanetIndex + 1
-    const nextTile = this.adofaiFile.tiles[nextTileIndex]
-
-    if (!nextTile) return
-
-    const [tileX, tileY] = nextTile.position
-    const planetPos = planet.mesh.position
-    const distance = Math.sqrt(Math.pow(planetPos.x - tileX, 2) + Math.pow(planetPos.y - tileY, 2))
-
-    if (distance < 0.5) {
-      this.centerPlanetIndex = planetIndex
-      this.currentTileIndex = nextTileIndex
-
-      this.processActionsAtTile(nextTileIndex)
-
-      this.recalculatePlanetAngles()
-    }
-  }
-
-  private recalculatePlanetAngles(): void {
-    const centerPlanet = this.planets[this.centerPlanetIndex]
-    if (!centerPlanet) return
-
-    this.planets.forEach((planet, index) => {
-      if (index === this.centerPlanetIndex) return
-
-      const dx = planet.mesh.position.x - centerPlanet.mesh.position.x
-      const dy = planet.mesh.position.y - centerPlanet.mesh.position.y
-      planet.angle = Math.atan2(dy, dx)
-    })
-  }
-
-  private processActionsAtTile(tileIndex: number): void {
-    const pauseActions = this.adofaiFile.getActionsByIndex?.("Pause", tileIndex)
-    if (pauseActions?.count > 0) {
-      const duration = pauseActions.actions[0]?.duration || 0
-      const extraRotation = (duration / 2) * 2 * Math.PI
-      this.planets.forEach((planet) => {
-        if (planet.id !== this.centerPlanetIndex) {
-          planet.angle += extraRotation * (this.isClockwise ? 1 : -1)
-        }
-      })
-    }
-
-    const speedActions = this.adofaiFile.getActionsByIndex?.("SetSpeed", tileIndex)
-    if (speedActions?.count > 0) {
-      const action = speedActions.actions[0]
-      if (action.speedType === "Multiplier") {
-        this.currentBpm *= action.bpmMultiplier || 1
-      } else if (action.speedType === "Bpm") {
-        this.currentBpm = action.beatsPerMinute || this.currentBpm
-      }
-      this.updateRotationSpeed()
-    }
-
-    const twirlActions = this.adofaiFile.getActionsByIndex?.("Twirl", tileIndex)
-    if (twirlActions?.count > 0) {
-      this.isClockwise = !this.isClockwise
-    }
-  }
-
-  private createPauseButton(): void {
-    if (this.pauseButton) return
-
-    this.pauseButton = document.createElement("button")
-    this.pauseButton.innerHTML = "⏸️"
-    this.pauseButton.style.cssText = `
-      position: fixed;
-      top: 20px;
-      right: 20px;
-      width: 60px;
-      height: 60px;
-      background: rgba(128, 128, 128, 0.7);
-      border: none;
-      border-radius: 50%;
-      font-size: 24px;
-      cursor: pointer;
-      z-index: 1000;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    `
-
-    this.pauseButton.addEventListener("click", () => {
-      this.setPlaybackState(PlaybackState.HOLDING)
-    })
-
-    document.body.appendChild(this.pauseButton)
-  }
-
-  private removePauseButton(): void {
-    if (this.pauseButton) {
-      document.body.removeChild(this.pauseButton)
-      this.pauseButton = null
-    }
-  }
-
-  public setPlaybackState(state: PlaybackState): void {
-    if (this.playbackState === state) return
-
-    const previousState = this.playbackState
-    this.playbackState = state
-
-    if (state === PlaybackState.PLAYING) {
-      this.gameStartTime = performance.now()
-      // 先移除所有星球
-      this.clearPlanets()
-      // 重新添加星球，确保每次播放都是全新状态
-      this.createPlanets()
-      this.createPauseButton()
-      this.renderer?.setSize(window.innerWidth, window.innerHeight)
-      this.updateCamera()
-    } else {
-      if (this.scene) {
-        const testSphere = this.scene.children.find(
-          (child) =>
-            child instanceof THREE.Mesh &&
-            child.material instanceof THREE.MeshBasicMaterial &&
-            child.material.color.getHex() === 0xff0000,
-        )
-        if (testSphere) {
-          this.scene.remove(testSphere)
-        }
-      }
-      this.clearPlanets()
-      this.removePauseButton()
-      this.clearParticles()
-      const containerSize = this.getContainerSize()
-      this.renderer?.setSize(containerSize.width, containerSize.height)
-      this.updateCamera()
-      if (this.fpsCounter) {
-        this.fpsCounter.style.display = "block"
-      }
-      if (this.info) {
-        this.info.style.display = "block"
-      }
-      setTimeout(() => {
-        this.updateFPS()
-      }, 100)
-    }
-    this.onPlaybackStateChange?.(state)
-  }
-
-  private clearParticles(): void {
-    this.particles.forEach((particle) => {
-      if (this.scene) {
-        this.scene.remove(particle)
-      }
-      particle.geometry.dispose()
-      if (particle.material instanceof THREE.Material) {
-        particle.material.dispose()
-      }
-    })
-    this.particles = []
-    this.planetTrails.clear()
-  }
-
-  private onKeyDown(event: KeyboardEvent): void {
-    if (event.code === "Space") {
-      event.preventDefault()
-      if (this.playbackState === PlaybackState.HOLDING) {
-        this.setPlaybackState(PlaybackState.PLAYING)
-      }
-    } else if (event.code === "Escape") {
-      event.preventDefault()
-      if (this.playbackState === PlaybackState.PLAYING) {
-        this.setPlaybackState(PlaybackState.HOLDING)
-      }
-    }
-  }
 
   private getContainerSize(): { width: number; height: number } {
-    if (this.playbackState === PlaybackState.PLAYING) {
-      return {
-        width: window.innerWidth,
-        height: window.innerHeight,
-      }
-    }
-
     const rect = this.container.getBoundingClientRect()
     return {
       width: rect.width,
@@ -588,8 +163,8 @@ class Previewer {
       this.animationId = null
     }
 
-    this.clearPlanets()
-    this.removePauseButton()
+    // 停止播放动画
+    this.stopPlay()
 
     this.removeEventListeners()
 
@@ -598,6 +173,306 @@ class Previewer {
     this.cleanupDOM()
 
     console.log("Previewer disposed successfully")
+  }
+
+  // 播放相关方法
+  public startPlay(): void {
+    if (this.isDisposed) return
+    this.playMode = "play"
+    this.curTile = 0
+    this.playStartTime = performance.now()
+    this.playElapsedTime = 0
+    this.isPaused = false
+    
+    // 初始化目标位置
+    this.cameraTargetPosition = { ...this.cameraPosition }
+    
+    // 创建红球和蓝球
+    this.createPlanets()
+    
+    // 开始播放动画
+    this.startPlayAnimation()
+  }
+
+  public pausePlay(): void {
+    if (this.isDisposed) return
+    this.playMode = "pause"
+    this.isPaused = true
+    this.lastPlayTime = performance.now()
+  }
+
+  public resumePlay(): void {
+    if (this.isDisposed) return
+    this.playMode = "play"
+    this.isPaused = false
+    this.playStartTime = performance.now() - this.playElapsedTime
+  }
+
+  public stopPlay(): void {
+    if (this.isDisposed) return
+    this.playMode = "preview"
+    this.isPaused = false
+    
+    if (this.playAnimationId) {
+      cancelAnimationFrame(this.playAnimationId)
+      this.playAnimationId = null
+    }
+    
+    // 移除红球和蓝球
+    this.removePlanets()
+    
+    // 重置相机位置
+    this.cameraPosition = { x: 0, y: 0 }
+    this.zoom = 1
+    this.updateCamera()
+  }
+
+
+
+  private createPlanets(): void {
+    if (!this.scene) return
+    
+    // 创建红球
+    const planetRGeometry = new THREE.SphereGeometry(0.15, 32, 32)
+    const planetRMaterial = new THREE.MeshBasicMaterial({ color: 0xff0000 })
+    this.planetR = new THREE.Mesh(planetRGeometry, planetRMaterial)
+    
+    // 创建蓝球
+    const planetBGeometry = new THREE.SphereGeometry(0.15, 32, 32)
+    const planetBMaterial = new THREE.MeshBasicMaterial({ color: 0x0000ff })
+    this.planetB = new THREE.Mesh(planetBGeometry, planetBMaterial)
+    
+    // 根据 curTile 设置初始位置
+    if (this.curTile === 0) {
+      // 倒计时阶段：红球在轨道0，蓝球在轨道1
+      const tile0 = this.adofaiFile.tiles[0]
+      const tile1 = this.adofaiFile.tiles[1]
+      
+      if (tile0 && tile1) {
+        const [x0, y0] = tile0.position
+        const [x1, y1] = tile1.position
+        this.planetR.position.set(x0 + 1, y0, 1)
+        this.planetB.position.set(x1 + 1, y1, 1)
+        this.planetRPosition = { x: x0 + 1, y: y0 }
+        this.planetBPosition = { x: x1 + 1, y: y1 }
+      }
+    } else {
+      // 正常播放阶段：根据 curTile 确定球的位置
+      const currentTile = this.adofaiFile.tiles[this.curTile]
+      const prevTile = this.adofaiFile.tiles[this.curTile - 1]
+      
+      if (currentTile && prevTile) {
+        const [cx, cy] = currentTile.position
+        const [px, py] = prevTile.position
+        
+        if (this.curTile % 2 === 1) {
+          // curTile 为奇数：红球在当前轨道，蓝球在前一个轨道
+          this.planetR.position.set(cx + 1, cy, 1)
+          this.planetB.position.set(px + 1, py, 1)
+          this.planetRPosition = { x: cx + 1, y: cy }
+          this.planetBPosition = { x: px + 1, y: py }
+        } else {
+          // curTile 为偶数：蓝球在当前轨道，红球在前一个轨道
+          this.planetB.position.set(cx + 1, cy, 1)
+          this.planetR.position.set(px + 1, py, 1)
+          this.planetBPosition = { x: cx + 1, y: cy }
+          this.planetRPosition = { x: px + 1, y: py }
+        }
+      }
+    }
+    
+    this.scene.add(this.planetR)
+    this.scene.add(this.planetB)
+  }
+
+  private removePlanets(): void {
+    if (!this.scene) return
+    
+    if (this.planetR) {
+      this.scene.remove(this.planetR)
+      this.planetR.geometry.dispose()
+      if (Array.isArray(this.planetR.material)) {
+        this.planetR.material.forEach((mat: any) => mat.dispose())
+      } else {
+        this.planetR.material.dispose()
+      }
+      this.planetR = null
+    }
+    
+    if (this.planetB) {
+      this.scene.remove(this.planetB)
+      this.planetB.geometry.dispose()
+      if (Array.isArray(this.planetB.material)) {
+        this.planetB.material.forEach((mat: any) => mat.dispose())
+      } else {
+        this.planetB.material.dispose()
+      }
+      this.planetB = null
+    }
+  }
+
+  private startPlayAnimation(): void {
+    if (this.isDisposed) return
+    
+    const animate = (): void => {
+      if (this.isDisposed || this.playMode === "preview") {
+        this.playAnimationId = null
+        return
+      }
+      
+      if (this.playMode === "play") {
+        this.updatePlanets()
+      }
+      
+      this.playAnimationId = requestAnimationFrame(animate)
+    }
+    
+    this.playAnimationId = requestAnimationFrame(animate)
+  }
+
+  private updatePlanets(): void {
+    if (!this.planetR || !this.planetB) return
+    
+    const currentTime = performance.now()
+    const totalElapsed = currentTime - this.playStartTime
+    
+    const bpm = this.adofaiFile.settings.bpm || 100
+    const rotationSpeed = (bpm / 120) * 360 // 度/秒
+    const countdownTicks = this.adofaiFile.settings.countdownTicks || 4
+    const offset = this.adofaiFile.settings.offset || 0
+    
+    // 计算倒计时圈数（根据 offset 调整，必须是整数）
+    const additionalRotations = Math.floor(offset / 1000 * bpm / 60)
+    const totalRotations = countdownTicks + additionalRotations
+    
+    const tile0 = this.adofaiFile.tiles[0]
+    const tile1 = this.adofaiFile.tiles[1]
+    
+    if (this.curTile === 0) {
+      // 倒计时阶段：蓝球围绕红球旋转
+      if (tile0 && tile1) {
+        const [x0, y0] = tile0.position
+        const [x1, y1] = tile1.position
+        const radius = Math.sqrt(Math.pow(x1 - x0, 2) + Math.pow(y1 - y0, 2))
+        const startAngle = Math.atan2(y1 - y0, x1 - x0)
+        
+        // 红球固定在第0个砖块
+        this.planetRPosition = { x: x0 + 1, y: y0 }
+        this.planetR.position.set(x0 + 1, y0, 1)
+        
+        // 计算倒计时总圈数：countdownTicks + offset调整 + tile0的angle/180
+        const tile0Angle = Math.abs(tile0.angle || 0)
+        const additionalRotationsFromAngle = tile0Angle / 180
+        const totalRotations = countdownTicks + additionalRotations + additionalRotationsFromAngle
+        
+        const countdownAngle = totalRotations * 360
+        const currentAngle = (totalElapsed / 1000) * rotationSpeed
+        
+        if (currentAngle < countdownAngle) {
+          // 仍在倒计时旋转中（顺时针旋转）
+          const angle = startAngle - (currentAngle * Math.PI / 180)
+          this.planetBPosition = {
+            x: x0 + 1 + radius * Math.cos(angle),
+            y: y0 + radius * Math.sin(angle)
+          }
+          this.planetB.position.set(this.planetBPosition.x, this.planetBPosition.y, 1)
+        } else {
+          // 倒计时结束，蓝球落回第1个砖块
+          this.curTile = 1
+          this.planetBPosition = { x: x1 + 1, y: y1 }
+          this.planetB.position.set(x1 + 1, y1, 1)
+          // 重置时间用于后续动画
+          this.playStartTime = currentTime
+          // 设置相机目标位置
+          this.cameraTargetPosition = { x: x1 + 1, y: y1 }
+        }
+      }
+    } else if (this.curTile >= Object.keys(this.adofaiFile.tiles).length) {
+      // 抵达最后一个砖块，停留在最后一个砖块
+      const lastTileIndex = Object.keys(this.adofaiFile.tiles).length - 1
+      const lastTile = this.adofaiFile.tiles[lastTileIndex]
+      
+      if (lastTile) {
+        const [lx, ly] = lastTile.position
+        this.cameraTargetPosition = { x: lx + 1, y: ly }
+      }
+    } else {
+      // 正常播放阶段：球交替旋转中心
+      const currentTile = this.adofaiFile.tiles[this.curTile]
+      const nextTile = this.adofaiFile.tiles[this.curTile + 1]
+      
+      if (currentTile && nextTile) {
+        const [cx, cy] = currentTile.position
+        const [nx, ny] = nextTile.position
+        
+        // 目标角度（使用 tile.angle）
+        const targetAngle = Math.abs(currentTile.angle || 0)
+        const currentAngle = ((currentTime - this.playStartTime) / 1000) * rotationSpeed
+        
+        if (currentAngle >= targetAngle) {
+          // 到达目标轨道
+          this.curTile++
+          
+          // 设置相机目标位置
+          this.cameraTargetPosition = { x: nx + 1, y: ny }
+          
+          // 重置时间用于下一段动画
+          this.playStartTime = currentTime
+        } else {
+          // 旋转动画
+          const prevTile = this.adofaiFile.tiles[this.curTile - 1]
+          
+          if (prevTile) {
+            const [px, py] = prevTile.position
+            
+            // 计算旋转半径
+            const radius = Math.sqrt(Math.pow(nx - cx, 2) + Math.pow(ny - cy, 2))
+            
+            // 计算从上一轨道到当前轨道的方向角（起始方向）
+            const directionFromPrev = Math.atan2(cy - py, cx - px)
+            
+            // 计算旋转的插值比例
+            const progress = currentAngle / targetAngle
+            
+            // 顺时针旋转：从起始方向开始，旋转 progress * π 弧度
+            // 顺时针在标准坐标系中是角度递减
+            const currentAngleRad = directionFromPrev - (progress * Math.PI)
+            
+            // 奇数curTile（1,3,5...）：红球围绕蓝球旋转，蓝球位置不变（在currentTile）
+            // 偶数curTile（2,4,6...）：蓝球围绕红球旋转，红球位置不变（在currentTile）
+            if (this.curTile % 2 === 1) {
+              // curTile为奇数：红球围绕蓝球旋转
+              this.planetBPosition = { x: cx + 1, y: cy } // 蓝球位置不变
+              this.planetB.position.set(cx + 1, cy, 1)
+              
+              // 红球旋转
+              this.planetRPosition = {
+                x: cx + 1 + radius * Math.cos(currentAngleRad),
+                y: cy + radius * Math.sin(currentAngleRad)
+              }
+              this.planetR.position.set(this.planetRPosition.x, this.planetRPosition.y, 1)
+            } else {
+              // curTile为偶数：蓝球围绕红球旋转
+              this.planetRPosition = { x: cx + 1, y: cy } // 红球位置不变
+              this.planetR.position.set(cx + 1, cy, 1)
+              
+              // 蓝球旋转
+              this.planetBPosition = {
+                x: cx + 1 + radius * Math.cos(currentAngleRad),
+                y: cy + radius * Math.sin(currentAngleRad)
+              }
+              this.planetB.position.set(this.planetBPosition.x, this.planetBPosition.y, 1)
+            }
+          }
+        }
+      }
+    }
+    
+    // 平滑移动相机
+    const lerpFactor = 0.15
+    this.cameraPosition.x += (this.cameraTargetPosition.x - this.cameraPosition.x) * lerpFactor
+    this.cameraPosition.y += (this.cameraTargetPosition.y - this.cameraPosition.y) * lerpFactor
+    this.updateCamera()
   }
 
   private removeEventListeners(): void {
@@ -614,8 +489,9 @@ class Previewer {
     }
 
     window.removeEventListener("resize", this.boundEventHandlers.windowResize)
-    window.removeEventListener("keydown", this.boundEventHandlers.keyDown)
   }
+
+
 
   private cleanupThreeJS(): void {
     // 清理所有tile meshes
@@ -802,15 +678,12 @@ class Previewer {
     // 窗口大小调整
     window.addEventListener("resize", this.boundEventHandlers.windowResize)
 
-    // 键盘事件
-    window.addEventListener("keydown", this.boundEventHandlers.keyDown)
-
     // 防止右键菜单
     this.renderer!.domElement.addEventListener("contextmenu", this.boundEventHandlers.contextMenu)
   }
 
   private onMouseDown(event: MouseEvent): void {
-    if (this.isDisposed || this.playbackState === PlaybackState.PLAYING) return
+    if (this.isDisposed) return
     this.isDragging = true
     this.previousMousePosition = {
       x: event.clientX,
@@ -819,7 +692,7 @@ class Previewer {
   }
 
   private onMouseMove(event: MouseEvent): void {
-    if (this.isDisposed || !this.isDragging || this.playbackState === PlaybackState.PLAYING) return
+    if (this.isDisposed || !this.isDragging) return
 
     const deltaX = event.clientX - this.previousMousePosition.x
     const deltaY = event.clientY - this.previousMousePosition.y
@@ -843,7 +716,7 @@ class Previewer {
   }
 
   private onWheel(event: WheelEvent): void {
-    if (this.isDisposed || this.playbackState === PlaybackState.PLAYING) return
+    if (this.isDisposed) return
     event.preventDefault()
 
     const zoomSpeed = 0.1
@@ -855,7 +728,7 @@ class Previewer {
 
   // 触摸事件处理
   private onTouchStart(event: TouchEvent): void {
-    if (this.isDisposed || this.playbackState === PlaybackState.PLAYING) return
+    if (this.isDisposed) return
     if (event.touches.length === 1) {
       this.isDragging = true
       this.previousMousePosition = {
@@ -869,7 +742,7 @@ class Previewer {
   }
 
   private onTouchMove(event: TouchEvent): void {
-    if (this.isDisposed || this.playbackState === PlaybackState.PLAYING) return
+    if (this.isDisposed) return
     event.preventDefault()
 
     if (event.touches.length === 1 && this.isDragging) {
@@ -922,13 +795,11 @@ class Previewer {
     this.camera.bottom = frustumSize / -2
     this.camera.updateProjectionMatrix()
 
-    if (this.playbackState === PlaybackState.HOLDING) {
-      this.updateVisibleTiles()
-    }
+    this.updateVisibleTiles()
   }
 
   private updateVisibleTiles(): void {
-    if (this.isDisposed || !this.scene || this.playbackState === PlaybackState.PLAYING) return
+    if (this.isDisposed || !this.scene) return
     // 计算摄像机能看到的范围 - 使用容器尺寸
     const containerSize = this.getContainerSize()
     const aspect = containerSize.width / containerSize.height
@@ -982,7 +853,8 @@ class Previewer {
       } else {
         // 计算层级（第一个砖块层级12，后续递减）
         const zLevel = 12 - Number.parseInt(id)
-        const materialIndex = Number.parseInt(id) % this.tileMaterials!.length
+        // 修正纹理索引：使用0-based索引 (id - 1)
+        const materialIndex = (Number.parseInt(id) - 1) % this.tileMaterials!.length
 
         let pred = (this.adofaiFile.tiles[Number.parseInt(id) - 1]?.direction || 0) - 180
         if (this.adofaiFile.tiles[Number.parseInt(id) - 1]?.direction == 999) {
@@ -1003,7 +875,7 @@ class Previewer {
         mesh.computeVertexNormals();
 
         tileMesh = new THREE.Mesh(mesh, this.tileMaterials![materialIndex])
-        tileMesh.position.set(x, y, zLevel * 0.01) // 微小的z差异来实现层级
+        tileMesh.position.set(x, y, zLevel * 0.01) // 移除 +1 偏移，使用正确的位置
         tileMesh.castShadow = true
         tileMesh.receiveShadow = true
 
@@ -1021,14 +893,14 @@ class Previewer {
     const currentTime = performance.now()
 
     // 每0.5秒更新一次FPS显示
-    if (currentTime - this.lastTime >= 500) {
-      this.fps = (this.frameCount * 1000) / (currentTime - this.lastTime)
-      if (this.fpsCounter && this.playbackState === PlaybackState.HOLDING) {
+    if (currentTime - this.fpsUpdateTime >= 500) {
+      this.fps = (this.frameCount * 1000) / (currentTime - this.fpsUpdateTime)
+      if (this.fpsCounter) {
         this.fpsCounter.textContent = `FPS  ${this.fps.toFixed(2)}`
       }
 
-      // 更新信息显示
-      if (this.info && this.playbackState === PlaybackState.HOLDING) {
+      // 更新信息显示（在任何状态下都更新）
+      if (this.info) {
         this.info.innerHTML = `
                     <div>${this.t("editor.info.cameraPosition")} (${this.cameraPosition.x.toFixed(2)}, ${this.cameraPosition.y.toFixed(2)})</div>
                     <div>${this.t("editor.info.zoom")} ${this.zoom.toFixed(2)}</div>
@@ -1038,7 +910,7 @@ class Previewer {
       }
 
       this.frameCount = 0
-      this.lastTime = currentTime
+      this.fpsUpdateTime = currentTime
     }
   }
 
@@ -1057,9 +929,7 @@ class Previewer {
 
     this.renderer.setSize(containerSize.width, containerSize.height)
 
-    if (this.playbackState === PlaybackState.HOLDING) {
-      this.updateVisibleTiles()
-    }
+    this.updateVisibleTiles()
   }
 
   // 替换 animate 方法：
@@ -1071,34 +941,14 @@ class Previewer {
     const currentTime = performance.now()
     const deltaTime = currentTime - this.lastTime
 
-    // 更新星球位置
-    if (this.playbackState === PlaybackState.PLAYING) {
-      this.updatePlanets(deltaTime)
-    }
-
     this.updateFPS()
 
     if (this.renderer && this.scene && this.camera) {
       this.renderer.render(this.scene, this.camera)
     }
 
-    // 更新lastTime用于下一帧
+    // 更新lastTime用于下一帧的deltaTime计算
     this.lastTime = currentTime
-  }
-
-  // 替换 clearPlanets 方法：
-  private clearPlanets(): void {
-    this.planets.forEach((planet) => {
-      if (this.scene) {
-        this.scene.remove(planet.mesh)
-      }
-      planet.mesh.geometry.dispose()
-      if (planet.mesh.material instanceof THREE.Material) {
-        planet.mesh.material.dispose()
-      }
-    })
-    this.planets = []
-    this.clearParticles()
   }
 }
 
@@ -1108,14 +958,46 @@ export default function EditorPage(): JSX.Element {
   const fpsCounterRef = useRef<HTMLDivElement>(null)
   const infoRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
-  const previewerRef = useRef<Previewer | null>(null)
+  const audioInputRef = useRef<HTMLInputElement>(null)
+  const previewerRef = useRef<Player | null>(null)
   const [isLoading, setIsLoading] = useState<boolean>(false)
   const [adofaiFile, setAdofaiFile] = useState<any>(null)
   const [mounted, setMounted] = useState(false)
   const [themeReady, setThemeReady] = useState(false)
-  const [playbackState, setPlaybackState] = useState<PlaybackState>(PlaybackState.HOLDING)
+  const [playMode, setPlayMode] = useState<"preview" | "play" | "pause">("preview")
+  const [playModeActive, setPlayModeActive] = useState(false)
   const { theme, resolvedTheme } = useTheme()
   const { t, mounted: i18nMounted } = useI18n()
+  const { settings } = useAppSettings()
+
+  // 播放功能
+  const handlePlay = useCallback((): void => {
+    if (!adofaiFile) {
+      window.showNotification?.("error", t("editor.notifications.noFileToPlay"))
+      return
+    }
+
+    if (playMode === "preview") {
+      setPlayMode("play")
+      setPlayModeActive(true)
+      previewerRef.current?.startPlay()
+    } else if (playMode === "play") {
+      setPlayMode("pause")
+      previewerRef.current?.pausePlay()
+    } else if (playMode === "pause") {
+      setPlayMode("play")
+      previewerRef.current?.resumePlay()
+    }
+  }, [adofaiFile, playMode, t])
+
+  // 退出播放模式
+  const handleExitPlayMode = useCallback((): void => {
+    setPlayMode("preview")
+    setPlayModeActive(false)
+    previewerRef.current?.stopPlay()
+  }, [])
+
+  // 主题处理
 
   // 确保组件和主题都已挂载
   useEffect(() => {
@@ -1138,19 +1020,6 @@ export default function EditorPage(): JSX.Element {
       return () => clearTimeout(timer)
     }
   }, [mounted, resolvedTheme])
-
-  // 播放状态变化回调
-  const handlePlaybackStateChange = useCallback((state: PlaybackState) => {
-    setPlaybackState(state)
-  }, [])
-
-  // 播放/暂停切换
-  const togglePlayback = useCallback(() => {
-    if (previewerRef.current) {
-      const newState = playbackState === PlaybackState.HOLDING ? PlaybackState.PLAYING : PlaybackState.HOLDING
-      previewerRef.current.setPlaybackState(newState)
-    }
-  }, [playbackState])
 
   // 导出文件功能
   const handleExport = useCallback((): void => {
@@ -1177,6 +1046,8 @@ export default function EditorPage(): JSX.Element {
     }
   }, [adofaiFile, t])
 
+
+
   // 文件加载处理
   const handleFileLoad = useCallback(
     (event: React.ChangeEvent<HTMLInputElement>): void => {
@@ -1194,26 +1065,39 @@ export default function EditorPage(): JSX.Element {
           const level = new ADOFAI.Level(content, Hjson)
 
           level.on("load", (loadedLevel: any): void => {
-            loadedLevel.calculateTileCoordinates()
+            loadedLevel.calculateTilePosition()
             setAdofaiFile(loadedLevel)
 
-            // 关键修改：在创建新的Previewer之前，先清理旧的
+            // Clean up old Player
             if (previewerRef.current) {
-              console.log("Disposing old Previewer...")
-              previewerRef.current.dispose()
+              console.log("Disposing old Player...")
+              previewerRef.current.destroyPlayer()
               previewerRef.current = null
             }
 
-            // 创建新的Previewer
+            // Create new Player
             if (containerRef.current && fpsCounterRef.current && infoRef.current) {
-              previewerRef.current = new Previewer(
-                loadedLevel,
-                containerRef.current,
-                fpsCounterRef.current,
-                infoRef.current,
-                t,
-                handlePlaybackStateChange,
-              )
+              const player = new Player(loadedLevel as ILevelData)
+              player.createPlayer(containerRef.current)
+              player.setRenderer(settings.renderer)
+              
+              player.setStatsCallback((stats) => {
+                if (fpsCounterRef.current) {
+                  fpsCounterRef.current.textContent = `FPS  ${stats.fps.toFixed(2)}`
+                }
+                if (infoRef.current) {
+                  const bpm = loadedLevel.settings?.bpm || 0
+                  infoRef.current.innerHTML = `
+                    <div class="space-y-1">
+                      <div>Time: ${(stats.time / 1000).toFixed(2)}s</div>
+                      <div>Tile: ${stats.tileIndex} / ${loadedLevel.tiles?.length || 0}</div>
+                      <div>BPM: ${bpm}</div>
+                    </div>
+                  `
+                }
+              })
+              
+              previewerRef.current = player
             }
             window.showNotification?.("success", t("editor.notifications.loadSuccess"))
           })
@@ -1234,8 +1118,33 @@ export default function EditorPage(): JSX.Element {
 
       reader.readAsText(file)
     },
-    [t, handlePlaybackStateChange],
+    [t],
   )
+
+  // 音频加载处理
+  const handleAudioLoad = useCallback(
+    (event: React.ChangeEvent<HTMLInputElement>): void => {
+      const file = event.target.files?.[0]
+      if (!file) return
+
+      const url = URL.createObjectURL(file)
+      
+      if (previewerRef.current) {
+          previewerRef.current.loadMusic(url)
+          window.showNotification?.("success", "Audio loaded successfully")
+      } else {
+          window.showNotification?.("warning", "Please load a level first")
+      }
+    },
+    []
+  )
+
+  // 监听渲染器设置变化
+  useEffect(() => {
+    if (previewerRef.current && settings.renderer) {
+      previewerRef.current.setRenderer(settings.renderer)
+    }
+  }, [settings.renderer])
 
   // 键盘快捷键
   useEffect(() => {
@@ -1243,12 +1152,18 @@ export default function EditorPage(): JSX.Element {
       if (e.ctrlKey && e.key.toLowerCase() === "o") {
         e.preventDefault()
         fileInputRef.current?.click()
+      } else if (e.code === "Space" && playModeActive) {
+        e.preventDefault()
+        handlePlay()
+      } else if (e.code === "Escape" && playModeActive) {
+        e.preventDefault()
+        handleExitPlayMode()
       }
     }
 
     window.addEventListener("keydown", handleKeyDown)
     return () => window.removeEventListener("keydown", handleKeyDown)
-  }, [])
+  }, [playModeActive, handlePlay, handleExitPlayMode])
 
   // 初始化示例数据
   useEffect(() => {
@@ -1258,24 +1173,37 @@ export default function EditorPage(): JSX.Element {
       try {
         const level = new ADOFAI.Level(example, Hjson)
         level.on("load", (loadedLevel: any): void => {
-          loadedLevel.calculateTileCoordinates()
+          loadedLevel.calculateTilePosition()
           setAdofaiFile(loadedLevel)
 
           if (previewerRef.current) {
-            console.log("Disposing old Previewer...")
-            previewerRef.current.dispose()
+            console.log("Disposing old Player...")
+            previewerRef.current.destroyPlayer()
             previewerRef.current = null
           }
 
           if (containerRef.current && fpsCounterRef.current && infoRef.current) {
-            previewerRef.current = new Previewer(
-              loadedLevel,
-              containerRef.current,
-              fpsCounterRef.current,
-              infoRef.current,
-              t,
-              handlePlaybackStateChange,
-            )
+            const player = new Player(loadedLevel as ILevelData)
+            player.createPlayer(containerRef.current)
+            player.setRenderer(settings.renderer)
+            
+            player.setStatsCallback((stats) => {
+              if (fpsCounterRef.current) {
+                fpsCounterRef.current.textContent = `FPS  ${stats.fps.toFixed(2)}`
+              }
+              if (infoRef.current) {
+                const bpm = loadedLevel.settings?.bpm || 0
+                infoRef.current.innerHTML = `
+                  <div class="space-y-1">
+                    <div>Time: ${(stats.time / 1000).toFixed(2)}s</div>
+                    <div>Tile: ${stats.tileIndex} / ${loadedLevel.tiles?.length || 0}</div>
+                    <div>BPM: ${bpm}</div>
+                  </div>
+                `
+              }
+            })
+            
+            previewerRef.current = player
           }
           window.showNotification?.("success", t("editor.notifications.loadSuccess"))
         })
@@ -1288,7 +1216,7 @@ export default function EditorPage(): JSX.Element {
     }
 
     initializeExample()
-  }, [mounted, i18nMounted, themeReady, t, handlePlaybackStateChange])
+  }, [mounted, i18nMounted, themeReady, t])
 
   // 监听窗口大小变化，触发Previewer的resize
   useEffect(() => {
@@ -1309,7 +1237,7 @@ export default function EditorPage(): JSX.Element {
   useEffect(() => {
     const handleBeforeUnload = (): void => {
       if (previewerRef.current) {
-        previewerRef.current.dispose()
+        previewerRef.current.destroyPlayer()
       }
     }
 
@@ -1317,7 +1245,7 @@ export default function EditorPage(): JSX.Element {
     return () => {
       window.removeEventListener("beforeunload", handleBeforeUnload)
       if (previewerRef.current) {
-        previewerRef.current.dispose()
+        previewerRef.current.destroyPlayer()
       }
     }
   }, [])
@@ -1339,13 +1267,12 @@ export default function EditorPage(): JSX.Element {
     <div className={`h-screen ${isDark ? "bg-slate-900" : "bg-slate-50"} flex flex-col overflow-hidden`}>
       <NotificationSystem />
 
-      {/* Header - 只在 holding 状态显示 */}
-      {playbackState === PlaybackState.HOLDING && (
-        <header
-          className={`${
-            isDark ? "bg-slate-800 border-slate-700" : "bg-white border-slate-200"
-          } border-b px-4 py-3 flex justify-between items-center flex-shrink-0`}
-        >
+      {/* Header */}
+      <header
+        className={`${
+          isDark ? "bg-slate-800 border-slate-700" : "bg-white border-slate-200"
+        } border-b px-4 py-3 flex justify-between items-center flex-shrink-0`}
+      >
           <div className="flex items-center gap-4">
             <Link to="/">
               <Button
@@ -1366,9 +1293,10 @@ export default function EditorPage(): JSX.Element {
 
           <div className="flex items-center gap-2">
             <input ref={fileInputRef} type="file" accept=".adofai,.json" onChange={handleFileLoad} className="hidden" />
+            <input ref={audioInputRef} type="file" accept="audio/*" onChange={handleAudioLoad} className="hidden" />
             <Button
               variant="ghost"
-              size="sm"
+              size="icon"
               className={`${
                 isDark
                   ? "text-slate-300 hover:text-white hover:bg-slate-700"
@@ -1377,13 +1305,27 @@ export default function EditorPage(): JSX.Element {
               onClick={() => fileInputRef.current?.click()}
               disabled={isLoading}
               id="butload"
+              title={isLoading ? t("common.loading") : t("editor.loadFile")}
             >
-              <Upload className="w-4 h-4 mr-2" />
-              {isLoading ? t("common.loading") : t("editor.loadFile")}
+              <Upload className="w-4 h-4" />
             </Button>
             <Button
               variant="ghost"
-              size="sm"
+              size="icon"
+              className={`${
+                isDark
+                  ? "text-slate-300 hover:text-white hover:bg-slate-700"
+                  : "text-slate-700 hover:text-slate-900 hover:bg-slate-100"
+              }`}
+              onClick={() => audioInputRef.current?.click()}
+              disabled={!adofaiFile}
+              title="Load Music"
+            >
+              <Music className="w-4 h-4" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
               className={`${
                 isDark
                   ? "text-slate-300 hover:text-white hover:bg-slate-700"
@@ -1391,48 +1333,47 @@ export default function EditorPage(): JSX.Element {
               }`}
               onClick={handleExport}
               disabled={!adofaiFile}
+              title={t("editor.export")}
             >
-              <Download className="w-4 h-4 mr-2" />
-              {t("editor.export")}
+              <Download className="w-4 h-4" />
             </Button>
             <Button
               variant="ghost"
-              size="sm"
+              size="icon"
               className={`${
                 isDark
                   ? "text-slate-300 hover:text-white hover:bg-slate-700"
                   : "text-slate-700 hover:text-slate-900 hover:bg-slate-100"
               }`}
+              title={t("editor.save")}
             >
-              <Save className="w-4 h-4 mr-2" />
-              {t("editor.save")}
+              <Save className="w-4 h-4" />
             </Button>
             <Link to="/settings">
               <Button
                 variant="ghost"
-                size="sm"
+                size="icon"
                 className={`${
                   isDark
                     ? "text-slate-300 hover:text-white hover:bg-slate-700"
                     : "text-slate-700 hover:text-slate-900 hover:bg-slate-100"
                 }`}
+                title={t("common.settings")}
               >
                 <Settings className="w-4 h-4" />
               </Button>
             </Link>
           </div>
         </header>
-      )}
 
       {/* Main Editor Area */}
       <div className="flex-1 flex overflow-hidden">
-        {/* Sidebar - 只在 holding 状态显示 */}
-        {playbackState === PlaybackState.HOLDING && (
-          <aside
-            className={`w-64 ${
-              isDark ? "bg-slate-800 border-slate-700" : "bg-white border-slate-200"
-            } border-r p-4 flex-shrink-0 overflow-y-auto`}
-          >
+        {/* Sidebar */}
+        <aside
+          className={`w-64 ${
+            isDark ? "bg-slate-800 border-slate-700" : "bg-white border-slate-200"
+          } border-r p-4 flex-shrink-0 overflow-y-auto`}
+        >
             <div className="space-y-4">
               <div>
                 <h3 className={`text-sm font-medium ${isDark ? "text-slate-300" : "text-slate-700"} mb-2`}>
@@ -1456,56 +1397,59 @@ export default function EditorPage(): JSX.Element {
                 <h3 className={`text-sm font-medium ${isDark ? "text-slate-300" : "text-slate-700"} mb-2`}>
                   {t("editor.tools")}
                 </h3>
-                <div className="grid grid-cols-2 gap-2">
+                <div className="grid grid-cols-4 gap-2">
                   <Button
                     variant="outline"
-                    size="sm"
+                    size="icon"
                     className={`${
                       isDark
                         ? "border-slate-600 text-slate-300 hover:bg-slate-700 hover:text-white"
                         : "border-slate-300 text-slate-700 hover:bg-slate-50 hover:text-slate-900"
                     } bg-transparent`}
+                    title={t("editor.select")}
                   >
-                    {t("editor.select")}
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 3l7.07 16.97 2.51-7.39 7.39-2.51L3 3z"/><path d="M13 13l6 6"/></svg>
                   </Button>
                   <Button
                     variant="outline"
-                    size="sm"
+                    size="icon"
                     className={`${
                       isDark
                         ? "border-slate-600 text-slate-300 hover:bg-slate-700 hover:text-white"
                         : "border-slate-300 text-slate-700 hover:bg-slate-50 hover:text-slate-900"
                     } bg-transparent`}
+                    title={t("editor.move")}
                   >
-                    {t("editor.move")}
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M5 9l-3 3 3 3M9 5l3-3 3 3M19 9l3 3-3 3M15 19l-3 3-3-3M2 12h20M12 2v20"/></svg>
                   </Button>
                   <Button
                     variant="outline"
-                    size="sm"
+                    size="icon"
                     className={`${
                       isDark
                         ? "border-slate-600 text-slate-300 hover:bg-slate-700 hover:text-white"
                         : "border-slate-300 text-slate-700 hover:bg-slate-50 hover:text-slate-900"
                     } bg-transparent`}
+                    title={t("editor.addTile")}
                   >
-                    {t("editor.addTile")}
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14M12 5v14"/></svg>
                   </Button>
                   <Button
                     variant="outline"
-                    size="sm"
+                    size="icon"
                     className={`${
                       isDark
                         ? "border-slate-600 text-slate-300 hover:bg-slate-700 hover:text-white"
                         : "border-slate-300 text-slate-700 hover:bg-slate-50 hover:text-slate-900"
                     } bg-transparent`}
+                    title={t("editor.removeTile")}
                   >
-                    {t("editor.removeTile")}
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14"/></svg>
                   </Button>
                 </div>
               </div>
             </div>
           </aside>
-        )}
 
         {/* Main Canvas Area */}
         <div ref={containerRef} className="flex-1 relative">
@@ -1521,6 +1465,41 @@ export default function EditorPage(): JSX.Element {
           >
             {/* Info will be updated dynamically */}
           </div>
+          {playModeActive && (
+            <Button
+              variant="outline"
+              size="icon"
+              className={`absolute top-4 right-20 ${
+                isDark
+                  ? "border-slate-600 text-slate-300 hover:bg-slate-700 hover:text-white"
+                  : "border-slate-300 text-slate-700 hover:bg-slate-50 hover:text-slate-900"
+              } bg-transparent`}
+              title={t("editor.exitPlayMode")}
+              onClick={handleExitPlayMode}
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><path d="M9 9l6 6M15 9l-6 6"/></svg>
+            </Button>
+          )}
+          <Button
+            variant="outline"
+            size="icon"
+            className={`absolute bottom-4 left-4 ${
+              isDark
+                ? "border-slate-600 text-slate-300 hover:bg-slate-700 hover:text-white"
+                : "border-slate-300 text-slate-700 hover:bg-slate-50 hover:text-slate-900"
+            } bg-transparent`}
+            title={playMode === "play" ? t("editor.pause"): t("editor.play")}
+            id="play-button"
+            onClick={handlePlay}
+          >
+            {playMode === "play" ? (
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+            ) : (
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+            )}
+          </Button>
+
+
         </div>
       </div>
     </div>

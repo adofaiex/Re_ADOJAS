@@ -34,9 +34,11 @@ export const translations = {
       select: "选择",
       move: "移动",
       addTile: "添加砖块",
+      removeTile: "删除砖块",
       playback: "播放",
       play: "播放",
       pause: "暂停",
+      exitPlayMode: "退出播放模式",
       controls: {
         pan: "左键拖拽：平移",
         zoom: "滚轮：缩放",
@@ -48,6 +50,7 @@ export const translations = {
         exportSuccess: "文件导出成功!",
         exportError: "文件导出失败!",
         noFileToExport: "没有可导出的文件!",
+        noFileToPlay: "没有可播放的文件!",
         fileReadError: "文件读取失败!",
       },
       info: {
@@ -120,9 +123,11 @@ export const translations = {
       select: "Select",
       move: "Move",
       addTile: "Add Tile",
+      removeTile: "Remove Tile",
       playback: "Playback",
       play: "Play",
       pause: "Pause",
+      exitPlayMode: "Exit Play Mode",
       controls: {
         pan: "Left Click + Drag: Pan",
         zoom: "Scroll: Zoom",
@@ -134,6 +139,7 @@ export const translations = {
         exportSuccess: "File exported successfully!",
         exportError: "Failed to export file!",
         noFileToExport: "No file to export!",
+        noFileToPlay: "No file to play!",
         fileReadError: "Failed to read file!",
       },
       info: {
@@ -206,9 +212,11 @@ export const translations = {
       select: "選択",
       move: "移動",
       addTile: "タイル追加",
+      removeTile: "タイル削除",
       playback: "再生",
       play: "再生",
       pause: "一時停止",
+      exitPlayMode: "再生モードを終了",
       controls: {
         pan: "左クリック + ドラッグ：パン",
         zoom: "スクロール：ズーム",
@@ -220,6 +228,7 @@ export const translations = {
         exportSuccess: "ファイルのエクスポートに成功しました！",
         exportError: "ファイルのエクスポートに失敗しました！",
         noFileToExport: "エクスポートするファイルがありません！",
+        noFileToPlay: "再生するファイルがありません！",
         fileReadError: "ファイルの読み取りに失敗しました！",
       },
       info: {

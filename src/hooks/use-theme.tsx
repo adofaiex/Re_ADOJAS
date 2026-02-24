@@ -98,10 +98,6 @@ export function ThemeProvider({
     resolvedTheme,
   }
 
-  if (!mounted) {
-    return <>{children}</>
-  }
-
   return <ThemeProviderContext.Provider value={value}>{children}</ThemeProviderContext.Provider>
 }
 

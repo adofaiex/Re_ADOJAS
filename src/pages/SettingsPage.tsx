@@ -11,12 +11,14 @@ import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { ArrowLeft, Search, Monitor, Sun, Moon, Globe } from "lucide-react"
 import { locales, localeNames, type Locale } from "@/lib/i18n/config"
+import { useAppSettings } from "@/hooks/use-app-settings"
 
 export default function SettingsPage() {
   const [searchQuery, setSearchQuery] = useState("")
   const [isClient, setIsClient] = useState(false)
   const { theme, setTheme } = useTheme()
   const { locale, setLocale, t, mounted } = useI18n()
+  const { settings, updateSettings } = useAppSettings()
 
   useEffect(() => {
     setIsClient(true)
@@ -48,6 +50,12 @@ export default function SettingsPage() {
           title: t("settings.language.title"),
           description: t("settings.language.description"),
           type: "language",
+        },
+        {
+          id: "renderer",
+          title: "Renderer",
+          description: "Select the graphics renderer backend.",
+          type: "renderer",
         },
       ],
     },
@@ -168,6 +176,34 @@ export default function SettingsPage() {
                             </div>
                           </SelectItem>
                         ))}
+                      </SelectContent>
+                    </Select>
+                  )}
+
+                  {setting.type === "renderer" && (
+                    <Select value={settings.renderer} onValueChange={(value: any) => updateSettings({ renderer: value })}>
+                      <SelectTrigger className="bg-white dark:bg-slate-700 border-slate-200 dark:border-slate-600 text-slate-900 dark:text-white w-full sm:w-48 hover:bg-slate-50 dark:hover:bg-slate-600 focus:border-purple-500 dark:focus:border-purple-400 focus:ring-purple-500/20 dark:focus:ring-purple-400/20">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent className="bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 shadow-lg dark:shadow-slate-900/50">
+                        <SelectItem
+                          value="webgl"
+                          className="text-slate-900 dark:text-white hover:bg-slate-100 dark:hover:bg-slate-700 focus:bg-slate-100 dark:focus:bg-slate-700 cursor-pointer"
+                        >
+                          <div className="flex items-center gap-2">
+                            <Monitor className="w-4 h-4" />
+                            WebGL (Default)
+                          </div>
+                        </SelectItem>
+                        <SelectItem
+                          value="webgpu"
+                          className="text-slate-900 dark:text-white hover:bg-slate-100 dark:hover:bg-slate-700 focus:bg-slate-100 dark:focus:bg-slate-700 cursor-pointer"
+                        >
+                          <div className="flex items-center gap-2">
+                            <Monitor className="w-4 h-4" />
+                            WebGPU (Experimental)
+                          </div>
+                        </SelectItem>
                       </SelectContent>
                     </Select>
                   )}
