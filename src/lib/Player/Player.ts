@@ -1,8 +1,9 @@
 import * as THREE from 'three';
 import {WebGPURenderer} from 'three/webgpu';
-import { IPlayer, ILevelData, IMusic } from './types';
+import { IPlayer, ILevelData, IMusic, TargetFramerateType } from './types';
 import { Planet } from './Planet';
 import createTrackMesh from '../Geo/mesh_reserve';
+import { getWorkerManager, disposeWorkerManager } from '../Geo/tileWorkerManager';
 
 // Easing Functions
 const EasingFunctions: { [key: string]: (t: number) => number } = {
@@ -136,7 +137,11 @@ export class Player implements IPlayer {
   private rendererType: 'webgl' | 'webgpu' = 'webgpu';
   private renderMethod: 'sync' | 'async' = 'sync';
   private showTrail: boolean = false;
+  private useWorker: boolean = true;
+  private targetFramerate: TargetFramerateType = 'auto';
   private animationId: number | null = null;
+  private lastFrameTime: number = 0;
+  private frameInterval: number = 0; // milliseconds between frames
   
   private levelData: ILevelData;
   private planetRed: Planet | null = null;
@@ -148,6 +153,16 @@ export class Player implements IPlayer {
   private visibleTiles: Set<string> = new Set();
   private tileMaterials: THREE.MeshBasicMaterial[] = [];
   private tileLimit: number = 0; // 0 means no limit? Or use a sensible default
+  
+  // Spatial indexing for fast visibility checks
+  private spatialGrid: Map<number, number[]> = new Map();
+  private spatialGridSize: number = 5; // Grid cell size in world units
+  
+  // Shared decoration geometries and materials (prevent creating new ones for each tile)
+  private sharedDecoGeometry: THREE.CircleGeometry | null = null;
+  private sharedTwirlMaterial: THREE.MeshBasicMaterial | null = null;
+  private sharedSpeedUpMaterial: THREE.MeshBasicMaterial | null = null;
+  private sharedSpeedDownMaterial: THREE.MeshBasicMaterial | null = null;
   
   // Playback state
   private isPlaying: boolean = false;
@@ -280,6 +295,31 @@ export class Player implements IPlayer {
     this.initRenderer();
     
     this.tileMaterials = this.createTileMaterials();
+    
+    // Build spatial index for fast visibility checks
+    this.buildSpatialIndex();
+  }
+  
+  /**
+   * Build spatial index for fast visibility checks
+   * Groups tiles into grid cells for O(1) lookup
+   */
+  private buildSpatialIndex(): void {
+    this.spatialGrid.clear();
+    const tiles = this.levelData.tiles;
+    if (!tiles) return;
+    
+    for (let i = 0; i < tiles.length; i++) {
+      const [x, y] = tiles[i].position;
+      const cellX = Math.floor(x / this.spatialGridSize);
+      const cellY = Math.floor(y / this.spatialGridSize);
+      const key = cellX * 100000 + cellY; // Use number key for faster lookup
+      
+      if (!this.spatialGrid.has(key)) {
+        this.spatialGrid.set(key, []);
+      }
+      this.spatialGrid.get(key)!.push(i);
+    }
   }
   
   private appendExtraTile(): void {
@@ -528,6 +568,38 @@ export class Player implements IPlayer {
     }
   }
 
+  public setUseWorker(use: boolean): void {
+    this.useWorker = use;
+    const workerManager = getWorkerManager();
+    workerManager.setEnabled(use);
+  }
+
+  public setTargetFramerate(framerate: TargetFramerateType): void {
+    this.targetFramerate = framerate;
+    this.updateFrameInterval();
+  }
+
+  private updateFrameInterval(): void {
+    if (this.targetFramerate === 'auto') {
+      // Use monitor refresh rate (no limiting)
+      this.frameInterval = 0;
+    } else if (this.targetFramerate === 'unlimited') {
+      this.frameInterval = 0;
+    } else {
+      const fps = parseInt(this.targetFramerate, 10);
+      this.frameInterval = 1000 / fps; // milliseconds per frame
+    }
+  }
+
+  private getRefreshRate(): number {
+    // Try to get the refresh rate from the display
+    if (typeof window !== 'undefined') {
+      // Most common refresh rates
+      return 60; // Default fallback
+    }
+    return 60;
+  }
+
   public createPlayer(container: HTMLElement): void {
     this.container = container;
     // Append current renderer element
@@ -721,6 +793,15 @@ export class Player implements IPlayer {
 
     const animate = (time: number) => {
       this.animationId = requestAnimationFrame(animate);
+      
+      // Frame rate limiting
+      if (this.frameInterval > 0) {
+        const elapsed = time - this.lastFrameTime;
+        if (elapsed < this.frameInterval) {
+          return; // Skip this frame
+        }
+        this.lastFrameTime = time - (elapsed % this.frameInterval);
+      }
       
       const delta = (time - lastTime) / 1000;
       lastTime = time;
@@ -1023,6 +1104,38 @@ export class Player implements IPlayer {
     
     this.removeEventListeners();
     
+    // Clean up all tiles and their geometries
+    this.tiles.forEach((mesh) => {
+      mesh.geometry.dispose();
+      mesh.children.length = 0;
+    });
+    this.tiles.clear();
+    this.visibleTiles.clear();
+    
+    // Clean up shared decoration resources
+    if (this.sharedDecoGeometry) {
+      this.sharedDecoGeometry.dispose();
+      this.sharedDecoGeometry = null;
+    }
+    if (this.sharedTwirlMaterial) {
+      this.sharedTwirlMaterial.dispose();
+      this.sharedTwirlMaterial = null;
+    }
+    if (this.sharedSpeedUpMaterial) {
+      this.sharedSpeedUpMaterial.dispose();
+      this.sharedSpeedUpMaterial = null;
+    }
+    if (this.sharedSpeedDownMaterial) {
+      this.sharedSpeedDownMaterial.dispose();
+      this.sharedSpeedDownMaterial = null;
+    }
+    
+    // Clean up tile materials
+    this.tileMaterials.forEach(m => m.dispose());
+    
+    // Clean up spatial grid
+    this.spatialGrid.clear();
+    
     if (this.container && this.renderer.domElement && this.renderer.domElement.parentNode === this.container) {
       this.container.removeChild(this.renderer.domElement);
     }
@@ -1119,7 +1232,26 @@ export class Player implements IPlayer {
       materials.push(m);
     });
 
+    // Initialize shared decoration resources
+    this.initSharedDecorationResources();
+
     return materials;
+  }
+
+  /**
+   * Initialize shared decoration geometries and materials
+   * This prevents creating new objects for each tile
+   */
+  private initSharedDecorationResources(): void {
+    const decoSize = 0.275 * 0.8;
+    
+    // Shared circle geometry for decorations
+    this.sharedDecoGeometry = new THREE.CircleGeometry(decoSize / 2, 16); // Reduced segments for performance
+    
+    // Shared materials
+    this.sharedTwirlMaterial = new THREE.MeshBasicMaterial({ color: 0x800080 });
+    this.sharedSpeedUpMaterial = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+    this.sharedSpeedDownMaterial = new THREE.MeshBasicMaterial({ color: 0x0000ff });
   }
 
   private lastVisibleCheckPos = new THREE.Vector3(Infinity, Infinity, Infinity);
@@ -1146,65 +1278,87 @@ export class Player implements IPlayer {
     const top = this.cameraPosition.y + this.camera.top / zoom;
     
     const margin = 2.0;
-    const newVisibleTiles = new Set<string>();
+    const newVisibleTiles: number[] = [];
 
-    // Optimization: Search around currentTileIndex first
-    const tiles = this.levelData.tiles;
-    const startIndex = this.currentTileIndex;
-    
-    // Check tiles forward
-     for (let i = startIndex; i < tiles.length; i++) {
-         const [x, y] = tiles[i].position;
-         if (x >= left - margin && x <= right + margin && y >= bottom - margin && y <= top + margin) {
-             newVisibleTiles.add(i.toString());
-         } else if (i > startIndex + 100) {
-             // Stop if we've checked 100 tiles past the current one and they're out of view
-             break;
-         }
-     }
-     
-     // Check tiles backward
-     for (let i = startIndex - 1; i >= 0; i--) {
-         const [x, y] = tiles[i].position;
-         if (x >= left - margin && x <= right + margin && y >= bottom - margin && y <= top + margin) {
-             newVisibleTiles.add(i.toString());
-         } else if (i < startIndex - 100) {
-             break;
-         }
-     }
-    
-    // Fallback: If no tiles found near player (e.g. camera is far away), check all tiles
-    // But this is rare during normal play.
-    if (newVisibleTiles.size === 0) {
-        tiles.forEach((tile, index) => {
-            const [x, y] = tile.position;
-            if (x >= left - margin && x <= right + margin && y >= bottom - margin && y <= top + margin) {
-                newVisibleTiles.add(index.toString());
-            }
-        });
+    // Use spatial indexing for fast lookup
+    const minCellX = Math.floor((left - margin) / this.spatialGridSize);
+    const maxCellX = Math.floor((right + margin) / this.spatialGridSize);
+    const minCellY = Math.floor((bottom - margin) / this.spatialGridSize);
+    const maxCellY = Math.floor((top + margin) / this.spatialGridSize);
+
+    // Iterate over grid cells in visible area
+    for (let cx = minCellX; cx <= maxCellX; cx++) {
+      for (let cy = minCellY; cy <= maxCellY; cy++) {
+        const tileIndices = this.spatialGrid.get(cx * 100000 + cy); // Use number key instead of string
+        if (tileIndices) {
+          for (let i = 0; i < tileIndices.length; i++) {
+            newVisibleTiles.push(tileIndices[i]);
+          }
+        }
+      }
     }
 
     // Add new tiles
-    newVisibleTiles.forEach(id => {
-        if (!this.visibleTiles.has(id)) {
-            const index = parseInt(id);
-            const tileMesh = this.getOrCreateTileMesh(index);
-            if (tileMesh) {
-                this.scene.add(tileMesh);
-                this.visibleTiles.add(id);
-            }
+    for (let i = 0; i < newVisibleTiles.length; i++) {
+      const idx = newVisibleTiles[i];
+      const id = idx.toString();
+      if (!this.visibleTiles.has(id)) {
+        const tileMesh = this.getOrCreateTileMesh(idx);
+        if (tileMesh) {
+          this.scene.add(tileMesh);
+          this.visibleTiles.add(id);
         }
-    });
+      }
+    }
 
-    // Remove old tiles
-    this.visibleTiles.forEach(id => {
-        if (!newVisibleTiles.has(id)) {
-            const mesh = this.tiles.get(id);
-            if (mesh) {
-                this.scene.remove(mesh);
-            }
-            this.visibleTiles.delete(id);
+    // Remove old tiles (only if we have too many visible)
+    if (this.visibleTiles.size > 200) {
+      const visibleArray = Array.from(this.visibleTiles);
+      for (let i = 0; i < visibleArray.length; i++) {
+        const id = visibleArray[i];
+        const idx = parseInt(id);
+        if (!newVisibleTiles.includes(idx)) {
+          const mesh = this.tiles.get(id);
+          if (mesh) {
+            this.scene.remove(mesh);
+          }
+          this.visibleTiles.delete(id);
         }
+      }
+    }
+  }
+
+  // Maximum tiles to keep in memory pool
+  private static readonly MAX_TILE_POOL = 500;
+
+  /**
+   * Removes tiles that are far from current position
+   */
+  private cleanupTilePool(): void {
+    if (this.tiles.size <= Player.MAX_TILE_POOL) return;
+    
+    const currentIdx = this.currentTileIndex;
+    const toRemove: string[] = [];
+    
+    // Find tiles far from current position
+    this.tiles.forEach((mesh, id) => {
+      const idx = parseInt(id);
+      // Remove tiles more than 1000 tiles away from current position
+      if (Math.abs(idx - currentIdx) > 500) {
+        toRemove.push(id);
+      }
+    });
+    
+    // Remove excess tiles (dispose geometry to free memory)
+    toRemove.forEach(id => {
+      const mesh = this.tiles.get(id);
+      if (mesh) {
+        mesh.geometry.dispose();
+        // Remove decorations - but DON'T dispose shared geometry/material
+        // Just clear the children array
+        mesh.children.length = 0;
+        this.tiles.delete(id);
+      }
     });
   }
 
@@ -1263,46 +1417,28 @@ export class Player implements IPlayer {
         });
     }
     
-    if (hasTwirl) {
-        const twirlGeo = new THREE.CircleGeometry(decoSize / 2, 32);
-        const twirlMat = new THREE.MeshBasicMaterial({ color: 0x800080 });
-        const twirlMesh = new THREE.Mesh(twirlGeo, twirlMat);
+    // Use shared geometry and materials for decorations (performance optimization)
+    if (hasTwirl && this.sharedDecoGeometry && this.sharedTwirlMaterial) {
+        const twirlMesh = new THREE.Mesh(this.sharedDecoGeometry, this.sharedTwirlMaterial);
         twirlMesh.position.set(0, 0, decoZ);
         tileMesh.add(twirlMesh);
     }
     
-    if (hasSetSpeed) {
+    if (hasSetSpeed && this.sharedDecoGeometry) {
         const currentBPM = this.tileBPM[index];
         const prevBPM = index > 0 ? this.tileBPM[index - 1] : (this.levelData.settings.bpm || 100);
         const ratio = currentBPM / prevBPM;
         
-        if (ratio > 1.05) {
-            const geo = new THREE.CircleGeometry(decoSize / 2, 32);
-            const mat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
-            const speedMesh = new THREE.Mesh(geo, mat);
+        if (ratio > 1.05 && this.sharedSpeedUpMaterial) {
+            const speedMesh = new THREE.Mesh(this.sharedDecoGeometry, this.sharedSpeedUpMaterial);
             speedMesh.position.set(0, 0, decoZ + (hasTwirl ? 0.001 : 0));
             tileMesh.add(speedMesh);
-        } else if (ratio < 0.95) {
-            const geo = new THREE.CircleGeometry(decoSize / 2, 32);
-            const mat = new THREE.MeshBasicMaterial({ color: 0x0000ff });
-            const speedMesh = new THREE.Mesh(geo, mat);
+        } else if (ratio < 0.95 && this.sharedSpeedDownMaterial) {
+            const speedMesh = new THREE.Mesh(this.sharedDecoGeometry, this.sharedSpeedDownMaterial);
             speedMesh.position.set(0, 0, decoZ + (hasTwirl ? 0.001 : 0));
             tileMesh.add(speedMesh);
-        } else if (Math.abs(ratio - 1.0) > 0.0001) {
-            const barWidth = decoSize * 0.8;
-            const barHeight = decoSize * 0.2;
-            const gap = decoSize * 0.1;
-            const group = new THREE.Group();
-            const mat = new THREE.MeshBasicMaterial({ color: 0xffffff });
-            const topBar = new THREE.Mesh(new THREE.PlaneGeometry(barWidth, barHeight), mat);
-            topBar.position.set(0, gap + barHeight/2, 0);
-            const botBar = new THREE.Mesh(new THREE.PlaneGeometry(barWidth, barHeight), mat);
-            botBar.position.set(0, -(gap + barHeight/2), 0);
-            group.add(topBar);
-            group.add(botBar);
-            group.position.set(0, 0, decoZ + (hasTwirl ? 0.001 : 0));
-            tileMesh.add(group);
         }
+        // Skip complex decoration for minor speed changes to improve performance
     }
     
     this.tiles.set(id, tileMesh);

@@ -1,5 +1,15 @@
 export const translations = {
   "zh-CN": {
+    // 加载
+    loading: {
+      title: "正在加载关卡",
+      parsingLevel: "正在解析关卡文件...",
+      calculatingTiles: "正在计算轨道位置...",
+      buildingScene: "正在构建场景...",
+      progress: "进度",
+      tip: "大型关卡可能需要较长时间加载，请耐心等待",
+      method: "加载方式",
+    },
     // 通用
     common: {
       home: "首页",
@@ -109,12 +119,41 @@ export const translations = {
         enabled: "已启用",
         disabled: "已禁用",
       },
+      useWorker: {
+        title: "多线程渲染",
+        description: "使用Web Worker进行多线程网格生成（推荐）。",
+        enabled: "已启用",
+        disabled: "已禁用",
+      },
+      targetFramerate: {
+        title: "目标帧率",
+        description: "限制渲染帧率以节省资源",
+        auto: "自动（显示器刷新率）",
+        unlimited: "无限制",
+      },
+      loadMethod: {
+        title: "关卡加载方式",
+        description: "选择加载关卡的执行方式",
+        sync: "同步（阻塞UI）",
+        async: "异步（推荐）",
+        worker: "Worker（后台线程）",
+      },
       themePreview: {
         title: "主题预览",
       },
     },
   },
   "en-US": {
+    // Loading
+    loading: {
+      title: "Loading Level",
+      parsingLevel: "Parsing level file...",
+      calculatingTiles: "Calculating tile positions...",
+      buildingScene: "Building scene...",
+      progress: "Progress",
+      tip: "Large levels may take longer to load, please wait patiently",
+      method: "Method",
+    },
     // Common
     common: {
       home: "Home",
@@ -224,12 +263,41 @@ export const translations = {
         enabled: "Enabled",
         disabled: "Disabled",
       },
+      useWorker: {
+        title: "Multi-threaded Rendering",
+        description: "Use Web Worker for multi-threaded mesh generation (recommended).",
+        enabled: "Enabled",
+        disabled: "Disabled",
+      },
+      targetFramerate: {
+        title: "Target Framerate",
+        description: "Limit rendering framerate to save resources",
+        auto: "Auto (Monitor Refresh Rate)",
+        unlimited: "Unlimited",
+      },
+      loadMethod: {
+        title: "Level Load Method",
+        description: "Choose how levels are loaded",
+        sync: "Sync (Blocks UI)",
+        async: "Async (Recommended)",
+        worker: "Worker (Background Thread)",
+      },
       themePreview: {
         title: "Theme Preview",
       },
     },
   },
   "ja-JP": {
+    // 読み込み
+    loading: {
+      title: "レベルを読み込み中",
+      parsingLevel: "レベルファイルを解析中...",
+      calculatingTiles: "タイル位置を計算中...",
+      buildingScene: "シーンを構築中...",
+      progress: "進捗",
+      tip: "大きなレベルは読み込みに時間がかかる場合があります",
+      method: "読み込み方法",
+    },
     // 共通
     common: {
       home: "ホーム",
@@ -338,6 +406,25 @@ export const translations = {
         description: "惑星のトレール効果を有効にします。",
         enabled: "有効",
         disabled: "無効",
+      },
+      useWorker: {
+        title: "マルチスレッドレンダリング",
+        description: "Web Workerを使用したマルチスレッドメッシュ生成（推奨）。",
+        enabled: "有効",
+        disabled: "無効",
+      },
+      targetFramerate: {
+        title: "ターゲットフレームレート",
+        description: "レンダリングフレームレートを制限してリソースを節約",
+        auto: "自動（モニターのリフレッシュレート）",
+        unlimited: "無制限",
+      },
+      loadMethod: {
+        title: "レベル読み込み方法",
+        description: "レベルの読み込み方法を選択",
+        sync: "同期（UIをブロック）",
+        async: "非同期（推奨）",
+        worker: "ワーカー（バックグラウンドスレッド）",
       },
       themePreview: {
         title: "テーマプレビュー",

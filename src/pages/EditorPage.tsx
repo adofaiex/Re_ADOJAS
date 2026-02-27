@@ -16,6 +16,7 @@ import { ILevelData } from "@/lib/Player/types"
 import example from "@/lib/example/line.json"
 import { useAppSettings } from "@/hooks/use-app-settings"
 import { SettingsModal } from "@/components/SettingsModal"
+import { LoadingModal } from "@/components/LoadingModal"
 import type { JSX } from "react/jsx-runtime"
 
 // 声明全局类型
@@ -962,6 +963,8 @@ export default function EditorPage(): JSX.Element {
   const audioInputRef = useRef<HTMLInputElement>(null)
   const previewerRef = useRef<Player | null>(null)
   const [isLoading, setIsLoading] = useState<boolean>(false)
+  const [loadingProgress, setLoadingProgress] = useState<number>(0)
+  const [loadingStatus, setLoadingStatus] = useState<string>("")
   const [adofaiFile, setAdofaiFile] = useState<any>(null)
   const [mounted, setMounted] = useState(false)
   const [themeReady, setThemeReady] = useState(false)
@@ -1077,73 +1080,208 @@ export default function EditorPage(): JSX.Element {
       if (!file) return
 
       setIsLoading(true)
+      setLoadingProgress(0)
+      setLoadingStatus(t("loading.parsingLevel"))
+
       const reader = new FileReader()
 
       reader.onload = async (e): Promise<void> => {
         try {
           const content = e.target?.result as string
-
-          // 使用ADOFAI.js解析文件
-          const level = new ADOFAI.Level(content, Hjson)
-
-          level.on("load", (loadedLevel: any): void => {
-            loadedLevel.calculateTilePosition()
-            setAdofaiFile(loadedLevel)
-
-            // Clean up old Player
-            if (previewerRef.current) {
-              console.log("Disposing old Player...")
-              previewerRef.current.destroyPlayer()
-              previewerRef.current = null
-            }
-
-            // Create new Player
-            if (containerRef.current && fpsCounterRef.current && infoRef.current) {
-              const player = new Player(loadedLevel as ILevelData)
-              player.createPlayer(containerRef.current)
-              player.setRenderer(settings.renderer)
-              player.setRenderMethod(settings.renderMethod)
-              player.setShowTrail(settings.showTrail)
-              
-              player.setStatsCallback((stats) => {
-                if (fpsCounterRef.current) {
-                  fpsCounterRef.current.textContent = `FPS  ${stats.fps.toFixed(2)}`
-                }
-                if (infoRef.current) {
-                  const bpm = loadedLevel.settings?.bpm || 0
-                  infoRef.current.innerHTML = `
-                    <div class="space-y-1">
-                      <div>Time: ${(stats.time / 1000).toFixed(2)}s</div>
-                      <div>Tile: ${stats.tileIndex} / ${loadedLevel.tiles?.length || 0}</div>
-                      <div>BPM: ${bpm}</div>
-                    </div>
-                  `
-                }
-              })
-              
-              previewerRef.current = player
-            }
-            window.showNotification?.("success", t("editor.notifications.loadSuccess"))
-          })
-
-          await level.load()
+          
+          // Choose loading method based on settings
+          if (settings.loadMethod === 'worker') {
+            await loadWithWorker(content)
+          } else if (settings.loadMethod === 'async') {
+            await loadAsync(content)
+          } else {
+            loadSync(content)
+          }
         } catch (error) {
           window.showNotification?.("error", t("editor.notifications.loadError"))
           console.error(error)
-        } finally {
           setIsLoading(false)
+          setLoadingProgress(0)
+          setLoadingStatus("")
         }
       }
 
       reader.onerror = (): void => {
         window.showNotification?.("error", t("editor.notifications.fileReadError"))
         setIsLoading(false)
+        setLoadingProgress(0)
+        setLoadingStatus("")
       }
 
       reader.readAsText(file)
     },
-    [t],
+    [t, settings],
   )
+
+  // Synchronous loading (blocks UI)
+  const loadSync = (content: string): void => {
+    setLoadingProgress(10)
+    setLoadingStatus(t("loading.parsingLevel"))
+    
+    const level = new ADOFAI.Level(content, Hjson)
+    
+    level.on("load", (loadedLevel: any): void => {
+      setLoadingProgress(50)
+      loadedLevel.calculateTilePosition()
+      
+      setLoadingProgress(80)
+      initializePlayer(loadedLevel)
+      
+      setLoadingProgress(100)
+      window.showNotification?.("success", t("editor.notifications.loadSuccess"))
+      setIsLoading(false)
+      setLoadingProgress(0)
+      setLoadingStatus("")
+    })
+    
+    level.load()
+  }
+
+  // Asynchronous loading (non-blocking)
+  const loadAsync = async (content: string): Promise<void> => {
+    setLoadingProgress(10)
+    setLoadingStatus(t("loading.parsingLevel"))
+    
+    const level = new ADOFAI.Level(content, Hjson)
+    
+    setLoadingProgress(30)
+    setLoadingStatus(t("loading.calculatingTiles"))
+    
+    level.on("load", (loadedLevel: any): void => {
+      setLoadingProgress(60)
+      loadedLevel.calculateTilePosition()
+      
+      setLoadingProgress(80)
+      setLoadingStatus(t("loading.buildingScene"))
+      
+      initializePlayer(loadedLevel)
+      
+      setLoadingProgress(100)
+      window.showNotification?.("success", t("editor.notifications.loadSuccess"))
+      setIsLoading(false)
+      setLoadingProgress(0)
+      setLoadingStatus("")
+    })
+    
+    await level.load()
+  }
+
+  // Worker loading (background thread)
+  const loadWithWorker = async (content: string): Promise<void> => {
+    // Check if running on file:// protocol - workers don't work there
+    if (window.location.protocol === 'file:') {
+      console.log('file:// protocol detected, falling back to async loading')
+      window.showNotification?.("warning", "Worker mode not supported on file:// protocol, using async mode")
+      await loadAsync(content)
+      return
+    }
+
+    setLoadingProgress(5)
+    setLoadingStatus("Starting worker...")
+    
+    try {
+      // Create worker - correct path to src/lib/Player/levelLoaderWorker.ts
+      const worker = new Worker(
+        new URL('../lib/Player/levelLoaderWorker', import.meta.url),
+        { type: 'module' }
+      )
+      
+      worker.onmessage = (e) => {
+        const { type, progress, status, data, error } = e.data
+        
+        if (type === 'progress') {
+          setLoadingProgress(progress)
+          setLoadingStatus(status)
+        } else if (type === 'result') {
+          const { levelData } = data
+          
+          setLoadingProgress(95)
+          setLoadingStatus(t("loading.buildingScene"))
+          
+          // Create player with loaded data
+          initializePlayer(levelData)
+          
+          setLoadingProgress(100)
+          window.showNotification?.("success", t("editor.notifications.loadSuccess"))
+          setIsLoading(false)
+          setLoadingProgress(0)
+          setLoadingStatus("")
+          
+          worker.terminate()
+        } else if (type === 'error') {
+          console.error('Worker error:', error)
+          window.showNotification?.("error", `${t("editor.notifications.loadError")}: ${error}`)
+          setIsLoading(false)
+          setLoadingProgress(0)
+          setLoadingStatus("")
+          worker.terminate()
+        }
+      }
+      
+      worker.onerror = (error) => {
+        console.error('Worker onerror:', error.message, error.filename, error.lineno)
+        window.showNotification?.("error", `Worker failed: ${error.message}`)
+        setIsLoading(false)
+        setLoadingProgress(0)
+        setLoadingStatus("")
+        worker.terminate()
+      }
+      
+      // Start loading
+      worker.postMessage({ type: 'load', content })
+      
+    } catch (error) {
+      console.error('Failed to create worker:', error)
+      // Fallback to async loading
+      await loadAsync(content)
+    }
+  }
+
+  // Initialize player with level data
+  const initializePlayer = (loadedLevel: any): void => {
+    setAdofaiFile(loadedLevel)
+
+    // Clean up old Player
+    if (previewerRef.current) {
+      console.log("Disposing old Player...")
+      previewerRef.current.destroyPlayer()
+      previewerRef.current = null
+    }
+
+    // Create new Player
+    if (containerRef.current && fpsCounterRef.current && infoRef.current) {
+      const player = new Player(loadedLevel as ILevelData)
+      player.createPlayer(containerRef.current)
+      player.setRenderer(settings.renderer)
+      player.setRenderMethod(settings.renderMethod)
+      player.setShowTrail(settings.showTrail)
+      player.setUseWorker(settings.useWorker)
+      player.setTargetFramerate(settings.targetFramerate)
+      
+      player.setStatsCallback((stats) => {
+        if (fpsCounterRef.current) {
+          fpsCounterRef.current.textContent = `FPS  ${stats.fps.toFixed(2)}`
+        }
+        if (infoRef.current) {
+          const bpm = loadedLevel.settings?.bpm || 0
+          infoRef.current.innerHTML = `
+            <div class="space-y-1">
+              <div>Time: ${(stats.time / 1000).toFixed(2)}s</div>
+              <div>Tile: ${stats.tileIndex} / ${loadedLevel.tiles?.length || 0}</div>
+              <div>BPM: ${bpm}</div>
+            </div>
+          `
+        }
+      })
+      
+      previewerRef.current = player
+    }
+  }
 
   // 音频加载处理
   const handleAudioLoad = useCallback(
@@ -1183,6 +1321,20 @@ export default function EditorPage(): JSX.Element {
       previewerRef.current.setShowTrail(settings.showTrail)
     }
   }, [settings.showTrail])
+
+  // 监听多线程渲染设置变化
+  useEffect(() => {
+    if (previewerRef.current) {
+      previewerRef.current.setUseWorker(settings.useWorker)
+    }
+  }, [settings.useWorker])
+
+  // 监听帧率设置变化
+  useEffect(() => {
+    if (previewerRef.current) {
+      previewerRef.current.setTargetFramerate(settings.targetFramerate)
+    }
+  }, [settings.targetFramerate])
 
   // 键盘快捷键
   useEffect(() => {
@@ -1229,6 +1381,8 @@ export default function EditorPage(): JSX.Element {
             player.setRenderer(settings.renderer)
             player.setRenderMethod(settings.renderMethod)
             player.setShowTrail(settings.showTrail)
+            player.setUseWorker(settings.useWorker)
+            player.setTargetFramerate(settings.targetFramerate)
             
             player.setStatsCallback((stats) => {
               if (fpsCounterRef.current) {
@@ -1259,7 +1413,7 @@ export default function EditorPage(): JSX.Element {
     }
 
     initializeExample()
-  }, [mounted, i18nMounted, themeReady, t])
+  }, [mounted, i18nMounted, themeReady, t, settings])
 
   // 监听窗口大小变化，触发Previewer的resize
   useEffect(() => {
@@ -1450,6 +1604,14 @@ export default function EditorPage(): JSX.Element {
 
       {/* Settings Modal */}
       <SettingsModal isOpen={settingsOpen} onClose={() => setSettingsOpen(false)} />
+
+      {/* Loading Modal */}
+      <LoadingModal 
+        isOpen={isLoading} 
+        progress={loadingProgress} 
+        status={loadingStatus}
+        loadMethod={settings.loadMethod}
+      />
 
       {/* Full-screen Canvas Area */}
       <div ref={containerRef} className="absolute inset-0">

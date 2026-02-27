@@ -4,17 +4,25 @@ import { useState, useEffect } from "react"
 
 export type RendererType = "webgl" | "webgpu"
 export type RenderMethodType = "sync" | "async"
+export type LoadMethodType = "sync" | "async" | "worker"
+export type TargetFramerateType = "auto" | "30" | "60" | "120" | "144" | "165" | "240" | "unlimited"
 
 interface AppSettings {
   renderer: RendererType
   renderMethod: RenderMethodType
   showTrail: boolean
+  useWorker: boolean
+  targetFramerate: TargetFramerateType
+  loadMethod: LoadMethodType
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
   renderer: "webgl", // Default to WebGL for compatibility
   renderMethod: "sync", // Default to synchronous rendering
   showTrail: false, // Default to disabled
+  useWorker: true, // Default to enabled for better performance
+  targetFramerate: "auto", // Default to auto (monitor refresh rate)
+  loadMethod: "async", // Default to async loading
 }
 
 export function useAppSettings() {

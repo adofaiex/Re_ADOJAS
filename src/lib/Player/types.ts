@@ -1,5 +1,7 @@
 import * as THREE from 'three';
 
+export type TargetFramerateType = "auto" | "30" | "60" | "120" | "144" | "165" | "240" | "unlimited";
+
 export interface IPlayer {
   createPlayer(container: HTMLElement): void;
   updatePlayer(delta: number): void;
@@ -13,6 +15,8 @@ export interface IPlayer {
   setRenderer(type: 'webgl' | 'webgpu'): Promise<void>;
   setRenderMethod(method: 'sync' | 'async'): void;
   setShowTrail(show: boolean): void;
+  setUseWorker(use: boolean): void;
+  setTargetFramerate(framerate: TargetFramerateType): void;
   setZoom(zoom: number): void;
   loadMusic(src: string): void;
 }

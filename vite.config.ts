@@ -25,6 +25,16 @@ export default defineConfig(({ mode, command }) => {
       },
     },
     base: base,
+    worker: {
+      format: 'es',
+      rollupOptions: {
+        output: {
+          manualChunks: {
+            adofai: ['adofai', 'hjson'],
+          },
+        },
+      },
+    },
     build: {
       outDir: "dist",
       assetsDir: "assets",

@@ -60,6 +60,24 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
           description: t("settings.showTrail.description"),
           type: "showTrail",
         },
+        {
+          id: "useWorker",
+          title: t("settings.useWorker.title"),
+          description: t("settings.useWorker.description"),
+          type: "useWorker",
+        },
+        {
+          id: "targetFramerate",
+          title: t("settings.targetFramerate.title"),
+          description: t("settings.targetFramerate.description"),
+          type: "targetFramerate",
+        },
+        {
+          id: "loadMethod",
+          title: t("settings.loadMethod.title"),
+          description: t("settings.loadMethod.description"),
+          type: "loadMethod",
+        },
       ],
     },
   ]
@@ -257,6 +275,79 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                         {settings.showTrail ? t("settings.showTrail.enabled") : t("settings.showTrail.disabled")}
                       </span>
                     </div>
+                  )}
+
+                  {setting.type === "useWorker" && (
+                    <div className="flex items-center gap-3">
+                      <button
+                        onClick={() => updateSettings({ useWorker: !settings.useWorker })}
+                        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                          settings.useWorker ? "bg-purple-500" : "bg-slate-300 dark:bg-slate-600"
+                        }`}
+                      >
+                        <span
+                          className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                            settings.useWorker ? "translate-x-6" : "translate-x-1"
+                          }`}
+                        />
+                      </button>
+                      <span className="text-sm text-slate-600 dark:text-slate-400">
+                        {settings.useWorker ? t("settings.useWorker.enabled") : t("settings.useWorker.disabled")}
+                      </span>
+                    </div>
+                  )}
+
+                  {setting.type === "targetFramerate" && (
+                    <Select value={settings.targetFramerate} onValueChange={(value: any) => updateSettings({ targetFramerate: value })}>
+                      <SelectTrigger className="bg-white dark:bg-slate-700 border-slate-200 dark:border-slate-600 text-slate-900 dark:text-white w-full sm:w-48 hover:bg-slate-50 dark:hover:bg-slate-600 focus:border-purple-500 dark:focus:border-purple-400 focus:ring-purple-500/20 dark:focus:ring-purple-400/20">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent className="bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 shadow-lg dark:shadow-slate-900/50">
+                        <SelectItem value="auto" className="text-slate-900 dark:text-white hover:bg-slate-100 dark:hover:bg-slate-700 focus:bg-slate-100 dark:focus:bg-slate-700 cursor-pointer">
+                          {t("settings.targetFramerate.auto")}
+                        </SelectItem>
+                        <SelectItem value="30" className="text-slate-900 dark:text-white hover:bg-slate-100 dark:hover:bg-slate-700 focus:bg-slate-100 dark:focus:bg-slate-700 cursor-pointer">
+                          30 FPS
+                        </SelectItem>
+                        <SelectItem value="60" className="text-slate-900 dark:text-white hover:bg-slate-100 dark:hover:bg-slate-700 focus:bg-slate-100 dark:focus:bg-slate-700 cursor-pointer">
+                          60 FPS
+                        </SelectItem>
+                        <SelectItem value="120" className="text-slate-900 dark:text-white hover:bg-slate-100 dark:hover:bg-slate-700 focus:bg-slate-100 dark:focus:bg-slate-700 cursor-pointer">
+                          120 FPS
+                        </SelectItem>
+                        <SelectItem value="144" className="text-slate-900 dark:text-white hover:bg-slate-100 dark:hover:bg-slate-700 focus:bg-slate-100 dark:focus:bg-slate-700 cursor-pointer">
+                          144 FPS
+                        </SelectItem>
+                        <SelectItem value="165" className="text-slate-900 dark:text-white hover:bg-slate-100 dark:hover:bg-slate-700 focus:bg-slate-100 dark:focus:bg-slate-700 cursor-pointer">
+                          165 FPS
+                        </SelectItem>
+                        <SelectItem value="240" className="text-slate-900 dark:text-white hover:bg-slate-100 dark:hover:bg-slate-700 focus:bg-slate-100 dark:focus:bg-slate-700 cursor-pointer">
+                          240 FPS
+                        </SelectItem>
+                        <SelectItem value="unlimited" className="text-slate-900 dark:text-white hover:bg-slate-100 dark:hover:bg-slate-700 focus:bg-slate-100 dark:focus:bg-slate-700 cursor-pointer">
+                          {t("settings.targetFramerate.unlimited")}
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                  )}
+
+                  {setting.type === "loadMethod" && (
+                    <Select value={settings.loadMethod} onValueChange={(value: any) => updateSettings({ loadMethod: value })}>
+                      <SelectTrigger className="bg-white dark:bg-slate-700 border-slate-200 dark:border-slate-600 text-slate-900 dark:text-white w-full sm:w-48 hover:bg-slate-50 dark:hover:bg-slate-600 focus:border-purple-500 dark:focus:border-purple-400 focus:ring-purple-500/20 dark:focus:ring-purple-400/20">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent className="bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 shadow-lg dark:shadow-slate-900/50">
+                        <SelectItem value="sync" className="text-slate-900 dark:text-white hover:bg-slate-100 dark:hover:bg-slate-700 focus:bg-slate-100 dark:focus:bg-slate-700 cursor-pointer">
+                          {t("settings.loadMethod.sync")}
+                        </SelectItem>
+                        <SelectItem value="async" className="text-slate-900 dark:text-white hover:bg-slate-100 dark:hover:bg-slate-700 focus:bg-slate-100 dark:focus:bg-slate-700 cursor-pointer">
+                          {t("settings.loadMethod.async")}
+                        </SelectItem>
+                        <SelectItem value="worker" className="text-slate-900 dark:text-white hover:bg-slate-100 dark:hover:bg-slate-700 focus:bg-slate-100 dark:focus:bg-slate-700 cursor-pointer">
+                          {t("settings.loadMethod.worker")}
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
                   )}
                 </div>
               ))}

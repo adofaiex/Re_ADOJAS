@@ -8,13 +8,15 @@ export class PlanetTrail {
   private maxPoints: number = 200; // Sensible max for a 0.4s trail
   private trailDuration: number = 0.4; // seconds
   private planetRadius: number;
+  private segmentsPerPoint: number = 4; // Subdivisions for smooth curves
 
   constructor(color: THREE.Color, planetRadius: number) {
     this.planetRadius = planetRadius;
     this.geometry = new THREE.BufferGeometry();
     
-    // Initial attributes for position
-    const positions = new Float32Array(this.maxPoints * 3 * 2); // 2 points per segment (strip)
+    // Initial attributes for position - increased for smooth curves
+    const maxVertices = this.maxPoints * this.segmentsPerPoint * 2;
+    const positions = new Float32Array(maxVertices * 3);
     this.geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     
     this.material = new THREE.MeshBasicMaterial({
@@ -47,6 +49,45 @@ export class PlanetTrail {
     this.updateGeometry();
   }
 
+  /**
+   * Catmull-Rom spline interpolation for smooth curves
+   */
+  private catmullRom(p0: THREE.Vector3, p1: THREE.Vector3, p2: THREE.Vector3, p3: THREE.Vector3, t: number): THREE.Vector3 {
+    const t2 = t * t;
+    const t3 = t2 * t;
+    
+    // Catmull-Rom coefficients
+    const c0 = -0.5 * t3 + t2 - 0.5 * t;
+    const c1 = 1.5 * t3 - 2.5 * t2 + 1;
+    const c2 = -1.5 * t3 + 2 * t2 + 0.5 * t;
+    const c3 = 0.5 * t3 - 0.5 * t2;
+    
+    return new THREE.Vector3(
+      c0 * p0.x + c1 * p1.x + c2 * p2.x + c3 * p3.x,
+      c0 * p0.y + c1 * p1.y + c2 * p2.y + c3 * p3.y,
+      c0 * p0.z + c1 * p1.z + c2 * p2.z + c3 * p3.z
+    );
+  }
+
+  /**
+   * Calculate tangent at a point using Catmull-Rom derivative
+   */
+  private catmullRomTangent(p0: THREE.Vector3, p1: THREE.Vector3, p2: THREE.Vector3, p3: THREE.Vector3, t: number): THREE.Vector3 {
+    const t2 = t * t;
+    
+    // Derivative of Catmull-Rom spline
+    const c0 = -1.5 * t2 + 2 * t - 0.5;
+    const c1 = 4.5 * t2 - 5 * t;
+    const c2 = -4.5 * t2 + 4 * t + 0.5;
+    const c3 = 1.5 * t2 - t;
+    
+    return new THREE.Vector3(
+      c0 * p0.x + c1 * p1.x + c2 * p2.x + c3 * p3.x,
+      c0 * p0.y + c1 * p1.y + c2 * p2.y + c3 * p3.y,
+      c0 * p0.z + c1 * p1.z + c2 * p2.z + c3 * p3.z
+    ).normalize();
+  }
+
   private updateGeometry(): void {
     const posAttr = this.geometry.getAttribute('position') as THREE.BufferAttribute;
     const positions = posAttr.array as Float32Array;
@@ -54,51 +95,81 @@ export class PlanetTrail {
     const count = this.points.length;
     const maxWidth = this.planetRadius * 2;
     
-    const tangent = new THREE.Vector3();
     const normal = new THREE.Vector3();
     const p1 = new THREE.Vector3();
     const p2 = new THREE.Vector3();
-
-    for (let i = 0; i < count; i++) {
-      const p = this.points[i];
-      const next = this.points[Math.min(i + 1, count - 1)];
-      const prev = this.points[Math.max(i - 1, 0)];
-      
-      // Calculate tangent
-      tangent.copy(next.pos).sub(prev.pos).normalize();
-      if (tangent.lengthSq() === 0) tangent.set(1, 0, 0); // Fallback
-      
-      // Normal (perpendicular to tangent in 2D XY plane)
-      normal.set(-tangent.y, tangent.x, 0).normalize();
-      
-      // Calculate width based on age (0 to 1)
-      // i=count-1 is the head (at the planet), width = maxWidth
-      const ageFactor = i / (count - 1);
-      const width = maxWidth * ageFactor;
-      
-      // Extrude
-      p1.copy(p.pos).addScaledVector(normal, width / 2);
-      p2.copy(p.pos).addScaledVector(normal, -width / 2);
-      
-      positions[i * 6 + 0] = p1.x;
-      positions[i * 6 + 1] = p1.y;
-      positions[i * 6 + 2] = p1.z;
-      
-      positions[i * 6 + 3] = p2.x;
-      positions[i * 6 + 4] = p2.y;
-      positions[i * 6 + 5] = p2.z;
-    }
     
-    // Update indices for triangle strip
-    const indices = [];
+    let vertexIndex = 0;
+    const indices: number[] = [];
+
+    // Generate smooth curve points using Catmull-Rom spline
     for (let i = 0; i < count - 1; i++) {
-      const a = i * 2;
-      const b = i * 2 + 1;
-      const c = (i + 1) * 2;
-      const d = (i + 1) * 2 + 1;
+      // Get control points for Catmull-Rom spline
+      const p0 = this.points[Math.max(i - 1, 0)].pos;
+      const p1_curr = this.points[i].pos;
+      const p2_next = this.points[i + 1].pos;
+      const p3 = this.points[Math.min(i + 2, count - 1)].pos;
       
-      indices.push(a, b, c);
-      indices.push(b, d, c);
+      // Subdivide segment for smooth curve
+      const segments = this.segmentsPerPoint;
+      for (let j = 0; j < segments; j++) {
+        const t1 = j / segments;
+        const t2 = (j + 1) / segments;
+        
+        // Interpolate position and tangent
+        const pos1 = this.catmullRom(p0, p1_curr, p2_next, p3, t1);
+        const tangent1 = this.catmullRomTangent(p0, p1_curr, p2_next, p3, t1);
+        
+        const pos2 = this.catmullRom(p0, p1_curr, p2_next, p3, t2);
+        const tangent2 = this.catmullRomTangent(p0, p1_curr, p2_next, p3, t2);
+        
+        // Calculate age factor for width (interpolated along segment)
+        const globalT1 = (i + t1) / (count - 1);
+        const globalT2 = (i + t2) / (count - 1);
+        const width1 = maxWidth * globalT1;
+        const width2 = maxWidth * globalT2;
+        
+        // Calculate normal (perpendicular to tangent in 2D XY plane)
+        normal.set(-tangent1.y, tangent1.x, 0).normalize();
+        if (normal.lengthSq() === 0) normal.set(0, 1, 0);
+        
+        // First point of segment
+        p1.copy(pos1).addScaledVector(normal, width1 / 2);
+        p2.copy(pos1).addScaledVector(normal, -width1 / 2);
+        
+        const idx1 = vertexIndex++;
+        const idx2 = vertexIndex++;
+        
+        positions[idx1 * 3 + 0] = p1.x;
+        positions[idx1 * 3 + 1] = p1.y;
+        positions[idx1 * 3 + 2] = p1.z;
+        
+        positions[idx2 * 3 + 0] = p2.x;
+        positions[idx2 * 3 + 1] = p2.y;
+        positions[idx2 * 3 + 2] = p2.z;
+        
+        // Second point of segment
+        normal.set(-tangent2.y, tangent2.x, 0).normalize();
+        if (normal.lengthSq() === 0) normal.set(0, 1, 0);
+        
+        p1.copy(pos2).addScaledVector(normal, width2 / 2);
+        p2.copy(pos2).addScaledVector(normal, -width2 / 2);
+        
+        const idx3 = vertexIndex++;
+        const idx4 = vertexIndex++;
+        
+        positions[idx3 * 3 + 0] = p1.x;
+        positions[idx3 * 3 + 1] = p1.y;
+        positions[idx3 * 3 + 2] = p1.z;
+        
+        positions[idx4 * 3 + 0] = p2.x;
+        positions[idx4 * 3 + 1] = p2.y;
+        positions[idx4 * 3 + 2] = p2.z;
+        
+        // Create triangles for this quad
+        indices.push(idx1, idx2, idx3);
+        indices.push(idx2, idx4, idx3);
+      }
     }
     
     this.geometry.setIndex(indices);
