@@ -53,9 +53,21 @@ export default function SettingsPage() {
         },
         {
           id: "renderer",
-          title: "Renderer",
-          description: "Select the graphics renderer backend.",
+          title: t("settings.renderer.title"),
+          description: t("settings.renderer.description"),
           type: "renderer",
+        },
+        {
+          id: "renderMethod",
+          title: t("settings.renderMethod.title"),
+          description: t("settings.renderMethod.description"),
+          type: "renderMethod",
+        },
+        {
+          id: "showTrail",
+          title: t("settings.showTrail.title"),
+          description: t("settings.showTrail.description"),
+          type: "showTrail",
         },
       ],
     },
@@ -192,7 +204,7 @@ export default function SettingsPage() {
                         >
                           <div className="flex items-center gap-2">
                             <Monitor className="w-4 h-4" />
-                            WebGL (Default)
+                            {t("settings.renderer.webgl")}
                           </div>
                         </SelectItem>
                         <SelectItem
@@ -201,11 +213,59 @@ export default function SettingsPage() {
                         >
                           <div className="flex items-center gap-2">
                             <Monitor className="w-4 h-4" />
-                            WebGPU (Experimental)
+                            {t("settings.renderer.webgpu")}
                           </div>
                         </SelectItem>
                       </SelectContent>
                     </Select>
+                  )}
+
+                  {setting.type === "renderMethod" && (
+                    <Select value={settings.renderMethod} onValueChange={(value: any) => updateSettings({ renderMethod: value })}>
+                      <SelectTrigger className="bg-white dark:bg-slate-700 border-slate-200 dark:border-slate-600 text-slate-900 dark:text-white w-full sm:w-48 hover:bg-slate-50 dark:hover:bg-slate-600 focus:border-purple-500 dark:focus:border-purple-400 focus:ring-purple-500/20 dark:focus:ring-purple-400/20">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent className="bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 shadow-lg dark:shadow-slate-900/50">
+                        <SelectItem
+                          value="sync"
+                          className="text-slate-900 dark:text-white hover:bg-slate-100 dark:hover:bg-slate-700 focus:bg-slate-100 dark:focus:bg-slate-700 cursor-pointer"
+                        >
+                          <div className="flex items-center gap-2">
+                            <Monitor className="w-4 h-4" />
+                            {t("settings.renderMethod.sync")}
+                          </div>
+                        </SelectItem>
+                        <SelectItem
+                          value="async"
+                          className="text-slate-900 dark:text-white hover:bg-slate-100 dark:hover:bg-slate-700 focus:bg-slate-100 dark:focus:bg-slate-700 cursor-pointer"
+                        >
+                          <div className="flex items-center gap-2">
+                            <Monitor className="w-4 h-4" />
+                            {t("settings.renderMethod.async")}
+                          </div>
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                  )}
+
+                  {setting.type === "showTrail" && (
+                    <div className="flex items-center gap-3">
+                      <button
+                        onClick={() => updateSettings({ showTrail: !settings.showTrail })}
+                        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                          settings.showTrail ? "bg-purple-500" : "bg-slate-300 dark:bg-slate-600"
+                        }`}
+                      >
+                        <span
+                          className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                            settings.showTrail ? "translate-x-6" : "translate-x-1"
+                          }`}
+                        />
+                      </button>
+                      <span className="text-sm text-slate-600 dark:text-slate-400">
+                        {settings.showTrail ? t("settings.showTrail.enabled") : t("settings.showTrail.disabled")}
+                      </span>
+                    </div>
                   )}
                 </div>
               ))}

@@ -1102,6 +1102,8 @@ export default function EditorPage(): JSX.Element {
               const player = new Player(loadedLevel as ILevelData)
               player.createPlayer(containerRef.current)
               player.setRenderer(settings.renderer)
+              player.setRenderMethod(settings.renderMethod)
+              player.setShowTrail(settings.showTrail)
               
               player.setStatsCallback((stats) => {
                 if (fpsCounterRef.current) {
@@ -1168,6 +1170,20 @@ export default function EditorPage(): JSX.Element {
     }
   }, [settings.renderer])
 
+  // 监听渲染方法设置变化
+  useEffect(() => {
+    if (previewerRef.current && settings.renderMethod) {
+      previewerRef.current.setRenderMethod(settings.renderMethod)
+    }
+  }, [settings.renderMethod])
+
+  // 监听拖尾设置变化
+  useEffect(() => {
+    if (previewerRef.current) {
+      previewerRef.current.setShowTrail(settings.showTrail)
+    }
+  }, [settings.showTrail])
+
   // 键盘快捷键
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent): void => {
@@ -1211,6 +1227,8 @@ export default function EditorPage(): JSX.Element {
             const player = new Player(loadedLevel as ILevelData)
             player.createPlayer(containerRef.current)
             player.setRenderer(settings.renderer)
+            player.setRenderMethod(settings.renderMethod)
+            player.setShowTrail(settings.showTrail)
             
             player.setStatsCallback((stats) => {
               if (fpsCounterRef.current) {

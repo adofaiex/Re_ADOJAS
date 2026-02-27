@@ -91,6 +91,24 @@ export const translations = {
         title: "语言",
         description: "选择应用程序语言",
       },
+      renderer: {
+        title: "渲染器",
+        description: "选择图形渲染后端。",
+        webgl: "WebGL（默认）",
+        webgpu: "WebGPU（实验性）",
+      },
+      renderMethod: {
+        title: "渲染方法",
+        description: "选择渲染方法（异步可提高性能）。",
+        sync: "同步（默认）",
+        async: "异步",
+      },
+      showTrail: {
+        title: "显示拖尾",
+        description: "启用星球拖尾效果。",
+        enabled: "已启用",
+        disabled: "已禁用",
+      },
       themePreview: {
         title: "主题预览",
       },
@@ -188,6 +206,24 @@ export const translations = {
         title: "Language",
         description: "Choose the application language",
       },
+      renderer: {
+        title: "Renderer",
+        description: "Select the graphics renderer backend.",
+        webgl: "WebGL (Default)",
+        webgpu: "WebGPU (Experimental)",
+      },
+      renderMethod: {
+        title: "Render Method",
+        description: "Select rendering method (async can improve performance).",
+        sync: "Sync (Default)",
+        async: "Async",
+      },
+      showTrail: {
+        title: "Show Trail",
+        description: "Enable planet trail effect.",
+        enabled: "Enabled",
+        disabled: "Disabled",
+      },
       themePreview: {
         title: "Theme Preview",
       },
@@ -284,6 +320,24 @@ export const translations = {
       language: {
         title: "言語",
         description: "アプリケーションの言語を選択",
+      },
+      renderer: {
+        title: "レンダラー",
+        description: "グラフィックスレンダラーバックエンドを選択。",
+        webgl: "WebGL（デフォルト）",
+        webgpu: "WebGPU（実験的）",
+      },
+      renderMethod: {
+        title: "レンダリング方法",
+        description: "レンダリング方法を選択（非同期はパフォーマンス向上の可能性）。",
+        sync: "同期（デフォルト）",
+        async: "非同期",
+      },
+      showTrail: {
+        title: "トレール表示",
+        description: "惑星のトレール効果を有効にします。",
+        enabled: "有効",
+        disabled: "無効",
       },
       themePreview: {
         title: "テーマプレビュー",

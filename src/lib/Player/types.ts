@@ -11,6 +11,8 @@ export interface IPlayer {
   resetPlayer(): void;
   destroyPlayer(): void;
   setRenderer(type: 'webgl' | 'webgpu'): Promise<void>;
+  setRenderMethod(method: 'sync' | 'async'): void;
+  setShowTrail(show: boolean): void;
   setZoom(zoom: number): void;
   loadMusic(src: string): void;
 }

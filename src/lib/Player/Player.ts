@@ -134,6 +134,8 @@ export class Player implements IPlayer {
   private camera: THREE.OrthographicCamera;
   private renderer!: THREE.WebGLRenderer | WebGPURenderer;
   private rendererType: 'webgl' | 'webgpu' = 'webgpu';
+  private renderMethod: 'sync' | 'async' = 'sync';
+  private showTrail: boolean = false;
   private animationId: number | null = null;
   
   private levelData: ILevelData;
@@ -512,6 +514,20 @@ export class Player implements IPlayer {
     this.initRenderer();
   }
 
+  public setRenderMethod(method: 'sync' | 'async'): void {
+    this.renderMethod = method;
+  }
+
+  public setShowTrail(show: boolean): void {
+    if (this.showTrail === show) return;
+    this.showTrail = show;
+    // Recreate planets with new trail setting if they exist
+    if (this.planetRed || this.planetBlue) {
+      this.removePlanets();
+      this.createPlanets();
+    }
+  }
+
   public createPlayer(container: HTMLElement): void {
     this.container = container;
     // Append current renderer element
@@ -792,7 +808,7 @@ export class Player implements IPlayer {
 
   public renderPlayer(delta: number): void {
     if (this.renderer && this.scene && this.camera) {
-      if (this.rendererType === 'webgpu') {
+      if (this.renderMethod === 'async' || this.rendererType === 'webgpu') {
         (this.renderer as any).renderAsync(this.scene, this.camera);
       } else {
         this.renderer.render(this.scene, this.camera);
@@ -1042,9 +1058,8 @@ export class Player implements IPlayer {
   }
 
   private createPlanets(): void {
-    const showTrail = false; // Temporarily disabled
-    this.planetRed = new Planet(0xff0000, undefined, showTrail);
-    this.planetBlue = new Planet(0x0000ff, undefined, showTrail);
+    this.planetRed = new Planet(0xff0000, undefined, this.showTrail);
+    this.planetBlue = new Planet(0x0000ff, undefined, this.showTrail);
     
     this.planetRed.render(this.scene);
     this.planetBlue.render(this.scene);

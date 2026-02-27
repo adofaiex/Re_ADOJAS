@@ -3,13 +3,18 @@
 import { useState, useEffect } from "react"
 
 export type RendererType = "webgl" | "webgpu"
+export type RenderMethodType = "sync" | "async"
 
 interface AppSettings {
   renderer: RendererType
+  renderMethod: RenderMethodType
+  showTrail: boolean
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
   renderer: "webgl", // Default to WebGL for compatibility
+  renderMethod: "sync", // Default to synchronous rendering
+  showTrail: false, // Default to disabled
 }
 
 export function useAppSettings() {
