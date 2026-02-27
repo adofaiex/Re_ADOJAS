@@ -4,7 +4,11 @@
  */
 
 import * as ADOFAI from 'adofai';
-import Hjson from 'hjson';
+import { Parsers } from 'adofai';
+
+// Use StringParser for parsing
+const StringParser = Parsers.StringParser;
+const parser = new StringParser();
 
 // Worker message types
 interface LoadMessage {
@@ -42,7 +46,7 @@ async function loadLevel(content: string): Promise<void> {
     // Step 1: Parse content (20%)
     postMessage({ type: 'progress', progress: 20, status: 'Parsing level file...' });
     
-    const level = new ADOFAI.Level(content, Hjson);
+    const level = new ADOFAI.Level(content, parser);
     
     // Step 2: Load level (50%)
     postMessage({ type: 'progress', progress: 50, status: 'Loading level data...' });

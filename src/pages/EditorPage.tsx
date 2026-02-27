@@ -9,7 +9,7 @@ import { useTheme } from "@/hooks/use-theme"
 import { useI18n } from "@/lib/i18n/context"
 import * as THREE from "three"
 import * as ADOFAI from "adofai"
-import Hjson from "hjson"
+import { Parsers } from "adofai"
 import createTrackMesh from "@/lib/Geo/mesh_reserve"
 import { Player } from "@/lib/Player/Player"
 import { ILevelData } from "@/lib/Player/types"
@@ -18,6 +18,10 @@ import { useAppSettings } from "@/hooks/use-app-settings"
 import { SettingsModal } from "@/components/SettingsModal"
 import { LoadingModal } from "@/components/LoadingModal"
 import type { JSX } from "react/jsx-runtime"
+
+// 使用 StringParser 作为解析器
+const StringParser = Parsers.StringParser
+const parser = new StringParser()
 
 // 声明全局类型
 declare global {
@@ -1123,7 +1127,7 @@ export default function EditorPage(): JSX.Element {
     setLoadingProgress(10)
     setLoadingStatus(t("loading.parsingLevel"))
     
-    const level = new ADOFAI.Level(content, Hjson)
+    const level = new ADOFAI.Level(content, parser)
     
     level.on("load", (loadedLevel: any): void => {
       setLoadingProgress(50)
@@ -1147,7 +1151,7 @@ export default function EditorPage(): JSX.Element {
     setLoadingProgress(10)
     setLoadingStatus(t("loading.parsingLevel"))
     
-    const level = new ADOFAI.Level(content, Hjson)
+    const level = new ADOFAI.Level(content, parser)
     
     setLoadingProgress(30)
     setLoadingStatus(t("loading.calculatingTiles"))
@@ -1364,7 +1368,7 @@ export default function EditorPage(): JSX.Element {
 
     const initializeExample = async (): Promise<void> => {
       try {
-        const level = new ADOFAI.Level(example, Hjson)
+        const level = new ADOFAI.Level(example, parser)
         level.on("load", (loadedLevel: any): void => {
           loadedLevel.calculateTilePosition()
           setAdofaiFile(loadedLevel)

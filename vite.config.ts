@@ -30,7 +30,7 @@ export default defineConfig(({ mode, command }) => {
       rollupOptions: {
         output: {
           manualChunks: {
-            adofai: ['adofai', 'hjson'],
+            'worker-adofai': ['adofai'],
           },
         },
       },
@@ -39,11 +39,44 @@ export default defineConfig(({ mode, command }) => {
       outDir: "dist",
       assetsDir: "assets",
       sourcemap: false,
+      chunkSizeWarningLimit: 1000,
       rollupOptions: {
         output: {
-          manualChunks: {
-            vendor: ["react", "react-dom"],
-            three: ["three"],
+          manualChunks: (id) => {
+            // React ecosystem
+            if (id.includes('node_modules/react/') || 
+                id.includes('node_modules/react-dom/') ||
+                id.includes('node_modules/scheduler/')) {
+              return 'vendor-react'
+            }
+            // React Router
+            if (id.includes('node_modules/react-router/') || 
+                id.includes('node_modules/react-router-dom/')) {
+              return 'vendor-router'
+            }
+            // Three.js core
+            if (id.includes('node_modules/three/') && !id.includes('examples')) {
+              return 'vendor-three'
+            }
+            // Three.js examples (loaders, controls, etc)
+            if (id.includes('node_modules/three/examples/')) {
+              return 'vendor-three-extras'
+            }
+            // ADOFAI library
+            if (id.includes('node_modules/adofai/')) {
+              return 'vendor-adofai'
+            }
+            // UI libraries (lucide, etc)
+            if (id.includes('node_modules/lucide-react/') ||
+                id.includes('node_modules/@radix-ui/')) {
+              return 'vendor-ui'
+            }
+            // Utility libraries
+            if (id.includes('node_modules/clsx/') ||
+                id.includes('node_modules/tailwind-merge/') ||
+                id.includes('node_modules/class-variance-authority/')) {
+              return 'vendor-utils'
+            }
           },
         },
       },
