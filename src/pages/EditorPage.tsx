@@ -9,7 +9,7 @@ import { useTheme } from "@/hooks/use-theme"
 import { useI18n } from "@/lib/i18n/context"
 import * as THREE from "three"
 import * as ADOFAI from "adofai"
-import { Parsers } from "adofai"
+import { Parsers, Structure } from "adofai"
 import createTrackMesh from "@/lib/Geo/mesh_reserve"
 import { Player } from "@/lib/Player/Player"
 import { ILevelData } from "@/lib/Player/types"
@@ -19,9 +19,32 @@ import { SettingsModal } from "@/components/SettingsModal"
 import { LoadingModal } from "@/components/LoadingModal"
 import type { JSX } from "react/jsx-runtime"
 
+// 类型导入
+type ParseProgressEvent = Structure.ParseProgressEvent;
+
 // 使用 StringParser 作为解析器
 const StringParser = Parsers.StringParser
 const parser = new StringParser()
+
+// 获取加载阶段的显示文本
+const getStageText = (stage: ParseProgressEvent['stage'], t: (key: string) => string): string => {
+  switch (stage) {
+    case 'start':
+      return t("loading.stage.start")
+    case 'pathData':
+      return t("loading.stage.pathData")
+    case 'angleData':
+      return t("loading.stage.angleData")
+    case 'relativeAngle':
+      return t("loading.stage.relativeAngle")
+    case 'tilePosition':
+      return t("loading.stage.tilePosition")
+    case 'complete':
+      return t("loading.stage.complete")
+    default:
+      return t("loading.parsingLevel")
+  }
+}
 
 // 声明全局类型
 declare global {
@@ -1124,16 +1147,25 @@ export default function EditorPage(): JSX.Element {
 
   // Synchronous loading (blocks UI)
   const loadSync = (content: string): void => {
-    setLoadingProgress(10)
-    setLoadingStatus(t("loading.parsingLevel"))
-    
     const level = new ADOFAI.Level(content, parser)
     
+    // 监听进度事件
+    level.on("parse:progress", (progressEvent: ParseProgressEvent): void => {
+      setLoadingProgress(progressEvent.percent)
+      setLoadingStatus(getStageText(progressEvent.stage, t))
+    })
+    
     level.on("load", (loadedLevel: any): void => {
-      setLoadingProgress(50)
+      // 计算瓦片位置时也会触发进度事件
+      loadedLevel.on("parse:progress", (progressEvent: ParseProgressEvent): void => {
+        setLoadingProgress(progressEvent.percent)
+        setLoadingStatus(getStageText(progressEvent.stage, t))
+      })
       loadedLevel.calculateTilePosition()
       
-      setLoadingProgress(80)
+      setLoadingProgress(95)
+      setLoadingStatus(t("loading.buildingScene"))
+      
       initializePlayer(loadedLevel)
       
       setLoadingProgress(100)
@@ -1148,19 +1180,23 @@ export default function EditorPage(): JSX.Element {
 
   // Asynchronous loading (non-blocking)
   const loadAsync = async (content: string): Promise<void> => {
-    setLoadingProgress(10)
-    setLoadingStatus(t("loading.parsingLevel"))
-    
     const level = new ADOFAI.Level(content, parser)
     
-    setLoadingProgress(30)
-    setLoadingStatus(t("loading.calculatingTiles"))
+    // 监听进度事件
+    level.on("parse:progress", (progressEvent: ParseProgressEvent): void => {
+      setLoadingProgress(progressEvent.percent)
+      setLoadingStatus(getStageText(progressEvent.stage, t))
+    })
     
     level.on("load", (loadedLevel: any): void => {
-      setLoadingProgress(60)
+      // 计算瓦片位置时也会触发进度事件
+      loadedLevel.on("parse:progress", (progressEvent: ParseProgressEvent): void => {
+        setLoadingProgress(progressEvent.percent)
+        setLoadingStatus(getStageText(progressEvent.stage, t))
+      })
       loadedLevel.calculateTilePosition()
       
-      setLoadingProgress(80)
+      setLoadingProgress(95)
       setLoadingStatus(t("loading.buildingScene"))
       
       initializePlayer(loadedLevel)
@@ -1185,8 +1221,8 @@ export default function EditorPage(): JSX.Element {
       return
     }
 
-    setLoadingProgress(5)
-    setLoadingStatus("Starting worker...")
+    setLoadingProgress(0)
+    setLoadingStatus(t("loading.stage.start"))
     
     try {
       // Create worker - correct path to src/lib/Player/levelLoaderWorker.ts
@@ -1196,15 +1232,16 @@ export default function EditorPage(): JSX.Element {
       )
       
       worker.onmessage = (e) => {
-        const { type, progress, status, data, error } = e.data
+        const { type, progress, status, stage, current, total, data, error } = e.data
         
         if (type === 'progress') {
           setLoadingProgress(progress)
-          setLoadingStatus(status)
+          // Use translated stage text
+          setLoadingStatus(getStageText(stage, t))
         } else if (type === 'result') {
           const { levelData } = data
           
-          setLoadingProgress(95)
+          setLoadingProgress(98)
           setLoadingStatus(t("loading.buildingScene"))
           
           // Create player with loaded data
@@ -1264,6 +1301,7 @@ export default function EditorPage(): JSX.Element {
       player.setRenderer(settings.renderer)
       player.setRenderMethod(settings.renderMethod)
       player.setShowTrail(settings.showTrail)
+      player.setHitsoundEnabled(settings.hitsoundEnabled)
       player.setUseWorker(settings.useWorker)
       player.setTargetFramerate(settings.targetFramerate)
       
@@ -1326,6 +1364,13 @@ export default function EditorPage(): JSX.Element {
     }
   }, [settings.showTrail])
 
+  // 监听打击音效设置变化
+  useEffect(() => {
+    if (previewerRef.current) {
+      previewerRef.current.setHitsoundEnabled(settings.hitsoundEnabled)
+    }
+  }, [settings.hitsoundEnabled])
+
   // 监听多线程渲染设置变化
   useEffect(() => {
     if (previewerRef.current) {
@@ -1385,6 +1430,7 @@ export default function EditorPage(): JSX.Element {
             player.setRenderer(settings.renderer)
             player.setRenderMethod(settings.renderMethod)
             player.setShowTrail(settings.showTrail)
+            player.setHitsoundEnabled(settings.hitsoundEnabled)
             player.setUseWorker(settings.useWorker)
             player.setTargetFramerate(settings.targetFramerate)
             

@@ -4,11 +4,14 @@
  */
 
 import * as ADOFAI from 'adofai';
-import { Parsers } from 'adofai';
+import { Parsers, Structure } from 'adofai';
 
 // Use StringParser for parsing
 const StringParser = Parsers.StringParser;
 const parser = new StringParser();
+
+// Type alias
+type ParseProgressEvent = Structure.ParseProgressEvent;
 
 // Worker message types
 interface LoadMessage {
@@ -20,6 +23,9 @@ interface ProgressMessage {
   type: 'progress';
   progress: number;
   status: string;
+  stage: ParseProgressEvent['stage'];
+  current: number;
+  total: number;
 }
 
 interface ResultMessage {
@@ -40,26 +46,68 @@ function postMessage(message: WorkerResponse): void {
   self.postMessage(message);
 }
 
+// Get stage text for display
+function getStageText(stage: ParseProgressEvent['stage']): string {
+  switch (stage) {
+    case 'start':
+      return 'Starting...';
+    case 'pathData':
+      return 'Parsing path data...';
+    case 'angleData':
+      return 'Processing angles...';
+    case 'relativeAngle':
+      return 'Calculating relative angles...';
+    case 'tilePosition':
+      return 'Computing tile positions...';
+    case 'complete':
+      return 'Complete!';
+    default:
+      return 'Processing...';
+  }
+}
+
 // Main loading function
 async function loadLevel(content: string): Promise<void> {
   try {
-    // Step 1: Parse content (20%)
-    postMessage({ type: 'progress', progress: 20, status: 'Parsing level file...' });
-    
     const level = new ADOFAI.Level(content, parser);
     
-    // Step 2: Load level (50%)
-    postMessage({ type: 'progress', progress: 50, status: 'Loading level data...' });
+    // Listen for progress events during load
+    level.on('parse:progress', (progressEvent: ParseProgressEvent) => {
+      postMessage({ 
+        type: 'progress', 
+        progress: progressEvent.percent,
+        status: getStageText(progressEvent.stage),
+        stage: progressEvent.stage,
+        current: progressEvent.current,
+        total: progressEvent.total,
+      });
+    });
     
     await new Promise<void>((resolve) => {
       level.on('load', (loadedLevel: any) => {
-        // Step 3: Calculate positions (80%)
-        postMessage({ type: 'progress', progress: 80, status: 'Calculating tile positions...' });
+        // Listen for progress events during calculateTilePosition
+        loadedLevel.on('parse:progress', (progressEvent: ParseProgressEvent) => {
+          postMessage({ 
+            type: 'progress', 
+            progress: progressEvent.percent,
+            status: getStageText(progressEvent.stage),
+            stage: progressEvent.stage,
+            current: progressEvent.current,
+            total: progressEvent.total,
+          });
+        });
         
         loadedLevel.calculateTilePosition();
         
-        // Step 4: Prepare serializable data (95%)
-        postMessage({ type: 'progress', progress: 95, status: 'Preparing scene data...' });
+        // Post final progress before sending result
+        postMessage({ 
+          type: 'progress', 
+          progress: 95,
+          status: 'Preparing scene data...',
+          stage: 'complete',
+          current: 0,
+          total: 0,
+        });
         
         // Extract only necessary data for Player
         const levelData = {

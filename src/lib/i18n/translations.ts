@@ -9,6 +9,14 @@ export const translations = {
       progress: "进度",
       tip: "大型关卡可能需要较长时间加载，请耐心等待",
       method: "加载方式",
+      stage: {
+        start: "正在初始化...",
+        pathData: "正在解析路径数据...",
+        angleData: "正在处理角度数据...",
+        relativeAngle: "正在计算相对角度...",
+        tilePosition: "正在计算瓦片坐标...",
+        complete: "解析完成!",
+      },
     },
     // 通用
     common: {
@@ -119,6 +127,12 @@ export const translations = {
         enabled: "已启用",
         disabled: "已禁用",
       },
+      hitsoundEnabled: {
+        title: "打击音效",
+        description: "启用球踩砖块时的打击音效。",
+        enabled: "已启用",
+        disabled: "已禁用",
+      },
       useWorker: {
         title: "多线程渲染",
         description: "使用Web Worker进行多线程网格生成（推荐）。",
@@ -153,6 +167,14 @@ export const translations = {
       progress: "Progress",
       tip: "Large levels may take longer to load, please wait patiently",
       method: "Method",
+      stage: {
+        start: "Initializing...",
+        pathData: "Parsing path data...",
+        angleData: "Processing angles...",
+        relativeAngle: "Calculating relative angles...",
+        tilePosition: "Computing tile positions...",
+        complete: "Complete!",
+      },
     },
     // Common
     common: {
@@ -263,6 +285,12 @@ export const translations = {
         enabled: "Enabled",
         disabled: "Disabled",
       },
+      hitsoundEnabled: {
+        title: "Hit Sound",
+        description: "Enable hit sound when planet lands on tile.",
+        enabled: "Enabled",
+        disabled: "Disabled",
+      },
       useWorker: {
         title: "Multi-threaded Rendering",
         description: "Use Web Worker for multi-threaded mesh generation (recommended).",
@@ -297,6 +325,14 @@ export const translations = {
       progress: "進捗",
       tip: "大きなレベルは読み込みに時間がかかる場合があります",
       method: "読み込み方法",
+      stage: {
+        start: "初期化中...",
+        pathData: "パスデータを解析中...",
+        angleData: "角度データを処理中...",
+        relativeAngle: "相対角度を計算中...",
+        tilePosition: "タイル座標を計算中...",
+        complete: "完了！",
+      },
     },
     // 共通
     common: {
@@ -404,6 +440,12 @@ export const translations = {
       showTrail: {
         title: "トレール表示",
         description: "惑星のトレール効果を有効にします。",
+        enabled: "有効",
+        disabled: "無効",
+      },
+      hitsoundEnabled: {
+        title: "ヒットサウンド",
+        description: "惑星がタイルに着地した時のヒットサウンドを有効にします。",
         enabled: "有効",
         disabled: "無効",
       },

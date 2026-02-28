@@ -14,6 +14,7 @@ interface AppSettings {
   useWorker: boolean
   targetFramerate: TargetFramerateType
   loadMethod: LoadMethodType
+  hitsoundEnabled: boolean
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -23,6 +24,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   useWorker: true, // Default to enabled for better performance
   targetFramerate: "auto", // Default to auto (monitor refresh rate)
   loadMethod: "async", // Default to async loading
+  hitsoundEnabled: true, // Default to enabled
 }
 
 export function useAppSettings() {

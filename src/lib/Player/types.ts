@@ -12,9 +12,10 @@ export interface IPlayer {
   resumePlay(): void;
   resetPlayer(): void;
   destroyPlayer(): void;
-  setRenderer(type: 'webgl' | 'webgpu'): Promise<void>;
+  setRenderer(type: 'webgl' | 'webgpu'): void;
   setRenderMethod(method: 'sync' | 'async'): void;
   setShowTrail(show: boolean): void;
+  setHitsoundEnabled(enabled: boolean): void;
   setUseWorker(use: boolean): void;
   setTargetFramerate(framerate: TargetFramerateType): void;
   setZoom(zoom: number): void;

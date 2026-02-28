@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import {WebGPURenderer} from 'three/webgpu';
 import { IPlayer, ILevelData, IMusic, TargetFramerateType } from './types';
 import { Planet } from './Planet';
+import { HitsoundManager, HitsoundType } from './HitsoundManager';
 import createTrackMesh from '../Geo/mesh_reserve';
 import { getWorkerManager, disposeWorkerManager } from '../Geo/tileWorkerManager';
 
@@ -164,6 +165,9 @@ export class Player implements IPlayer {
   private sharedSpeedUpMaterial: THREE.MeshBasicMaterial | null = null;
   private sharedSpeedDownMaterial: THREE.MeshBasicMaterial | null = null;
   
+  // Hitsound
+  private hitsoundManager: HitsoundManager;
+  
   // Playback state
   private isPlaying: boolean = false;
   private isPaused: boolean = false;
@@ -266,6 +270,11 @@ export class Player implements IPlayer {
         }
       });
     }
+
+    // Initialize HitsoundManager
+    const hitsoundType = (this.levelData.settings?.hitsound || 'Kick') as HitsoundType;
+    const hitsoundVolume = this.levelData.settings?.hitsoundVolume ?? 100;
+    this.hitsoundManager = new HitsoundManager(hitsoundType, hitsoundVolume);
 
     // Initialize Three.js components
     this.scene = new THREE.Scene();
@@ -525,21 +534,99 @@ export class Player implements IPlayer {
     this.totalLevelRotation = totalRotation;
   }
 
+  private isRestoringContext: boolean = false;
+  private webgpuSupported: boolean | null = null; // null = not checked, true = supported, false = not supported
+  private rendererInitialized: boolean = false;
+
   private initRenderer(): void {
-    if (this.renderer) {
-      // Clean up old renderer
-      this.renderer.dispose();
-      if (this.container && this.renderer.domElement.parentNode === this.container) {
-        this.container.removeChild(this.renderer.domElement);
-      }
+    // If already initialized and not switching, skip
+    if (this.rendererInitialized && this.renderer) {
+      return;
     }
 
-    if (this.rendererType === 'webgpu') {
-      this.renderer = new WebGPURenderer({ alpha: true, antialias: true });
-    } else {
-      this.renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+    // Clean up old renderer safely
+    if (this.renderer) {
+      try {
+        // Check if renderer is properly initialized before disposing
+        const hasBackend = (this.renderer as any).backend !== undefined && (this.renderer as any).backend !== null;
+        if (hasBackend || this.rendererType === 'webgl') {
+          if (this.container && this.renderer.domElement?.parentNode === this.container) {
+            this.container.removeChild(this.renderer.domElement);
+          }
+          this.renderer.dispose();
+        }
+      } catch (e) {
+        console.warn('Error disposing old renderer:', e);
+      }
+      this.renderer = null as any;
     }
+
+    // Check WebGPU support only once
+    if (this.webgpuSupported === null) {
+      this.webgpuSupported = this.checkWebGPUSupport();
+    }
+
+    if (this.rendererType === 'webgpu' && this.webgpuSupported) {
+      try {
+        const gpuRenderer = new WebGPURenderer({ alpha: true, antialias: true });
+        this.renderer = gpuRenderer;
+        this.rendererInitialized = true;
+      } catch (e) {
+        console.warn('WebGPU initialization failed, falling back to WebGL:', e);
+        this.rendererType = 'webgl';
+      }
+    }
+    
+    // Create WebGL renderer if WebGPU not used
+    if (!this.rendererInitialized) {
+      if (this.rendererType === 'webgpu') {
+        console.warn('WebGPU not supported, using WebGL');
+        this.rendererType = 'webgl';
+      }
+      
+      try {
+        this.renderer = new THREE.WebGLRenderer({ 
+          alpha: true, 
+          antialias: true,
+          powerPreference: 'high-performance',
+          failIfMajorPerformanceCaveat: false,
+        });
+        this.rendererInitialized = true;
+      } catch (e) {
+        console.error('Failed to create WebGL renderer:', e);
+        // Try with minimal settings
+        try {
+          this.renderer = new THREE.WebGLRenderer({ 
+            alpha: false, 
+            antialias: false,
+          });
+          this.rendererInitialized = true;
+        } catch (e2) {
+          console.error('Failed to create even basic WebGL renderer:', e2);
+          return;
+        }
+      }
+    }
+    
     this.renderer.setPixelRatio(window.devicePixelRatio);
+    
+    // Handle WebGL context loss (only add once)
+    if (this.rendererType === 'webgl' && !this.isRestoringContext) {
+      const canvas = this.renderer.domElement;
+      canvas.addEventListener('webglcontextlost', (event) => {
+        event.preventDefault();
+        console.warn('WebGL context lost, will attempt to restore...');
+        this.isRestoringContext = true;
+        this.rendererInitialized = false;
+      }, false);
+      
+      canvas.addEventListener('webglcontextrestored', () => {
+        console.log('WebGL context restored');
+        this.isRestoringContext = false;
+        // Just resize, don't reinitialize
+        this.onWindowResize();
+      }, false);
+    }
     
     // If container exists (runtime switch), re-attach
     if (this.container) {
@@ -548,9 +635,29 @@ export class Player implements IPlayer {
     }
   }
 
-  public async setRenderer(type: 'webgl' | 'webgpu'): Promise<void> {
+  /**
+   * Check if WebGPU is supported
+   */
+  private checkWebGPUSupport(): boolean {
+    // Check for WebGPU API
+    if (!navigator.gpu) {
+      return false;
+    }
+    
+    // Try to get adapter
+    try {
+      // This is async in reality, but we'll do a basic check
+      // The actual adapter request will happen when WebGPURenderer is created
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  public setRenderer(type: 'webgl' | 'webgpu'): void {
     if (this.rendererType === type) return;
     this.rendererType = type;
+    this.rendererInitialized = false;
     this.initRenderer();
   }
 
@@ -566,6 +673,10 @@ export class Player implements IPlayer {
       this.removePlanets();
       this.createPlanets();
     }
+  }
+
+  public setHitsoundEnabled(enabled: boolean): void {
+    this.hitsoundManager.setEnabled(enabled);
   }
 
   public setUseWorker(use: boolean): void {
@@ -602,6 +713,7 @@ export class Player implements IPlayer {
 
   public createPlayer(container: HTMLElement): void {
     this.container = container;
+    
     // Append current renderer element
     this.container.appendChild(this.renderer.domElement);
     
@@ -888,11 +1000,37 @@ export class Player implements IPlayer {
   }
 
   public renderPlayer(delta: number): void {
+    // Skip rendering if context is being restored
+    if (this.isRestoringContext) {
+      return;
+    }
+    
     if (this.renderer && this.scene && this.camera) {
-      if (this.renderMethod === 'async' || this.rendererType === 'webgpu') {
-        (this.renderer as any).renderAsync(this.scene, this.camera);
-      } else {
-        this.renderer.render(this.scene, this.camera);
+      try {
+        // For WebGPU, check if backend is initialized
+        const isWebGPU = this.rendererType === 'webgpu';
+        const backendReady = !isWebGPU || (this.renderer as any).backend !== null;
+        
+        if (!backendReady) {
+          // WebGPU backend not ready, skip this frame
+          return;
+        }
+        
+        // Check if WebGL context is lost
+        const gl = (this.renderer as any).getContext?.();
+        if (gl && gl.isContextLost?.()) {
+          return;
+        }
+        
+        if (this.renderMethod === 'async' || isWebGPU) {
+          (this.renderer as any).renderAsync(this.scene, this.camera).catch((e: Error) => {
+            console.warn('Render error:', e.message);
+          });
+        } else {
+          this.renderer.render(this.scene, this.camera);
+        }
+      } catch (e) {
+        console.warn('Render error:', e);
       }
     }
   }
@@ -1135,6 +1273,9 @@ export class Player implements IPlayer {
     
     // Clean up spatial grid
     this.spatialGrid.clear();
+    
+    // Clean up hitsound manager
+    this.hitsoundManager.dispose();
     
     if (this.container && this.renderer.domElement && this.renderer.domElement.parentNode === this.container) {
       this.container.removeChild(this.renderer.domElement);
@@ -1529,6 +1670,12 @@ export class Player implements IPlayer {
             while (this.currentTileIndex + 1 < this.tileStartTimes.length && 
                    this.tileStartTimes[this.currentTileIndex + 1] <= timeInLevel) {
                 this.currentTileIndex++;
+                // Play hitsound when arriving at the new tile (tileStartTimes[i] is the arrival time)
+                // But we just incremented, so we're now at tileIndex, and we should have played when entering it
+                // Actually, the sound should play when we START rotating around this tile
+                // tileStartTimes[i] = time when we START at tile i (arrival time)
+                // So when we increment to i, we just arrived at tile i
+                this.hitsoundManager.play();
             }
         }
     }

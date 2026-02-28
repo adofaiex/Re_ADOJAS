@@ -61,6 +61,12 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
           type: "showTrail",
         },
         {
+          id: "hitsoundEnabled",
+          title: t("settings.hitsoundEnabled.title"),
+          description: t("settings.hitsoundEnabled.description"),
+          type: "hitsoundEnabled",
+        },
+        {
           id: "useWorker",
           title: t("settings.useWorker.title"),
           description: t("settings.useWorker.description"),
@@ -273,6 +279,26 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                       </button>
                       <span className="text-sm text-slate-600 dark:text-slate-400">
                         {settings.showTrail ? t("settings.showTrail.enabled") : t("settings.showTrail.disabled")}
+                      </span>
+                    </div>
+                  )}
+
+                  {setting.type === "hitsoundEnabled" && (
+                    <div className="flex items-center gap-3">
+                      <button
+                        onClick={() => updateSettings({ hitsoundEnabled: !settings.hitsoundEnabled })}
+                        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                          settings.hitsoundEnabled ? "bg-purple-500" : "bg-slate-300 dark:bg-slate-600"
+                        }`}
+                      >
+                        <span
+                          className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                            settings.hitsoundEnabled ? "translate-x-6" : "translate-x-1"
+                          }`}
+                        />
+                      </button>
+                      <span className="text-sm text-slate-600 dark:text-slate-400">
+                        {settings.hitsoundEnabled ? t("settings.hitsoundEnabled.enabled") : t("settings.hitsoundEnabled.disabled")}
                       </span>
                     </div>
                   )}
