@@ -544,6 +544,8 @@ export class Player implements IPlayer {
       return;
     }
 
+    console.log('Initializing renderer (type:', this.rendererType, ')');
+
     // Clean up old renderer safely
     if (this.renderer) {
       try {
@@ -571,6 +573,22 @@ export class Player implements IPlayer {
         const gpuRenderer = new WebGPURenderer({ alpha: true, antialias: true });
         this.renderer = gpuRenderer;
         this.rendererInitialized = true;
+
+        // Handle WebGPU device loss
+        (gpuRenderer as any).init().then(() => {
+          const device = (gpuRenderer as any).backend.device;
+          if (device) {
+            device.lost.then((info: any) => {
+              console.warn('WebGPU device lost:', info.message);
+              if (info.reason !== 'destroyed') {
+                this.rendererInitialized = false;
+                this.initRenderer();
+              }
+            });
+          }
+        }).catch((e: Error) => {
+          console.warn('WebGPU initialization failed in init():', e);
+        });
       } catch (e) {
         console.warn('WebGPU initialization failed, falling back to WebGL:', e);
         this.rendererType = 'webgl';
@@ -623,7 +641,7 @@ export class Player implements IPlayer {
       canvas.addEventListener('webglcontextrestored', () => {
         console.log('WebGL context restored');
         this.isRestoringContext = false;
-        // Just resize, don't reinitialize
+        // Next render frame will trigger re-initialization via initRenderer
         this.onWindowResize();
       }, false);
     }
@@ -1000,6 +1018,12 @@ export class Player implements IPlayer {
   }
 
   public renderPlayer(delta: number): void {
+    // If renderer not initialized, try to initialize it
+    if (!this.rendererInitialized && !this.isRestoringContext) {
+      this.initRenderer();
+      return;
+    }
+
     // Skip rendering if context is being restored
     if (this.isRestoringContext) {
       return;
@@ -1235,7 +1259,9 @@ export class Player implements IPlayer {
 
   public destroyPlayer(): void {
     this.stopPlay();
-    this.music.dispose();
+    if (this.music) {
+      this.music.dispose();
+    }
     if (this.animationId) {
       cancelAnimationFrame(this.animationId);
     }
@@ -1275,13 +1301,18 @@ export class Player implements IPlayer {
     this.spatialGrid.clear();
     
     // Clean up hitsound manager
-    this.hitsoundManager.dispose();
-    
-    if (this.container && this.renderer.domElement && this.renderer.domElement.parentNode === this.container) {
-      this.container.removeChild(this.renderer.domElement);
+    if (this.hitsoundManager) {
+      this.hitsoundManager.dispose();
     }
     
-    this.renderer.dispose();
+    if (this.renderer) {
+      if (this.container && this.renderer.domElement && this.renderer.domElement.parentNode === this.container) {
+        this.container.removeChild(this.renderer.domElement);
+      }
+      
+      this.renderer.dispose();
+      this.renderer = null as any;
+    }
   }
 
   // --- Helper Methods ---
