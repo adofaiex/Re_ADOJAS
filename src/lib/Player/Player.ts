@@ -3,6 +3,7 @@ import {WebGPURenderer} from 'three/webgpu';
 import { IPlayer, ILevelData, IMusic, TargetFramerateType } from './types';
 import { Planet } from './Planet';
 import { HitsoundManager, HitsoundType } from './HitsoundManager';
+import { BloomEffect } from './BloomEffect';
 import createTrackMesh from '../Geo/mesh_reserve';
 import { getWorkerManager, disposeWorkerManager } from '../Geo/tileWorkerManager';
 
@@ -42,17 +43,17 @@ const EasingFunctions: { [key: string]: (t: number) => number } = {
     Unset: (t) => t
 };
 
-// Helper function to check if an event is enabled
-// enable: undefined | true | "" | "Enabled" -> enabled
-// enable: false | "Disabled" -> disabled
-const isEventEnabled = (event: any): boolean => {
-    if (event.enable === undefined) return true;
-    if (event.enable === true) return true;
-    if (event.enable === "") return true;
-    if (event.enable === "Enabled") return true;
-    if (event.enable === false) return false;
-    if (event.enable === "Disabled") return false;
-    // Default to enabled for unknown values
+// Helper function to check if an event is active (should be processed)
+// active: undefined | true | "" | "Enabled" -> active (process event)
+// active: false | "Disabled" -> inactive (skip event)
+const isEventActive = (event: any): boolean => {
+    if (event.active === undefined) return true;
+    if (event.active === true) return true;
+    if (event.active === "") return true;
+    if (event.active === "Enabled") return true;
+    if (event.active === false) return false;
+    if (event.active === "Disabled") return false;
+    // Default to active for unknown values
     return true;
 };
 
@@ -259,6 +260,18 @@ export class Player implements IPlayer {
   };
 
   private music: IMusic = new HTMLAudioMusic();
+  
+  // Bloom Effect
+  private bloomEffect: BloomEffect | null = null;
+  private bloomEnabled: boolean = false;
+  private bloomThreshold: number = 50;
+  private bloomIntensity: number = 100;
+  private bloomColor: string = 'ffffff';
+  private bloomTimeline: { time: number; event: any }[] = [];
+  private lastBloomTimelineIndex: number = -1;
+  
+  // Render target for post-processing
+  private renderTarget: THREE.WebGLRenderTarget | null = null;
 
   constructor(levelData: ILevelData, rendererType: 'webgl' | 'webgpu' = 'webgpu') {
     this.rendererType = rendererType;
@@ -293,6 +306,10 @@ export class Player implements IPlayer {
     // Initialize Three.js components
     this.scene = new THREE.Scene();
     
+    // Set background color from level settings
+    const bgColor = this.levelData.settings?.backgroundColor || '000000';
+    this.scene.background = new THREE.Color(`#${bgColor}`);
+    
     // Append extra tile at the end
     this.appendExtraTile();
 
@@ -301,6 +318,9 @@ export class Player implements IPlayer {
     
     // Build Camera Timeline
     this.buildCameraTimeline();
+    
+    // Build Bloom Timeline
+    this.buildBloomTimeline();
     
     // Add lights
     const ambientLight = new THREE.AmbientLight(0x404040, 1.0);
@@ -416,7 +436,7 @@ export class Player implements IPlayer {
             const events = this.tileEvents.get(i)!;
             events.forEach(event => {
                 // Skip disabled events
-                if (!isEventEnabled(event)) return;
+                if (!isEventActive(event)) return;
                 
                 if (event.eventType === 'Twirl') {
                     isCW = !isCW;
@@ -529,7 +549,7 @@ export class Player implements IPlayer {
             const events = this.tileEvents.get(lastIndex)!;
             events.forEach(event => {
                 // Skip disabled events
-                if (!isEventEnabled(event)) return;
+                if (!isEventActive(event)) return;
                 
                 if (event.eventType === 'Twirl') {
                     isCW = !isCW;
@@ -647,6 +667,11 @@ export class Player implements IPlayer {
     }
     
     this.renderer.setPixelRatio(window.devicePixelRatio);
+    
+    // Initialize Bloom Effect (WebGL only)
+    if (this.rendererType === 'webgl') {
+      this.bloomEffect = new BloomEffect();
+    }
     
     // Handle WebGL context loss (only add once)
     if (this.rendererType === 'webgl' && !this.isRestoringContext) {
@@ -1075,12 +1100,30 @@ export class Player implements IPlayer {
           return;
         }
         
-        if (this.renderMethod === 'async' || isWebGPU) {
-          (this.renderer as any).renderAsync(this.scene, this.camera).catch((e: Error) => {
-            console.warn('Render error:', e.message);
-          });
-        } else {
+        // Apply bloom effect if enabled (WebGL only for now)
+        if (this.bloomEnabled && !isWebGPU && this.bloomEffect && this.bloomEffect.getEnabled()) {
+          // Render to texture first
+          if (!this.renderTarget) {
+            this.renderTarget = new THREE.WebGLRenderTarget(
+              this.container?.clientWidth || window.innerWidth,
+              this.container?.clientHeight || window.innerHeight
+            );
+          }
+          
+          this.renderer.setRenderTarget(this.renderTarget);
           this.renderer.render(this.scene, this.camera);
+          this.renderer.setRenderTarget(null);
+          
+          // Apply bloom post-processing
+          this.bloomEffect.render(this.renderer as THREE.WebGLRenderer, this.renderTarget.texture);
+        } else {
+          if (this.renderMethod === 'async' || isWebGPU) {
+            (this.renderer as any).renderAsync(this.scene, this.camera).catch((e: Error) => {
+              console.warn('Render error:', e.message);
+            });
+          } else {
+            this.renderer.render(this.scene, this.camera);
+          }
         }
       } catch (e) {
         console.warn('Render error:', e);
@@ -1118,7 +1161,7 @@ export class Player implements IPlayer {
           
           events.forEach(event => {
               // Skip disabled events
-              if (!isEventEnabled(event)) return;
+              if (!isEventActive(event)) return;
               
               // Ensure floor is attached to the event for relativeTo: Tile
               const eventWithFloor = { ...event, floor };
@@ -1135,6 +1178,76 @@ export class Player implements IPlayer {
       // Sort by time
       entries.sort((a, b) => a.time - b.time);
       this.cameraTimeline = entries;
+  }
+  
+  private buildBloomTimeline(): void {
+      this.bloomTimeline = [];
+      const entries: { time: number; event: any }[] = [];
+      
+      this.tileEvents.forEach((events, floor) => {
+          const startTime = this.tileStartTimes[floor] || 0;
+          const bpm = this.tileBPM[floor] || 100;
+          const secPerBeat = 60 / bpm;
+          
+          events.forEach(event => {
+              if (event.eventType === 'Bloom') {
+                  const angleOffset = event.angleOffset || 0;
+                  const timeOffset = (angleOffset / 180) * secPerBeat;
+                  const eventTime = startTime + timeOffset;
+                  entries.push({ time: eventTime, event: { ...event, floor } });
+              }
+          });
+      });
+      
+      entries.sort((a, b) => a.time - b.time);
+      this.bloomTimeline = entries;
+  }
+  
+  private processBloomEvent(event: any): void {
+      const enabled = event.enabled;
+      
+      // Check if this is enabling or disabling bloom
+      if (enabled === true || enabled === 'Enabled' || enabled === '') {
+          this.bloomEnabled = true;
+          if (event.threshold !== undefined) this.bloomThreshold = event.threshold;
+          if (event.intensity !== undefined) this.bloomIntensity = event.intensity;
+          if (event.color !== undefined) {
+              // Handle different color formats
+              if (Array.isArray(event.color)) {
+                  // [r, g, b] format - convert to hex
+                  const r = Math.round(event.color[0] * 255).toString(16).padStart(2, '0');
+                  const g = Math.round(event.color[1] * 255).toString(16).padStart(2, '0');
+                  const b = Math.round(event.color[2] * 255).toString(16).padStart(2, '0');
+                  this.bloomColor = r + g + b;
+              } else if (typeof event.color === 'string') {
+                  // String format - may include # prefix or not
+                  this.bloomColor = event.color.replace('#', '');
+              } else {
+                  this.bloomColor = 'ffffff';
+              }
+          }
+      } else if (enabled === false || enabled === 'Disabled') {
+          this.bloomEnabled = false;
+      }
+      
+      // Debug log
+      console.log('Bloom event:', { 
+          enabled: this.bloomEnabled, 
+          threshold: this.bloomThreshold, 
+          intensity: this.bloomIntensity, 
+          color: this.bloomColor 
+      });
+      
+      // Update bloom effect
+      if (this.bloomEffect) {
+          this.bloomEffect.setEnabled(this.bloomEnabled);
+          this.bloomEffect.setThreshold(this.bloomThreshold / 100); // Convert 0-100 to 0-1
+          this.bloomEffect.setIntensity(this.bloomIntensity / 100);
+          this.bloomEffect.setColor(this.bloomColor);
+          
+          // Debug: log the actual color uniform
+          console.log('Bloom uniform color:', this.bloomEffect.getDebugColor());
+      }
   }
 
   private resetCameraState(): void {
@@ -1163,7 +1276,7 @@ export class Player implements IPlayer {
 
   private processCameraEvent(event: any, floorIndex: number): void {
       // Skip disabled events
-      if (!isEventEnabled(event)) return;
+      if (!isEventActive(event)) return;
       
       // Capture current camera state as the new transition start point
       // If there's an active transition, we need to capture the interpolated position
@@ -1296,6 +1409,19 @@ export class Player implements IPlayer {
       this.music.stop();
     }
     
+    // Reset Bloom state
+    this.bloomEnabled = false;
+    this.bloomThreshold = 50;
+    this.bloomIntensity = 100;
+    this.bloomColor = 'ffffff';
+    this.lastBloomTimelineIndex = -1;
+    if (this.bloomEffect) {
+      this.bloomEffect.setEnabled(false);
+      this.bloomEffect.setThreshold(0.5);
+      this.bloomEffect.setIntensity(1);
+      this.bloomEffect.setColor('ffffff');
+    }
+    
     // Reset camera to start or keep where it is? Usually reset for preview.
     // this.cameraPosition.set(0, 0, 0);
     // this.updateCamera();
@@ -1374,6 +1500,18 @@ export class Player implements IPlayer {
       this.hitsoundManager.dispose();
     }
     
+    // Clean up bloom effect
+    if (this.bloomEffect) {
+      this.bloomEffect.dispose();
+      this.bloomEffect = null;
+    }
+    
+    // Clean up render target
+    if (this.renderTarget) {
+      this.renderTarget.dispose();
+      this.renderTarget = null;
+    }
+    
     if (this.renderer) {
       if (this.container && this.renderer.domElement && this.renderer.domElement.parentNode === this.container) {
         this.container.removeChild(this.renderer.domElement);
@@ -1407,6 +1545,14 @@ export class Player implements IPlayer {
     
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(width, height);
+    
+    // Update render target size for bloom
+    if (this.renderTarget) {
+      this.renderTarget.setSize(width, height);
+    }
+    if (this.bloomEffect) {
+      this.bloomEffect.setSize(width, height);
+    }
     
     this.updateVisibleTiles();
   }
@@ -1950,6 +2096,23 @@ export class Player implements IPlayer {
           this.lastCameraTimelineIndex++;
           const entry = this.cameraTimeline[this.lastCameraTimelineIndex];
           this.processCameraEvent(entry.event, entry.event.floor || 0);
+      }
+      
+      // 1.5 Process Bloom events
+      if (this.lastBloomTimelineIndex >= 0) {
+          const currentEntry = this.bloomTimeline[this.lastBloomTimelineIndex];
+          if (currentEntry && timeInLevel < currentEntry.time) {
+              // Backward seek detected
+              this.bloomEnabled = false;
+              this.lastBloomTimelineIndex = -1;
+          }
+      }
+      
+      while (this.lastBloomTimelineIndex + 1 < this.bloomTimeline.length && 
+             this.bloomTimeline[this.lastBloomTimelineIndex + 1].time <= timeInLevel) {
+          this.lastBloomTimelineIndex++;
+          const entry = this.bloomTimeline[this.lastBloomTimelineIndex];
+          this.processBloomEvent(entry.event);
       }
       
       // 2. Interpolate Logical Camera State (if transition active)
