@@ -4,7 +4,7 @@ import type React from "react"
 import { useEffect, useRef, useState, useCallback } from "react"
 import { useNavigate } from "react-router-dom"
 import { Button } from "@/components/ui/button"
-import { ArrowLeft, Settings, Save, Upload, Download, Music } from "lucide-react"
+import { ArrowLeft, Settings, Save, Upload, Download, Music, Video } from "lucide-react"
 import { useTheme } from "@/hooks/use-theme"
 import { useI18n } from "@/lib/i18n/context"
 import * as THREE from "three"
@@ -988,6 +988,7 @@ export default function EditorPage(): JSX.Element {
   const infoRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const audioInputRef = useRef<HTMLInputElement>(null)
+  const videoInputRef = useRef<HTMLInputElement>(null)
   const previewerRef = useRef<Player | null>(null)
   const [isLoading, setIsLoading] = useState<boolean>(false)
   const [loadingProgress, setLoadingProgress] = useState<number>(0)
@@ -1343,6 +1344,24 @@ export default function EditorPage(): JSX.Element {
     []
   )
 
+  // 视频加载处理
+  const handleVideoLoad = useCallback(
+    (event: React.ChangeEvent<HTMLInputElement>): void => {
+      const file = event.target.files?.[0]
+      if (!file) return
+
+      const url = URL.createObjectURL(file)
+      
+      if (previewerRef.current) {
+          previewerRef.current.loadVideo(url)
+          window.showNotification?.("success", "Video loaded successfully")
+      } else {
+          window.showNotification?.("warning", "Please load a level first")
+      }
+    },
+    []
+  )
+
   // 监听渲染器设置变化
   useEffect(() => {
     if (previewerRef.current && settings.renderer) {
@@ -1517,6 +1536,7 @@ export default function EditorPage(): JSX.Element {
       {/* Hidden file inputs */}
       <input ref={fileInputRef} type="file" accept=".adofai,.json" onChange={handleFileLoad} className="hidden" />
       <input ref={audioInputRef} type="file" accept="audio/*" onChange={handleAudioLoad} className="hidden" />
+      <input ref={videoInputRef} type="file" accept="video/*" onChange={handleVideoLoad} className="hidden" />
 
       {/* Floating Header Buttons */}
       <div className="absolute top-0 left-0 right-0 px-4 py-3 flex justify-between items-center z-10 pointer-events-none">
@@ -1565,6 +1585,20 @@ export default function EditorPage(): JSX.Element {
             title="Load Music"
           >
             <Music className="w-4 h-4" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className={`${
+              isDark
+                ? "text-slate-300 hover:text-white hover:bg-slate-700"
+                : "text-slate-700 hover:text-slate-900 hover:bg-slate-100"
+            } bg-black/20 backdrop-blur-sm ${adofaiFile?.settings?.bgVideo ? "border border-purple-500/50" : ""}`}
+            onClick={() => videoInputRef.current?.click()}
+            disabled={!adofaiFile}
+            title="Load Video"
+          >
+            <Video className="w-4 h-4" />
           </Button>
           <Button
             variant="ghost"

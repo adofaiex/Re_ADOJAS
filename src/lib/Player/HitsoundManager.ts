@@ -36,7 +36,7 @@ export type HitsoundType =
   | 'None';
 
 // Map hitsound type to file name
-const hitsoundFileMap: Record<string, string> = {
+const hitsoundFileMap: Record<HitsoundType, string> = {
   'Kick': 'sndKick.wav',
   'KickHouse': 'sndKickHouse.wav',
   'KickChroma': 'sndKickChroma.wav',
@@ -71,10 +71,15 @@ const hitsoundFileMap: Record<string, string> = {
 // Audio buffer cache using AudioContext
 let audioContext: AudioContext | null = null;
 const audioBufferCache: Map<string, AudioBuffer> = new Map();
-const audioSourcePool: Map<string, AudioBufferSourceNode[]> = new Map();
+
+// Base64 sounds for static pages (Fallback)
+const embeddedSounds: Record<string, string> = {
+  // We can fill this with small base64 samples or leave empty for dynamic fetch
+  // For now, we use a dynamic loader that works with Vite/Webpack assets
+};
 
 // Get or create AudioContext
-function getAudioContext(): AudioContext {
+export function getAudioContext(): AudioContext {
   if (!audioContext) {
     audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
   }
@@ -83,12 +88,45 @@ function getAudioContext(): AudioContext {
 
 // Load audio buffer
 async function loadAudioBuffer(fileName: string): Promise<AudioBuffer | null> {
+  if (!fileName) return null;
   if (audioBufferCache.has(fileName)) {
     return audioBufferCache.get(fileName)!;
   }
   
   try {
-    const response = await fetch(`/src/sounds/${fileName}`);
+    // Check if we have an embedded version
+    if (embeddedSounds[fileName]) {
+        const base64 = embeddedSounds[fileName];
+        const binary = atob(base64);
+        const arrayBuffer = new ArrayBuffer(binary.length);
+        const uint8Array = new Uint8Array(arrayBuffer);
+        for (let i = 0; i < binary.length; i++) uint8Array[i] = binary.charCodeAt(i);
+        const audioBuffer = await getAudioContext().decodeAudioData(arrayBuffer);
+        audioBufferCache.set(fileName, audioBuffer);
+        return audioBuffer;
+    }
+
+    // Try multiple possible paths for different environments
+    const paths = [
+        `/src/sounds/${fileName}`,
+        `./src/sounds/${fileName}`,
+        `./sounds/${fileName}`,
+        `../sounds/${fileName}`
+    ];
+
+    let response: Response | null = null;
+    for (const path of paths) {
+        try {
+            const res = await fetch(path);
+            if (res.ok) {
+                response = res;
+                break;
+            }
+        } catch (e) { /* ignore and try next path */ }
+    }
+
+    if (!response || !response.ok) throw new Error(`Could not find ${fileName}`);
+
     const arrayBuffer = await response.arrayBuffer();
     const audioBuffer = await getAudioContext().decodeAudioData(arrayBuffer);
     audioBufferCache.set(fileName, audioBuffer);
@@ -99,29 +137,9 @@ async function loadAudioBuffer(fileName: string): Promise<AudioBuffer | null> {
   }
 }
 
-// Play audio buffer
-function playAudioBuffer(buffer: AudioBuffer, volume: number): void {
-  const ctx = getAudioContext();
-  
-  // Resume context if suspended (needed for autoplay policy)
-  if (ctx.state === 'suspended') {
-    ctx.resume();
-  }
-  
-  const source = ctx.createBufferSource();
-  source.buffer = buffer;
-  
-  const gainNode = ctx.createGain();
-  gainNode.gain.value = volume;
-  
-  source.connect(gainNode);
-  gainNode.connect(ctx.destination);
-  
-  source.start(0);
-}
-
 /**
  * Hitsound Manager class
+ * Optimised for high performance and pre-scheduling
  */
 export class HitsoundManager {
   private hitsoundType: HitsoundType = 'Kick';
@@ -129,10 +147,24 @@ export class HitsoundManager {
   private enabled: boolean = true;
   private currentBuffer: AudioBuffer | null = null;
   
+  // Scheduler state
+  private scheduledSources: AudioBufferSourceNode[] = [];
+  private gainNode: GainNode | null = null;
+  
   constructor(hitsoundType: HitsoundType = 'Kick', volume: number = 100) {
     this.hitsoundType = hitsoundType;
     this.volume = volume;
     this.preloadHitsound(hitsoundType);
+  }
+  
+  private getGainNode(): GainNode {
+    if (!this.gainNode) {
+      const ctx = getAudioContext();
+      this.gainNode = ctx.createGain();
+      this.gainNode.connect(ctx.destination);
+    }
+    this.gainNode.gain.value = this.volume / 100;
+    return this.gainNode;
   }
   
   /**
@@ -151,6 +183,7 @@ export class HitsoundManager {
    * Set the hitsound type
    */
   setHitsoundType(type: HitsoundType): void {
+    if (this.hitsoundType === type) return;
     this.hitsoundType = type;
     this.preloadHitsound(type);
   }
@@ -160,6 +193,9 @@ export class HitsoundManager {
    */
   setVolume(volume: number): void {
     this.volume = Math.max(0, Math.min(100, volume));
+    if (this.gainNode) {
+      this.gainNode.gain.value = this.volume / 100;
+    }
   }
   
   /**
@@ -167,53 +203,93 @@ export class HitsoundManager {
    */
   setEnabled(enabled: boolean): void {
     this.enabled = enabled;
+    if (!enabled) {
+      this.stopAll();
+    }
   }
   
   /**
-   * Play hit sound
+   * Schedule all hitsounds based on tile timestamps
+   * @param timestamps Array of times (in seconds) to play hitsounds
+   * @param startTime The performance.now() reference for t=0
+   */
+  scheduleAll(timestamps: number[], startTime: number): void {
+    if (!this.enabled || this.hitsoundType === 'None' || !this.currentBuffer) return;
+    
+    this.stopAll();
+    
+    const ctx = getAudioContext();
+    const gain = this.getGainNode();
+    
+    // We schedule in batches if too many, but for now let's try direct
+    // Only schedule if within reasonable range or just do all?
+    // 60w nodes might be too many for the browser to handle at once.
+    // ADOFAI high BPM usually means many hits in short time.
+    
+    // For 60w tiles, we should only schedule a "window" of hits.
+    // However, the user wants "timestamp stitching" effect.
+    // Scheduling nodes is very cheap compared to playing them in a loop.
+    
+    const now = ctx.currentTime;
+    const baseTime = startTime / 1000; // startTime is usually performance.now()
+    
+    // Optimization: Only schedule what's ahead
+    // But since this is called at startPlay, we schedule everything.
+    
+    for (let i = 0; i < timestamps.length; i++) {
+        const t = timestamps[i];
+        if (t < 0) continue; // Skip countdown hits if needed, or schedule them too
+        
+        const source = ctx.createBufferSource();
+        source.buffer = this.currentBuffer;
+        source.connect(gain);
+        
+        // ctx.currentTime + (t - currentLevelTime)
+        // We assume t=0 is the moment we start playing.
+        source.start(now + t);
+        this.scheduledSources.push(source);
+    }
+    
+    console.log(`Scheduled ${this.scheduledSources.length} hitsounds`);
+  }
+
+  /**
+   * Stop all scheduled sounds
+   */
+  stopAll(): void {
+    for (const source of this.scheduledSources) {
+      try {
+        source.stop();
+        source.disconnect();
+      } catch (e) {
+        // Already stopped or not started
+      }
+    }
+    this.scheduledSources = [];
+  }
+  
+  /**
+   * Play hit sound (Real-time fallback)
    */
   play(): void {
-    if (!this.enabled || this.hitsoundType === 'None') return;
+    if (!this.enabled || this.hitsoundType === 'None' || !this.currentBuffer) return;
     
-    // Use cached buffer if available
-    if (this.currentBuffer) {
-      playAudioBuffer(this.currentBuffer, this.volume / 100);
-      return;
-    }
+    const ctx = getAudioContext();
+    if (ctx.state === 'suspended') ctx.resume();
     
-    // Fallback: try to load and play
-    const fileName = hitsoundFileMap[this.hitsoundType];
-    if (fileName) {
-      loadAudioBuffer(fileName).then(buffer => {
-        if (buffer) {
-          this.currentBuffer = buffer;
-          playAudioBuffer(buffer, this.volume / 100);
-        }
-      });
-    }
+    const source = ctx.createBufferSource();
+    source.buffer = this.currentBuffer;
+    source.connect(this.getGainNode());
+    source.start(0);
   }
   
   /**
-   * Play a specific hitsound type (one-shot)
-   */
-  async playType(type: HitsoundType, volume?: number): Promise<void> {
-    if (type === 'None') return;
-    
-    const fileName = hitsoundFileMap[type];
-    if (!fileName) return;
-    
-    const buffer = await loadAudioBuffer(fileName);
-    if (buffer) {
-      playAudioBuffer(buffer, (volume ?? this.volume) / 100);
-    }
-  }
-  
-  /**
-   * Dispose and clear cache
+   * Dispose and clear
    */
   dispose(): void {
+    this.stopAll();
     this.currentBuffer = null;
-    // Don't clear the global cache - other instances might use it
+    this.gainNode = null;
   }
 }
 

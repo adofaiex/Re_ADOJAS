@@ -14,7 +14,7 @@ export const translations = {
         pathData: "正在解析路径数据...",
         angleData: "正在处理角度数据...",
         relativeAngle: "正在计算相对角度...",
-        tilePosition: "正在计算瓦片坐标...",
+        tilePosition: "正在计算砖块坐标...",
         complete: "解析完成!",
       },
     },

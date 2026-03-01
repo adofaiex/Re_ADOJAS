@@ -36,6 +36,7 @@ export interface IMusic {
   readonly isPlaying: boolean;
   readonly isPaused: boolean;
   readonly hasAudio: boolean;
+  readonly amplitude: number;
   dispose(): void;
 }
 

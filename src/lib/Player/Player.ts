@@ -61,10 +61,38 @@ class HTMLAudioMusic implements IMusic {
   private audio: HTMLAudioElement;
   private _isPlaying: boolean = false;
   private _isPaused: boolean = false;
+  
+  private audioContext: AudioContext | null = null;
+  private analyser: AnalyserNode | null = null;
+  private source: MediaElementAudioSourceNode | null = null;
+  private dataArray: Uint8Array | null = null;
 
   constructor() {
     this.audio = new Audio();
     this.audio.preload = 'auto';
+    this.audio.crossOrigin = 'anonymous';
+  }
+
+  private initAudioContext(): void {
+    if (this.audioContext) {
+      if (this.audioContext.state === 'suspended') {
+        this.audioContext.resume();
+      }
+      return;
+    }
+    
+    try {
+      this.audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+      this.analyser = this.audioContext.createAnalyser();
+      this.analyser.fftSize = 256;
+      this.dataArray = new Uint8Array(this.analyser.frequencyBinCount);
+      
+      this.source = this.audioContext.createMediaElementSource(this.audio);
+      this.source.connect(this.analyser);
+      this.analyser.connect(this.audioContext.destination);
+    } catch (e) {
+      console.warn("AudioContext failed:", e);
+    }
   }
 
   load(src: string): void {
@@ -73,6 +101,7 @@ class HTMLAudioMusic implements IMusic {
   }
 
   play(): void {
+    this.initAudioContext();
     this.audio.play().catch(e => console.error("Audio play failed", e));
     this._isPlaying = true;
     this._isPaused = false;
@@ -138,10 +167,26 @@ class HTMLAudioMusic implements IMusic {
       return !!this.audio.src && this.audio.src !== window.location.href;
   }
 
+  get amplitude(): number {
+    if (!this.analyser || !this.dataArray) return 0;
+    // Cast to any to bypass strict type checking for Uint8Array buffer types
+    this.analyser.getByteTimeDomainData(this.dataArray as any);
+    
+    let sum = 0;
+    for (let i = 0; i < this.dataArray.length; i++) {
+      const v = (this.dataArray[i] - 128) / 128;
+      sum += v * v;
+    }
+    return Math.sqrt(sum / this.dataArray.length);
+  }
+
   dispose(): void {
     this.stop();
     this.audio.src = '';
     this.audio.remove();
+    if (this.audioContext) {
+      this.audioContext.close();
+    }
   }
 }
 
@@ -167,7 +212,6 @@ export class Player implements IPlayer {
   // Tile Management
   private tiles: Map<string, THREE.Mesh> = new Map();
   private visibleTiles: Set<string> = new Set();
-  private tileMaterials: THREE.MeshBasicMaterial[] = [];
   private tileLimit: number = 0; // 0 means no limit? Or use a sensible default
   
   // Spatial indexing for fast visibility checks
@@ -270,6 +314,23 @@ export class Player implements IPlayer {
   private bloomTimeline: { time: number; event: any }[] = [];
   private lastBloomTimelineIndex: number = -1;
   
+  // Track Color
+  private tileColors: { color: string, secondaryColor: string }[] = [];
+  private recolorTimeline: { time: number; event: any }[] = [];
+  private lastRecolorTimelineIndex: number = -1;
+  private tileRecolorConfigs: (any | null)[] = [];
+  
+  // Shared Renderer Resources
+  private sharedTileMaterial: THREE.ShaderMaterial | null = null;
+  private geometryCache: Map<string, THREE.BufferGeometry> = new Map();
+  private maxCachedTiles: number = 2000; // Only keep this many meshes in memory
+
+  // Video Background
+  private videoElement: HTMLVideoElement | null = null;
+  private videoTexture: THREE.VideoTexture | null = null;
+  private videoMesh: THREE.Mesh | null = null;
+  private videoOffset: number = 0; // ms
+
   // Render target for post-processing
   private renderTarget: THREE.WebGLRenderTarget | null = null;
 
@@ -308,10 +369,16 @@ export class Player implements IPlayer {
     
     // Set background color from level settings
     const bgColor = this.levelData.settings?.backgroundColor || '000000';
-    this.scene.background = new THREE.Color(`#${bgColor}`);
+    this.scene.background = new THREE.Color(this.formatHexColor(bgColor));
     
+    // Initialize video settings
+    this.videoOffset = this.levelData.settings?.vidOffset || 0;
+
     // Append extra tile at the end
     this.appendExtraTile();
+
+    // Initialize tile colors from settings (now after appendExtraTile)
+    this.initTileColors();
 
     // Calculate cumulative rotations
     this.calculateCumulativeRotations();
@@ -334,13 +401,26 @@ export class Player implements IPlayer {
     // Default camera setup - will be updated on resize/init
     this.camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 1000);
     this.camera.position.z = 10;
+    this.scene.add(this.camera);
     
     this.initRenderer();
     
-    this.tileMaterials = this.createTileMaterials();
+    // Initialize shared decoration resources
+    this.initSharedDecorationResources();
     
     // Build spatial index for fast visibility checks
     this.buildSpatialIndex();
+
+    // Pre-calculate hitsound schedule (Moved from startPlay to init for performance)
+    this.recalculateHitsoundSchedule();
+  }
+
+  private recalculateHitsoundSchedule(): void {
+    if (!this.tileStartTimes || this.tileStartTimes.length === 0) return;
+    
+    // We don't call scheduleAll here because AudioContext might be suspended 
+    // and we don't have the real startTime yet. 
+    // But we ensure tileStartTimes are ready.
   }
   
   /**
@@ -352,16 +432,19 @@ export class Player implements IPlayer {
     const tiles = this.levelData.tiles;
     if (!tiles) return;
     
+    const gridSize = this.spatialGridSize;
     for (let i = 0; i < tiles.length; i++) {
-      const [x, y] = tiles[i].position;
-      const cellX = Math.floor(x / this.spatialGridSize);
-      const cellY = Math.floor(y / this.spatialGridSize);
-      const key = cellX * 100000 + cellY; // Use number key for faster lookup
+      const pos = tiles[i].position;
+      const cellX = Math.floor(pos[0] / gridSize);
+      const cellY = Math.floor(pos[1] / gridSize);
+      const key = cellX * 100000 + cellY; 
       
-      if (!this.spatialGrid.has(key)) {
-        this.spatialGrid.set(key, []);
+      let list = this.spatialGrid.get(key);
+      if (list === undefined) {
+        list = [];
+        this.spatialGrid.set(key, list);
       }
-      this.spatialGrid.get(key)!.push(i);
+      list.push(i);
     }
   }
   
@@ -408,16 +491,20 @@ export class Player implements IPlayer {
     const tiles = this.levelData.tiles;
     if (!tiles || tiles.length === 0) return;
 
-    this.cumulativeRotations = [0];
-    this.tileStartTimes = [0];
-    this.tileDurations = [];
-    this.tileExtraRotations = [];
-    this.tileIsCW = [];
-    this.tileBPM = [];
-    this.tileStartAngle = [];
-    this.tileTotalAngle = [];
-    this.tileStartDist = [];
-    this.tileEndDist = [];
+    const n = tiles.length;
+    this.cumulativeRotations = new Array(n);
+    this.tileStartTimes = new Array(n);
+    this.tileDurations = new Array(n - 1);
+    this.tileExtraRotations = new Array(n);
+    this.tileIsCW = new Array(n);
+    this.tileBPM = new Array(n);
+    this.tileStartAngle = new Array(n - 1);
+    this.tileTotalAngle = new Array(n - 1);
+    this.tileStartDist = new Array(n - 1);
+    this.tileEndDist = new Array(n - 1);
+    
+    this.cumulativeRotations[0] = 0;
+    this.tileStartTimes[0] = 0;
     
     let totalRotation = 0;
     let totalTime = 0;
@@ -427,16 +514,14 @@ export class Player implements IPlayer {
     let isCW = true;
 
     // We iterate through tiles to calculate the rotation/time to reach the NEXT tile.
-    // i is the pivot tile index.
-    // The movement is from tile i to i+1.
-    for (let i = 0; i < tiles.length - 1; i++) {
+    for (let i = 0; i < n - 1; i++) {
         // Process events for current tile
         let extraRotation = 0;
-        if (this.tileEvents.has(i)) {
-            const events = this.tileEvents.get(i)!;
-            events.forEach(event => {
-                // Skip disabled events
-                if (!isEventActive(event)) return;
+        const events = this.tileEvents.get(i);
+        if (events) {
+            for (let j = 0; j < events.length; j++) {
+                const event = events[j];
+                if (!isEventActive(event)) continue;
                 
                 if (event.eventType === 'Twirl') {
                     isCW = !isCW;
@@ -447,63 +532,41 @@ export class Player implements IPlayer {
                         currentBPM = event.beatsPerMinute;
                     }
                 } else if (event.eventType === 'Pause') {
-                    // SharpFAI logic: extraHold = duration / 2.0 (in rotations)
-                    const duration = event.duration || 0;
-                    extraRotation += duration / 2.0;
+                    extraRotation += (event.duration || 0) / 2.0;
                 }
-            });
+            }
         }
         
-        // Store CW state and BPM for this tile
-        this.tileIsCW.push(isCW);
-        this.tileBPM.push(currentBPM);
+        this.tileIsCW[i] = isCW;
+        this.tileBPM[i] = currentBPM;
         
         const pivot = tiles[i];
         const next = tiles[i + 1];
 
-        // Start angle: where the moving planet is relative to the pivot at start of turn
-        // This is always the angle FROM pivot TO the previous tile (where the ball just landed)
         let startAngle = 0;
         if (i === 0) {
-            // First tile uses level rotation setting (angle ball approach from)
             startAngle = ((this.levelData.settings.rotation || 0) + 180) * Math.PI / 180;
         } else {
             const prev = tiles[i - 1];
             startAngle = Math.atan2(prev.position[1] - pivot.position[1], prev.position[0] - pivot.position[0]);
         }
 
-        // Calculate rotation angle
-        // In ADOFAI, pivot.angle is the degree value the ball rotates.
-        // 180 = straight, 90 = right turn, 0 = Midspin, 360 = Hairpin
         const relativeAngle = (pivot.angle !== undefined) ? pivot.angle : 180;
         let totalAngle = (relativeAngle * Math.PI) / 180;
-        if (isCW) {
-            totalAngle = -totalAngle;
-        }
+        if (isCW) totalAngle = -totalAngle;
 
-        // Add extra rotation from Pause
-        if (isCW) {
-            totalAngle -= extraRotation * 2 * Math.PI;
-        } else {
-            totalAngle += extraRotation * 2 * Math.PI;
-        }
+        if (isCW) totalAngle -= extraRotation * 2 * Math.PI;
+        else totalAngle += extraRotation * 2 * Math.PI;
 
-        // Magnitude in rotations (1.0 = 360 deg)
         const rotationAmount = Math.abs(totalAngle) / (2 * Math.PI);
-        
-        // Duration in seconds
-        // 180 degrees (0.5 rotation) = 1 beat
-        // beats = rotationAmount * 2
-        // seconds = beats * (60 / BPM)
         const duration = (rotationAmount * 2) * (60 / currentBPM);
         
         totalRotation += rotationAmount;
         totalTime += duration;
         
-        this.tileStartAngle.push(startAngle);
-        this.tileTotalAngle.push(totalAngle);
+        this.tileStartAngle[i] = startAngle;
+        this.tileTotalAngle[i] = totalAngle;
         
-        // Radius interpolation
         let startDist = 1.0;
         if (i > 0) {
             const prev = tiles[i - 1];
@@ -511,64 +574,47 @@ export class Player implements IPlayer {
             const pdy = prev.position[1] - pivot.position[1];
             startDist = Math.sqrt(pdx*pdx + pdy*pdy);
         }
-        this.tileStartDist.push(startDist);
+        this.tileStartDist[i] = startDist;
         
         const edx = next.position[0] - pivot.position[0];
         const edy = next.position[1] - pivot.position[1];
-        this.tileEndDist.push(Math.sqrt(edx*edx + edy*edy));
+        this.tileEndDist[i] = Math.sqrt(edx*edx + edy*edy);
 
-        this.cumulativeRotations.push(totalRotation);
-        this.tileDurations.push(duration);
-        this.tileExtraRotations.push(extraRotation);
-        this.tileStartTimes.push(totalTime);
+        this.cumulativeRotations[i+1] = totalRotation;
+        this.tileDurations[i] = duration;
+        this.tileExtraRotations[i] = extraRotation;
+        this.tileStartTimes[i+1] = totalTime;
     }
     
     // Shift all tileStartTimes so that tileStartTimes[1] is 0
-    // This ensures that at t=0 (offset), we have completed the movement T0->T1 and are at T1.
-    // The movement T0->T1 (index 0) will have negative start time.
-    if (this.tileStartTimes.length > 1) {
+    if (n > 1) {
         const shift = this.tileStartTimes[1];
-        for (let i = 0; i < this.tileStartTimes.length; i++) {
+        for (let i = 0; i < n; i++) {
              this.tileStartTimes[i] -= shift;
-        }
-    } else if (this.tileDurations.length > 0) {
-        // If only 1 movement, shift by duration of first movement
-        const shift = this.tileDurations[0];
-        this.tileStartTimes[0] -= shift;
-        if (this.tileStartTimes.length > 1) {
-             this.tileStartTimes[1] -= shift;
         }
     }
     
-    // Handle the last tile (for infinite rotation)
-    // We can assume the last tile has the same settings as the previous one
-    if (tiles.length > 0) {
-        const lastIndex = tiles.length - 1;
+    // Handle the last tile
+    if (n > 0) {
+        const lastIndex = n - 1;
         let extraRotation = 0;
-        if (this.tileEvents.has(lastIndex)) {
-            const events = this.tileEvents.get(lastIndex)!;
-            events.forEach(event => {
-                // Skip disabled events
-                if (!isEventActive(event)) return;
-                
-                if (event.eventType === 'Twirl') {
-                    isCW = !isCW;
-                } else if (event.eventType === 'SetSpeed') {
-                    if (event.speedType === 'Multiplier') {
-                        currentBPM *= event.bpmMultiplier;
-                    } else {
-                        currentBPM = event.beatsPerMinute;
-                    }
+        const events = this.tileEvents.get(lastIndex);
+        if (events) {
+            for (let j = 0; j < events.length; j++) {
+                const event = events[j];
+                if (!isEventActive(event)) continue;
+                if (event.eventType === 'Twirl') isCW = !isCW;
+                else if (event.eventType === 'SetSpeed') {
+                    if (event.speedType === 'Multiplier') currentBPM *= event.bpmMultiplier;
+                    else currentBPM = event.beatsPerMinute;
                 } else if (event.eventType === 'Pause') {
-                    const duration = event.duration || 0;
-                    extraRotation += duration / 2.0;
+                    extraRotation += (event.duration || 0) / 2.0;
                 }
-            });
+            }
         }
-
-        this.tileIsCW.push(isCW);
-        this.tileBPM.push(currentBPM);
-        this.tileExtraRotations.push(extraRotation);
+        this.tileIsCW[lastIndex] = isCW;
+        this.tileBPM[lastIndex] = currentBPM;
+        this.tileExtraRotations[lastIndex] = extraRotation;
     }
     
     this.totalLevelRotation = totalRotation;
@@ -587,15 +633,16 @@ export class Player implements IPlayer {
     console.log('Initializing renderer (type:', this.rendererType, ')');
 
     // Clean up old renderer safely
-    if (this.renderer) {
+    const oldRenderer = this.renderer;
+    if (oldRenderer) {
       try {
         // Check if renderer is properly initialized before disposing
-        const hasBackend = (this.renderer as any).backend !== undefined && (this.renderer as any).backend !== null;
+        const hasBackend = (oldRenderer as any).backend !== undefined && (oldRenderer as any).backend !== null;
         if (hasBackend || this.rendererType === 'webgl') {
-          if (this.container && this.renderer.domElement?.parentNode === this.container) {
-            this.container.removeChild(this.renderer.domElement);
+          if (this.container && oldRenderer.domElement && oldRenderer.domElement.parentNode === this.container) {
+            this.container.removeChild(oldRenderer.domElement);
           }
-          this.renderer.dispose();
+          oldRenderer.dispose();
         }
       } catch (e) {
         console.warn('Error disposing old renderer:', e);
@@ -983,6 +1030,7 @@ export class Player implements IPlayer {
       
       if (this.isPlaying && !this.isPaused) {
         this.updatePlayer(delta);
+        this.syncVideo();
       }
       
       this.renderPlayer(delta);
@@ -1069,6 +1117,24 @@ export class Player implements IPlayer {
     
     // Update camera to follow
     this.updateCameraFollow(delta);
+
+    // Update animated track colors
+    this.updateAnimatedTiles();
+  }
+
+  private updateAnimatedTiles(): void {
+    const time = this.elapsedTime / 1000;
+    
+    // Only update visible tiles that have dynamic color types
+    this.visibleTiles.forEach(id => {
+        const index = parseInt(id);
+        const config = this.tileRecolorConfigs[index];
+        
+        if (config && ['Glow', 'Blink', 'Rainbow', 'Volume'].includes(config.trackColorType)) {
+            const rendered = this.getTileRenderer(index, time, config);
+            this.applyTileColor(index, rendered.color, rendered.bgcolor);
+        }
+    });
   }
 
   public renderPlayer(delta: number): void {
@@ -1148,6 +1214,32 @@ export class Player implements IPlayer {
     this.lastCameraTimelineIndex = -1;
     this.resetCameraState();
     this.cameraTransition.active = false;
+    
+    // Build Recolor timeline
+    this.buildRecolorTimeline();
+    this.lastRecolorTimelineIndex = -1;
+
+    // Calculate delay for countdown and offset
+    const settings = this.levelData.settings;
+    const initialBPM = settings.bpm || 100;
+    const initialSecPerBeat = 60 / initialBPM;
+    const countdownTicks = settings.countdownTicks || 4;
+    const countdownDuration = countdownTicks * initialSecPerBeat;
+    const offset = this.music.hasAudio ? (settings.offset || 0) : 0;
+    const totalDelay = countdownDuration + (offset / 1000);
+
+    // Schedule all hitsounds for high performance
+    // Fix: Filter midspins (angle: 0) and use precise timing
+    const hitsToSchedule: number[] = [];
+    for (let i = 1; i < this.tileStartTimes.length; i++) {
+        const t = this.tileStartTimes[i];
+        const tile = this.levelData.tiles[i];
+        if (tile && tile.angle !== 0) {
+            // Add totalDelay so it plays exactly when ball hits Tile 1 (t=0)
+            hitsToSchedule.push(t + totalDelay);
+        }
+    }
+    this.hitsoundManager.scheduleAll(hitsToSchedule, performance.now());
   }
 
   private buildCameraTimeline(): void {
@@ -1409,10 +1501,19 @@ export class Player implements IPlayer {
       this.music.stop();
     }
     
+    // Stop hitsounds
+    this.hitsoundManager.stopAll();
+    
+    // Reset Video
+    if (this.videoElement) {
+        this.videoElement.pause();
+        this.videoElement.currentTime = 0;
+    }
+    
     // Reset Bloom state
     this.bloomEnabled = false;
-    this.bloomThreshold = 50;
-    this.bloomIntensity = 100;
+    this.bloomThreshold = 10; // Even lower threshold (0.1) to ensure thin neon lines bloom
+    this.bloomIntensity = 150; 
     this.bloomColor = 'ffffff';
     this.lastBloomTimelineIndex = -1;
     if (this.bloomEffect) {
@@ -1425,6 +1526,13 @@ export class Player implements IPlayer {
     // Reset camera to start or keep where it is? Usually reset for preview.
     // this.cameraPosition.set(0, 0, 0);
     // this.updateCamera();
+    
+    // Reset colors to static preview state
+    this.initTileColors();
+    this.lastRecolorTimelineIndex = -1;
+    this.tiles.forEach((_, id) => {
+        this.updateTileMeshColor(parseInt(id));
+    });
   }
 
   public pausePlay(): void {
@@ -1434,6 +1542,7 @@ export class Player implements IPlayer {
     if (this.music && (this.music as any).hasAudio ? this.music.hasAudio : false) {
       this.music.pause();
     }
+    this.hitsoundManager.stopAll();
   }
 
   public resumePlay(): void {
@@ -1445,6 +1554,27 @@ export class Player implements IPlayer {
     if (this.music && (this.music as any).hasAudio ? this.music.hasAudio : false) {
       this.music.resume();
     }
+    
+    // Reschedule remaining hitsounds
+    const currentTimeInSeconds = this.elapsedTime / 1000;
+    const settings = this.levelData.settings;
+    const countdownTicks = settings.countdownTicks || 4;
+    const countdownBPM = (this.tileBPM && this.tileBPM[0]) || settings.bpm || 100;
+    const initialSecPerBeat = 60 / countdownBPM;
+    const countdownDuration = countdownTicks * initialSecPerBeat;
+    const offset = this.music.hasAudio ? (this.levelData.settings.offset || 0) : 0;
+    const timeInLevel = (this.elapsedTime / 1000) - countdownDuration - (offset / 1000);
+    
+    // Reschedule remaining hitsounds
+    const hitsToSchedule: number[] = [];
+    for (let i = 1; i < this.tileStartTimes.length; i++) {
+        const t = this.tileStartTimes[i];
+        const tile = this.levelData.tiles[i];
+        if (t > timeInLevel && tile && tile.angle !== 0) {
+            hitsToSchedule.push(t - timeInLevel);
+        }
+    }
+    this.hitsoundManager.scheduleAll(hitsToSchedule, performance.now());
   }
 
   public resetPlayer(): void {
@@ -1452,73 +1582,416 @@ export class Player implements IPlayer {
     this.startPlay();
   }
 
-  public destroyPlayer(): void {
-    this.stopPlay();
-    if (this.music) {
-      this.music.dispose();
+  // --- Track Color Logic ---
+
+  private initTileColors(): void {
+    const totalTiles = this.levelData.tiles.length;
+    const settings = this.levelData.settings;
+    
+    // Global defaults
+    const defaultColor = settings.trackColor || 'debb7b';
+    const defaultSecondaryColor = settings.secondaryTrackColor || 'ffffff';
+    const defaultStyle = settings.trackStyle || 'Standard';
+    const defaultColorType = settings.trackColorType || 'Single';
+
+    // Parse global color base
+    const globalColors = this.parseColorTrackType(defaultStyle, defaultColor, defaultSecondaryColor);
+
+    // Initialize tileColors and configs
+    this.tileColors = new Array(totalTiles);
+    this.tileRecolorConfigs = new Array(totalTiles).fill(null);
+
+    const globalConfig = {
+        trackStyle: defaultStyle,
+        trackColorType: defaultColorType,
+        trackColor: globalColors.color,
+        secondaryTrackColor: globalColors.bgcolor,
+        trackColorPulse: settings.trackColorPulse || 'None',
+        trackColorAnimDuration: settings.trackColorAnimDuration || 2,
+        trackPulseLength: settings.trackPulseLength || 10
+    };
+
+    // Optimization: Sort non-justThisTile events to process in one pass (O(N + E log E))
+    const colorTrackEvents: any[] = [];
+    if (this.levelData.actions) {
+        this.levelData.actions.forEach(event => {
+            if (event.eventType === 'ColorTrack' && !event.justThisTile) {
+                colorTrackEvents.push(event);
+            }
+        });
     }
-    if (this.animationId) {
-      cancelAnimationFrame(this.animationId);
+    colorTrackEvents.sort((a, b) => a.floor - b.floor);
+
+    let currentEventIdx = 0;
+    let currentConfig = globalConfig;
+
+    for (let i = 0; i < totalTiles; i++) {
+        // Update currentConfig if we reached a new ColorTrack floor
+        while (currentEventIdx < colorTrackEvents.length && colorTrackEvents[currentEventIdx].floor <= i) {
+            const event = colorTrackEvents[currentEventIdx];
+            const colors = this.parseColorTrackType(
+                event.trackStyle || defaultStyle, 
+                event.trackColor || defaultColor, 
+                event.secondaryTrackColor || defaultSecondaryColor
+            );
+            
+            currentConfig = {
+                trackStyle: event.trackStyle || defaultStyle,
+                trackColorType: event.trackColorType || defaultColorType,
+                trackColor: colors.color,
+                secondaryTrackColor: colors.bgcolor,
+                trackColorPulse: event.trackColorPulse || settings.trackColorPulse || 'None',
+                trackColorAnimDuration: event.trackColorAnimDuration || settings.trackColorAnimDuration || 2,
+                trackPulseLength: event.trackPulseLength || settings.trackPulseLength || 10
+            };
+            currentEventIdx++;
+        }
+
+        this.tileRecolorConfigs[i] = currentConfig;
+        const rendered = this.getTileRenderer(i, 0, currentConfig);
+        this.tileColors[i] = { color: rendered.color, secondaryColor: rendered.bgcolor };
+    }
+
+    // Handle justThisTile events (Static Preview Logic) separately as O(1)
+    if (this.levelData.actions) {
+        this.levelData.actions.forEach(event => {
+            if (event.eventType === 'ColorTrack' && event.justThisTile) {
+                const floor = event.floor;
+                if (floor >= 0 && floor < totalTiles) {
+                    const colors = this.parseColorTrackType(
+                        event.trackStyle || defaultStyle, 
+                        event.trackColor || defaultColor, 
+                        event.secondaryTrackColor || defaultSecondaryColor
+                    );
+                    
+                    const config = {
+                        trackStyle: event.trackStyle || defaultStyle,
+                        trackColorType: event.trackColorType || defaultColorType,
+                        trackColor: colors.color,
+                        secondaryTrackColor: colors.bgcolor,
+                        trackColorPulse: event.trackColorPulse || settings.trackColorPulse || 'None',
+                        trackColorAnimDuration: event.trackColorAnimDuration || settings.trackColorAnimDuration || 2,
+                        trackPulseLength: event.trackPulseLength || settings.trackPulseLength || 10
+                    };
+
+                    this.tileRecolorConfigs[floor] = config;
+                    const rendered = this.getTileRenderer(floor, 0, config);
+                    this.tileColors[floor] = { color: rendered.color, secondaryColor: rendered.bgcolor };
+                }
+            }
+        });
+    }
+  }
+
+  private PosRelativeTo(input: any, thisid: number): number {
+    const totalTiles = this.levelData.tiles.length;
+    // ADOFAI logic: Start -> 0, ThisTile -> thisid + 0, End -> totalTiles (angleTestCount)
+
+    const replaceKeywords = (val: any) => {
+        if (typeof val !== 'string') return val;
+        return val
+            .replace(/Start/g, "0")
+            .replace(/ThisTile/g, String(thisid + 0))
+            .replace(/End/g, String(totalTiles));
+    };
+
+    if (Array.isArray(input)) {
+        const processed = input.map(replaceKeywords);
+        // Returning sum of first two items as per user logic
+        return Number(processed[0]) + Number(processed[1]);
+    } else {
+        const processed = replaceKeywords(input);
+        return Number(processed);
+    }
+  }
+
+  private parseColorTrackType(Type: string, inputColor: string, inputBgColor: string): { color: string, bgcolor: string } {
+    // Ensure colors include '#' prefix and handle alpha channels
+    const trackColorX = this.formatHexColor(inputColor);
+    const trackbgColorX = this.formatHexColor(inputBgColor);
+
+    let intValue = { color: trackColorX, bgcolor: trackbgColorX };
+
+    if (Type === "Standard" || Type === "Gems") {
+        intValue.bgcolor = this.processHexColor(trackColorX)[1];
+    } else if (Type === "Neon") {
+        intValue.color = "#000000";
+        intValue.bgcolor = trackColorX;
+    } else if (Type === "NeonLight") {
+        intValue.color = this.processHexColor(trackColorX)[0];
+        intValue.bgcolor = trackColorX;
+    }
+
+    return intValue;
+  }
+
+  /**
+   * Core tile color renderer based on trackColorType
+   */
+  private getTileRenderer(id: number, time: number, rct: any): { color: string, bgcolor: string } {
+    const { 
+        trackColorType, trackColor, secondaryTrackColor, 
+        trackColorPulse, trackColorAnimDuration, trackPulseLength,
+        trackStyle
+    } = rct;
+    
+    let renderer_tileClientColor = { color: trackColor, bgcolor: secondaryTrackColor };
+    let shouldDraw = 0;
+
+    const degToRad = (deg: number) => deg * (Math.PI / 180);
+
+    const isNeon = trackStyle === "Neon";
+
+    // A. 处理 Single/Rainbow/Volume
+    if (trackColorType === "Single") {
+        // Neon style already has black fill and colored border
+        if (!isNeon) {
+            renderer_tileClientColor.bgcolor = this.processHexColor(renderer_tileClientColor.bgcolor)[0];
+        }
+        shouldDraw = 1;
+    } 
+    else if (trackColorType === "Rainbow") {
+        const hue = (time / trackColorAnimDuration) % 1;
+        const color = new THREE.Color().setHSL(hue, 0.8, 0.6);
+        const rainbowHex = '#' + color.getHexString();
+        
+        if (isNeon) {
+            renderer_tileClientColor.color = "#000000";
+            renderer_tileClientColor.bgcolor = rainbowHex;
+        } else {
+            renderer_tileClientColor.color = rainbowHex;
+            renderer_tileClientColor.bgcolor = this.processHexColor(rainbowHex)[0];
+        }
+        shouldDraw = 1;
+    }
+    else if (trackColorType === "Volume") {
+        const amp = this.music.amplitude;
+        const baseColor = isNeon ? secondaryTrackColor : trackColor;
+        const color = new THREE.Color(baseColor);
+        const hsl = { h: 0, s: 0, l: 0 };
+        color.getHSL(hsl);
+        color.setHSL(hsl.h, hsl.s, 0.2 + amp * 0.6);
+        const volumeHex = '#' + color.getHexString();
+
+        if (isNeon) {
+            renderer_tileClientColor.color = "#000000";
+            renderer_tileClientColor.bgcolor = volumeHex;
+        } else {
+            renderer_tileClientColor.color = volumeHex;
+            renderer_tileClientColor.bgcolor = this.processHexColor(volumeHex)[0];
+        }
+        shouldDraw = 1;
+    }
+
+    // B. 处理 Stripes (条纹)
+    else if (trackColorType === "Stripes") {
+        const color = (id % 2 === 0) ? trackColor : secondaryTrackColor;
+        if (isNeon) {
+            renderer_tileClientColor.color = "#000000";
+            renderer_tileClientColor.bgcolor = color;
+        } else {
+            renderer_tileClientColor.color = color;
+            renderer_tileClientColor.bgcolor = this.processHexColor(color)[0];
+        }
+        shouldDraw = 1;
+    } 
+
+    // C. 处理 Glow (发光)
+    else if (trackColorType === "Glow") {
+        let t;
+        if (trackColorPulse === "None") {
+            t = 0.5 * Math.sin(degToRad(360 * (time / trackColorAnimDuration))) + 0.5;
+        } else {
+            let offset = (trackColorPulse === "Forward") ? id : -id;
+            t = 0.5 * Math.sin(degToRad(360 * (time / trackColorAnimDuration) + (offset * trackPulseLength))) + 0.5;
+        }
+        
+        if (isNeon) {
+             const darkerColor = '#' + new THREE.Color(secondaryTrackColor).multiplyScalar(0.3).getHexString();
+             renderer_tileClientColor.color = "#000000";
+             renderer_tileClientColor.bgcolor = this.genColor(darkerColor, secondaryTrackColor, t);
+         } else {
+             renderer_tileClientColor.color = this.genColor(secondaryTrackColor, trackColor, t);
+             renderer_tileClientColor.bgcolor = this.processHexColor(renderer_tileClientColor.color)[0];
+         }
+         shouldDraw = 1;
+     } 
+ 
+     // D. 处理 Blink (闪烁)
+     else if (trackColorType === "Blink") {
+         let t;
+         if (trackColorPulse === "None") {
+             t = (time / trackColorAnimDuration) % 1;
+         } else {
+             let offset = (trackColorPulse === "Forward") ? id : -id;
+             t = ((time / trackColorAnimDuration) + (offset * trackPulseLength)) % 1;
+         }
+         
+         if (isNeon) {
+             const darkerColor = '#' + new THREE.Color(secondaryTrackColor).multiplyScalar(0.1).getHexString();
+             renderer_tileClientColor.color = "#000000";
+             renderer_tileClientColor.bgcolor = this.genColor(darkerColor, secondaryTrackColor, t);
+         } else {
+             renderer_tileClientColor.color = this.genColor(secondaryTrackColor, trackColor, t);
+             renderer_tileClientColor.bgcolor = this.processHexColor(renderer_tileClientColor.color)[0];
+         }
+        shouldDraw = 1;
+    } 
+
+    // E. 默认绘制逻辑
+    if (shouldDraw === 0) {
+        if (isNeon) {
+            renderer_tileClientColor.color = "#000000";
+        }
+        shouldDraw = 1;
+    } 
+
+    return renderer_tileClientColor;
+  }
+
+  /**
+   * Interpolate between two colors using HSL space for better brightness preservation
+   */
+  private genColor(c1: string, c2: string, t: number): string {
+    const alpha = Math.max(0, Math.min(1, t));
+    const color1 = new THREE.Color(c1);
+    const color2 = new THREE.Color(c2);
+    
+    // Use HSL interpolation to prevent "muddy" or "black" midpoints
+    const hsl1 = { h: 0, s: 0, l: 0 };
+    const hsl2 = { h: 0, s: 0, l: 0 };
+    color1.getHSL(hsl1);
+    color2.getHSL(hsl2);
+    
+    // Handle hue wrap-around for smoother transitions
+    let h1 = hsl1.h;
+    let h2 = hsl2.h;
+    if (Math.abs(h1 - h2) > 0.5) {
+      if (h1 > h2) h2 += 1;
+      else h1 += 1;
     }
     
-    this.removeEventListeners();
+    const h = (h1 + (h2 - h1) * alpha) % 1;
+    const s = hsl1.s + (hsl2.s - hsl1.s) * alpha;
+    const l = hsl1.l + (hsl2.l - hsl1.l) * alpha;
     
-    // Clean up all tiles and their geometries
-    this.tiles.forEach((mesh) => {
-      mesh.geometry.dispose();
-      mesh.children.length = 0;
+    color1.setHSL(h, s, l);
+    return '#' + color1.getHexString();
+  }
+
+  private processHexColor(hex: string): [string, string] {
+    let color = new THREE.Color(hex);
+    
+    // Half saturation as per user comment
+    const hsl = { h: 0, s: 0, l: 0 };
+    color.getHSL(hsl);
+    color.setHSL(hsl.h, hsl.s * 0.5, hsl.l);
+    
+    const main = '#' + color.getHexString();
+    
+    // Shading for secondary
+    color.multiplyScalar(0.7);
+    const secondary = '#' + color.getHexString();
+    
+    return [main, secondary];
+  }
+
+  private formatHexColor(hex: string): string {
+    if (!hex) return '#ffffff';
+    
+    // Remove '#' if present to normalize
+    let cleanHex = hex.startsWith('#') ? hex.slice(1) : hex;
+    
+    // Handle 8-digit hex (RRGGBBAA) by stripping alpha
+    if (cleanHex.length === 8) {
+        cleanHex = cleanHex.slice(0, 6);
+    }
+    
+    // Ensure it's a valid hex string length (3 or 6)
+    if (cleanHex.length !== 3 && cleanHex.length !== 6) {
+        // Fallback to black if invalid
+        return '#000000';
+    }
+    
+    return '#' + cleanHex;
+  }
+
+  private buildRecolorTimeline(): void {
+    this.recolorTimeline = [];
+    const entries: { time: number; event: any }[] = [];
+    
+    this.tileEvents.forEach((events, floor) => {
+        const startTime = this.tileStartTimes[floor] || 0;
+        const bpm = this.tileBPM[floor] || 100;
+        const secPerBeat = 60 / bpm;
+        
+        events.forEach(event => {
+            if (event.eventType === 'RecolorTrack') {
+                const angleOffset = event.angleOffset || 0;
+                const timeOffset = (angleOffset / 180) * secPerBeat;
+                const eventTime = startTime + timeOffset;
+                entries.push({ time: eventTime, event: { ...event, floor } });
+            }
+        });
     });
-    this.tiles.clear();
-    this.visibleTiles.clear();
     
-    // Clean up shared decoration resources
-    if (this.sharedDecoGeometry) {
-      this.sharedDecoGeometry.dispose();
-      this.sharedDecoGeometry = null;
-    }
-    if (this.sharedTwirlMaterial) {
-      this.sharedTwirlMaterial.dispose();
-      this.sharedTwirlMaterial = null;
-    }
-    if (this.sharedSpeedUpMaterial) {
-      this.sharedSpeedUpMaterial.dispose();
-      this.sharedSpeedUpMaterial = null;
-    }
-    if (this.sharedSpeedDownMaterial) {
-      this.sharedSpeedDownMaterial.dispose();
-      this.sharedSpeedDownMaterial = null;
-    }
+    entries.sort((a, b) => a.time - b.time);
+    this.recolorTimeline = entries;
+  }
+
+  private processRecolorEvent(event: any): void {
+    const startIdx = this.PosRelativeTo(event.startTile, event.floor);
+    const endIdx = this.PosRelativeTo(event.endTile, event.floor);
+    const gap = (event.gapLength !== undefined) ? event.gapLength : 0;
     
-    // Clean up tile materials
-    this.tileMaterials.forEach(m => m.dispose());
+    const settings = this.levelData.settings;
+    const defaultColor = settings.trackColor || 'debb7b';
+    const defaultSecondaryColor = settings.secondaryTrackColor || 'ffffff';
+    const defaultStyle = settings.trackStyle || 'Standard';
+    const defaultColorType = settings.trackColorType || 'Single';
+
+    const colors = this.parseColorTrackType(
+        event.trackStyle || defaultStyle, 
+        event.trackColor || defaultColor, 
+        event.secondaryTrackColor || defaultSecondaryColor
+    );
+
+    const config = {
+        trackStyle: event.trackStyle || defaultStyle,
+        trackColorType: event.trackColorType || defaultColorType,
+        trackColor: colors.color,
+        secondaryTrackColor: colors.bgcolor,
+        trackColorPulse: event.trackColorPulse || settings.trackColorPulse || 'None',
+        trackColorAnimDuration: event.trackColorAnimDuration || settings.trackColorAnimDuration || 2,
+        trackPulseLength: event.trackPulseLength || settings.trackPulseLength || 10
+    };
+
+    // Duration logic: for now, direct application as requested, 
+    // but we respect the range and gap.
+    const minIdx = Math.max(0, Math.min(startIdx, endIdx));
+    const maxIdx = Math.min(this.tileColors.length - 1, Math.max(startIdx, endIdx));
     
-    // Clean up spatial grid
-    this.spatialGrid.clear();
-    
-    // Clean up hitsound manager
-    if (this.hitsoundManager) {
-      this.hitsoundManager.dispose();
+    for (let i = minIdx; i <= maxIdx; i += (gap + 1)) {
+        this.tileRecolorConfigs[i] = config;
+        const rendered = this.getTileRenderer(i, this.elapsedTime / 1000, config);
+        this.applyTileColor(i, rendered.color, rendered.bgcolor);
     }
+  }
+
+  private applyTileColor(index: number, color: string, bgcolor: string): void {
+    if (index < 0 || index >= this.tileColors.length) return;
     
-    // Clean up bloom effect
-    if (this.bloomEffect) {
-      this.bloomEffect.dispose();
-      this.bloomEffect = null;
-    }
-    
-    // Clean up render target
-    if (this.renderTarget) {
-      this.renderTarget.dispose();
-      this.renderTarget = null;
-    }
-    
-    if (this.renderer) {
-      if (this.container && this.renderer.domElement && this.renderer.domElement.parentNode === this.container) {
-        this.container.removeChild(this.renderer.domElement);
-      }
-      
-      this.renderer.dispose();
-      this.renderer = null as any;
+    this.tileColors[index] = { color, secondaryColor: bgcolor };
+    this.updateTileMeshColor(index);
+  }
+
+  private updateTileMeshColor(index: number): void {
+    const id = index.toString();
+    const mesh = this.tiles.get(id);
+    if (mesh && mesh.material instanceof THREE.ShaderMaterial) {
+        const colors = this.tileColors[index];
+        mesh.material.uniforms.uColor.value.set(colors.color);
+        mesh.material.uniforms.uBgColor.value.set(colors.secondaryColor || colors.color);
     }
   }
 
@@ -1554,7 +2027,35 @@ export class Player implements IPlayer {
       this.bloomEffect.setSize(width, height);
     }
     
+    this.updateVideoSize();
     this.updateVisibleTiles();
+  }
+
+  private updateVideoSize(): void {
+    if (!this.videoElement || !this.videoMesh || !this.container) return;
+    
+    const videoWidth = this.videoElement.videoWidth || 16;
+    const videoHeight = this.videoElement.videoHeight || 9;
+    const videoAspect = videoWidth / videoHeight;
+    
+    // Orthographic camera frustum dimensions
+    const frustumHeight = (this.camera.top - this.camera.bottom) / this.camera.zoom;
+    const frustumWidth = (this.camera.right - this.camera.left) / this.camera.zoom;
+    const frustumAspect = frustumWidth / frustumHeight;
+    
+    // In ADOFAI, backgrounds typically cover the screen (fill)
+    let scale = 1;
+    if (frustumAspect > videoAspect) {
+        // Frustum is wider than video, match width
+        scale = frustumWidth / 1.0;
+        this.videoMesh.scale.set(scale, scale / videoAspect, 1);
+    } else {
+        // Frustum is taller than video, match height
+        scale = frustumHeight / 1.0;
+        this.videoMesh.scale.set(scale * videoAspect, scale, 1);
+    }
+    
+    // Since our PlaneGeometry is 1x1, scale directly maps to world units
   }
 
   private createPlanets(): void {
@@ -1598,31 +2099,6 @@ export class Player implements IPlayer {
       width: this.container.clientWidth,
       height: this.container.clientHeight,
     };
-  }
-
-  private createTileMaterials(): THREE.MeshBasicMaterial[] {
-    const materials: THREE.MeshBasicMaterial[] = [];
-    // User requested only one color: #debb7b (opaque)
-    const colors = [
-      0xdebb7b
-    ];
-
-    colors.forEach((color) => {
-      const m = new THREE.MeshBasicMaterial({
-        vertexColors: true,
-        side: THREE.DoubleSide,
-      });
-      m.color = new THREE.Color(color);
-      // Transparency removed as per request
-      //m.opacity = 1.0;
-      m.transparent = false;
-      materials.push(m);
-    });
-
-    // Initialize shared decoration resources
-    this.initSharedDecorationResources();
-
-    return materials;
   }
 
   /**
@@ -1685,7 +2161,22 @@ export class Player implements IPlayer {
       }
     }
 
-    // Add new tiles
+    // 1. Identify tiles that should be removed from scene
+    const idsInScene = Array.from(this.visibleTiles);
+    for (let i = 0; i < idsInScene.length; i++) {
+        const id = idsInScene[i];
+        const idx = parseInt(id);
+        // Using a Set for newVisibleTiles would be faster for 60w tiles, but newVisibleTiles is only the visible subset (~100-200)
+        if (!newVisibleTiles.includes(idx)) {
+            const mesh = this.tiles.get(id);
+            if (mesh) {
+                this.scene.remove(mesh);
+            }
+            this.visibleTiles.delete(id);
+        }
+    }
+
+    // 2. Add new tiles to scene
     for (let i = 0; i < newVisibleTiles.length; i++) {
       const idx = newVisibleTiles[i];
       const id = idx.toString();
@@ -1698,55 +2189,42 @@ export class Player implements IPlayer {
       }
     }
 
-    // Remove old tiles (only if we have too many visible)
-    if (this.visibleTiles.size > 200) {
-      const visibleArray = Array.from(this.visibleTiles);
-      for (let i = 0; i < visibleArray.length; i++) {
-        const id = visibleArray[i];
-        const idx = parseInt(id);
-        if (!newVisibleTiles.includes(idx)) {
-          const mesh = this.tiles.get(id);
-          if (mesh) {
-            this.scene.remove(mesh);
-          }
-          this.visibleTiles.delete(id);
-        }
-      }
+    // 3. Performance: If we have too many tiles cached in memory, remove the furthest ones
+    if (this.tiles.size > this.maxCachedTiles) {
+        this.cleanupTileCache();
     }
   }
 
-  // Maximum tiles to keep in memory pool
-  private static readonly MAX_TILE_POOL = 500;
-
   /**
-   * Removes tiles that are far from current position
+   * Remove and dispose meshes that are far from the camera to free GPU memory
    */
-  private cleanupTilePool(): void {
-    if (this.tiles.size <= Player.MAX_TILE_POOL) return;
+  private cleanupTileCache(): void {
+    const tileEntries = Array.from(this.tiles.entries());
     
-    const currentIdx = this.currentTileIndex;
-    const toRemove: string[] = [];
-    
-    // Find tiles far from current position
-    this.tiles.forEach((mesh, id) => {
-      const idx = parseInt(id);
-      // Remove tiles more than 1000 tiles away from current position
-      if (Math.abs(idx - currentIdx) > 500) {
-        toRemove.push(id);
-      }
+    // Sort by distance to camera (descending)
+    tileEntries.sort((a, b) => {
+        const distA = a[1].position.distanceToSquared(this.cameraPosition);
+        const distB = b[1].position.distanceToSquared(this.cameraPosition);
+        return distB - distA;
     });
     
-    // Remove excess tiles (dispose geometry to free memory)
-    toRemove.forEach(id => {
-      const mesh = this.tiles.get(id);
-      if (mesh) {
-        mesh.geometry.dispose();
-        // Remove decorations - but DON'T dispose shared geometry/material
-        // Just clear the children array
-        mesh.children.length = 0;
-        this.tiles.delete(id);
-      }
-    });
+    // Remove furthest tiles that are NOT currently visible
+    const toRemoveCount = Math.floor(this.tiles.size * 0.3);
+    let removed = 0;
+    
+    for (let i = 0; i < tileEntries.length && removed < toRemoveCount; i++) {
+        const [id, mesh] = tileEntries[i];
+        if (!this.visibleTiles.has(id)) {
+            // Dispose unique material
+            if (mesh.material instanceof THREE.Material) {
+                mesh.material.dispose();
+            }
+            // Shared geometry (geometryCache) is NOT disposed here
+            
+            this.tiles.delete(id);
+            removed++;
+        }
+    }
   }
 
   private getOrCreateTileMesh(index: number): THREE.Mesh | null {
@@ -1758,7 +2236,6 @@ export class Player implements IPlayer {
     
     const [x, y] = tile.position;
     const zLevel = 12 - index;
-    const materialIndex = index % this.tileMaterials.length;
     
     let pred = -180; // Default if index == 0
     if (index > 0) {
@@ -1772,27 +2249,57 @@ export class Player implements IPlayer {
     const currentDirection = tile.direction || 0;
     const is999 = (tile.angle === 0);
     
-    const meshData = createTrackMesh(pred, currentDirection, is999);
+    // Geometry caching by shape
+    const shapeKey = `${pred}_${currentDirection}_${is999}`;
+    let geometry = this.geometryCache.get(shapeKey);
     
-    if (!meshData || !meshData.faces) {
-      return null;
+    if (!geometry) {
+      const meshData = createTrackMesh(pred, currentDirection, is999);
+      if (!meshData || !meshData.faces) return null;
+      
+      geometry = new THREE.BufferGeometry();
+      geometry.setIndex(meshData.faces);
+      geometry.setAttribute('position', new THREE.Float32BufferAttribute(meshData.vertices, 3));
+      geometry.setAttribute('color', new THREE.Float32BufferAttribute(meshData.colors, 3));
+      geometry.computeVertexNormals();
+      this.geometryCache.set(shapeKey, geometry);
     }
 
-    const geometry = new THREE.BufferGeometry();
-    geometry.setIndex(meshData.faces);
-    geometry.setAttribute('position', new THREE.Float32BufferAttribute(meshData.vertices, 3));
-    geometry.setAttribute('color', new THREE.Float32BufferAttribute(meshData.colors, 3));
-    geometry.computeVertexNormals();
+    // Material logic
+    const colors = this.tileColors[index];
+    const material = new THREE.ShaderMaterial({
+        uniforms: {
+            uColor: { value: new THREE.Color(colors.color) },
+            uBgColor: { value: new THREE.Color(colors.secondaryColor || colors.color) }
+        },
+        vertexShader: `
+            varying vec3 vColor;
+            void main() {
+                vColor = color;
+                gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+            }
+        `,
+        fragmentShader: `
+            uniform vec3 uColor;
+            uniform vec3 uBgColor;
+            varying vec3 vColor;
+            void main() {
+                vec3 finalColor = mix(uBgColor, uColor, vColor.r);
+                gl_FragColor = vec4(finalColor, 1.0);
+            }
+        `,
+        vertexColors: true,
+        side: THREE.DoubleSide,
+        transparent: false
+    });
 
-    const tileMesh = new THREE.Mesh(geometry, this.tileMaterials[materialIndex]);
+    const tileMesh = new THREE.Mesh(geometry, material);
     tileMesh.position.set(x, y, zLevel * 0.001);
     tileMesh.castShadow = true;
     tileMesh.receiveShadow = true;
     
     // Add decorations
-    const decoSize = 0.275 * 0.8;
     const decoZ = 0.002;
-    
     let hasTwirl = false;
     let hasSetSpeed = false;
     
@@ -1804,7 +2311,6 @@ export class Player implements IPlayer {
         });
     }
     
-    // Use shared geometry and materials for decorations (performance optimization)
     if (hasTwirl && this.sharedDecoGeometry && this.sharedTwirlMaterial) {
         const twirlMesh = new THREE.Mesh(this.sharedDecoGeometry, this.sharedTwirlMaterial);
         twirlMesh.position.set(0, 0, decoZ);
@@ -1825,7 +2331,6 @@ export class Player implements IPlayer {
             speedMesh.position.set(0, 0, decoZ + (hasTwirl ? 0.001 : 0));
             tileMesh.add(speedMesh);
         }
-        // Skip complex decoration for minor speed changes to improve performance
     }
     
     this.tiles.set(id, tileMesh);
@@ -1854,6 +2359,27 @@ export class Player implements IPlayer {
     // At elapsedTime = countdownDuration*1000 + offset, timeInLevel is 0.
     const timeInLevel = (this.elapsedTime / 1000) - countdownDuration - (offset / 1000);
     
+    // Process Recolor timeline
+    if (this.lastRecolorTimelineIndex >= 0) {
+        const currentEntry = this.recolorTimeline[this.lastRecolorTimelineIndex];
+        if (currentEntry && timeInLevel < currentEntry.time) {
+            // Backward seek detected - reset to static preview colors
+            this.initTileColors();
+            this.lastRecolorTimelineIndex = -1;
+            // Update all visible meshes
+            this.tiles.forEach((_, id) => {
+                this.updateTileMeshColor(parseInt(id));
+            });
+        }
+    }
+
+    while (this.lastRecolorTimelineIndex + 1 < this.recolorTimeline.length && 
+           this.recolorTimeline[this.lastRecolorTimelineIndex + 1].time <= timeInLevel) {
+        this.lastRecolorTimelineIndex++;
+        const entry = this.recolorTimeline[this.lastRecolorTimelineIndex];
+        this.processRecolorEvent(entry.event);
+    }
+
     if (timeInLevel < 0) {
         // Countdown Phase (Approaching Tile 1)
         // We use the same logic as Playing Phase for Tile 0, but with negative time.
@@ -1913,17 +2439,11 @@ export class Player implements IPlayer {
             }
         } else {
             // Increment index as time progresses
-            // Track all tiles we pass through to ensure hitsound plays for each
             while (this.currentTileIndex + 1 < this.tileStartTimes.length && 
                    this.tileStartTimes[this.currentTileIndex + 1] <= timeInLevel) {
                 this.currentTileIndex++;
-                // Play hitsound when arriving at the new tile
-                // Skip hitsound for midspin tiles (angle=0) - they are instantaneous transitions
-                const currentTile = this.levelData.tiles[this.currentTileIndex];
-                const isMidspin = currentTile && (currentTile.angle === 0);
-                if (!isMidspin) {
-                    this.hitsoundManager.play();
-                }
+                // Note: Real-time hitsound play is removed here because they are now pre-scheduled 
+                // in startPlay() for much better performance at high BPM.
             }
         }
     }
@@ -2188,6 +2708,18 @@ export class Player implements IPlayer {
       
       this.camera.rotation.z = logicalRotation * (Math.PI / 180);
 
+      // 6. Sync Video Background Position/Rotation (Keep it aligned with screen)
+      if (this.videoMesh) {
+          this.videoMesh.position.x = this.camera.position.x;
+          this.videoMesh.position.y = this.camera.position.y;
+          this.videoMesh.rotation.z = this.camera.rotation.z;
+          
+          // Update size if camera zoom changed (detects both logical zoom and mouse wheel zoom)
+          if (Math.abs(this.camera.zoom - this.lastVisibleCheckZoom) > 0.001) {
+              this.updateVideoSize();
+          }
+      }
+
       this.updateVisibleTiles();
   }
 
@@ -2209,6 +2741,187 @@ export class Player implements IPlayer {
         if (this.levelData.settings.pitch !== undefined) {
             this.music.pitch = this.levelData.settings.pitch / 100;
         }
+    }
+  }
+
+  public loadVideo(src: string): void {
+    // Cleanup old video if exists
+    if (this.videoElement) {
+        this.videoElement.pause();
+        this.videoElement.src = "";
+        this.videoElement.load();
+        this.videoElement.remove();
+        this.videoElement = null;
+    }
+    if (this.videoTexture) {
+        this.videoTexture.dispose();
+        this.videoTexture = null;
+    }
+    if (this.videoMesh) {
+        this.scene.remove(this.videoMesh);
+        if (this.videoMesh.geometry) this.videoMesh.geometry.dispose();
+        if (this.videoMesh.material instanceof THREE.Material) {
+            this.videoMesh.material.dispose();
+        }
+        this.videoMesh = null;
+    }
+
+    const video = document.createElement('video');
+    video.src = src;
+    video.crossOrigin = 'anonymous';
+    video.loop = this.levelData.settings?.loopVideo || false;
+    video.muted = true; // Video should be muted as we use separate audio
+    video.playsInline = true;
+    
+    this.videoElement = video;
+    this.videoTexture = new THREE.VideoTexture(video);
+    this.videoTexture.colorSpace = THREE.SRGBColorSpace;
+
+    // Create a background plane that fits the video aspect ratio
+    // We use 1x1 geometry and scale it in updateVideoSize
+    const geometry = new THREE.PlaneGeometry(1, 1); 
+    const material = new THREE.MeshBasicMaterial({ 
+        map: this.videoTexture,
+        depthWrite: false,
+        depthTest: true, // Enable depth test to respect Z-order correctly
+        transparent: false // Must be false to stay in opaque queue (which renders first)
+    });
+    this.videoMesh = new THREE.Mesh(geometry, material);
+    this.videoMesh.position.set(0, 0, -500); // Put it even further back
+    this.videoMesh.renderOrder = -999; // Very low order to ensure it's the base layer
+    this.scene.add(this.videoMesh); 
+
+    video.onloadedmetadata = () => {
+        this.updateVideoSize();
+    };
+
+    video.load();
+    console.log("Video loaded, offset:", this.videoOffset);
+  }
+
+  private syncVideo(): void {
+    if (!this.videoElement || !this.isPlaying || this.isPaused) return;
+
+    const settings = this.levelData.settings;
+    const initialBPM = settings.bpm || 100;
+    const initialSecPerBeat = 60 / initialBPM;
+    const countdownTicks = settings.countdownTicks || 4;
+    const countdownDuration = countdownTicks * initialSecPerBeat;
+    const audioOffset = this.music.hasAudio ? (settings.offset || 0) : 0;
+    
+    // Current time in level (seconds), where 0 is the start of first tile
+    const timeInLevel = (this.elapsedTime / 1000) - countdownDuration - (audioOffset / 1000);
+    
+    // Video time should be timeInLevel + (videoOffset / 1000)
+    const targetVideoTime = timeInLevel + (this.videoOffset / 1000);
+
+    if (targetVideoTime < 0) {
+        if (!this.videoElement.paused) {
+            this.videoElement.pause();
+            this.videoElement.currentTime = 0;
+        }
+    } else {
+        if (this.videoElement.paused) {
+            this.videoElement.play().catch(e => console.warn("Video play failed:", e));
+        }
+        
+        // Sync if drift is significant (> 100ms)
+        if (Math.abs(this.videoElement.currentTime - targetVideoTime) > 0.1) {
+            this.videoElement.currentTime = targetVideoTime;
+        }
+    }
+  }
+
+  public destroyPlayer(): void {
+    this.stopPlay();
+    if (this.animationId) {
+      cancelAnimationFrame(this.animationId);
+    }
+    this.removeEventListeners();
+    
+    // Cleanup video
+    if (this.videoElement) {
+        this.videoElement.pause();
+        this.videoElement.src = "";
+        this.videoElement.load();
+        this.videoElement.remove();
+        this.videoElement = null;
+    }
+    if (this.videoTexture) {
+        this.videoTexture.dispose();
+        this.videoTexture = null;
+    }
+    if (this.videoMesh) {
+        this.scene.remove(this.videoMesh);
+        if (this.videoMesh.geometry) this.videoMesh.geometry.dispose();
+        if (this.videoMesh.material instanceof THREE.Material) {
+            this.videoMesh.material.dispose();
+        }
+        this.videoMesh = null;
+    }
+    
+    // Cleanup Three.js resources
+    this.tiles.forEach(mesh => {
+        // Only dispose unique materials. Shared geometry is disposed separately.
+        if (mesh.material instanceof THREE.Material) {
+            mesh.material.dispose();
+        }
+        mesh.children.length = 0;
+    });
+    this.tiles.clear();
+    this.visibleTiles.clear();
+    
+    // Dispose geometry cache
+    this.geometryCache.forEach(geometry => {
+        geometry.dispose();
+    });
+    this.geometryCache.clear();
+    
+    if (this.planetRed) this.planetRed.dispose();
+    if (this.planetBlue) this.planetBlue.dispose();
+    
+    if (this.sharedDecoGeometry) {
+      this.sharedDecoGeometry.dispose();
+      this.sharedDecoGeometry = null;
+    }
+    if (this.sharedTwirlMaterial) {
+      this.sharedTwirlMaterial.dispose();
+      this.sharedTwirlMaterial = null;
+    }
+    if (this.sharedSpeedUpMaterial) {
+      this.sharedSpeedUpMaterial.dispose();
+      this.sharedSpeedUpMaterial = null;
+    }
+    if (this.sharedSpeedDownMaterial) {
+      this.sharedSpeedDownMaterial.dispose();
+      this.sharedSpeedDownMaterial = null;
+    }
+    
+    this.spatialGrid.clear();
+
+    if (this.hitsoundManager) {
+      this.hitsoundManager.dispose();
+    }
+    
+    if (this.renderTarget) {
+      this.renderTarget.dispose();
+      this.renderTarget = null;
+    }
+    if (this.bloomEffect) {
+      this.bloomEffect.dispose();
+      this.bloomEffect = null;
+    }
+    
+    if (this.renderer) {
+      if (this.container && this.renderer.domElement && this.renderer.domElement.parentNode === this.container) {
+          this.container.removeChild(this.renderer.domElement);
+      }
+      this.renderer.dispose();
+      this.renderer = null as any;
+    }
+    
+    if (this.music) {
+      this.music.dispose();
     }
   }
 }

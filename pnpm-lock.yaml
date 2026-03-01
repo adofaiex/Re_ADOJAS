@@ -21,8 +21,8 @@ importers:
         specifier: ^1.2.3
         version: 1.2.4(@types/react@18.3.28)(react@18.3.1)
       adofai:
-        specifier: ^2.13.1
-        version: 2.13.1
+        specifier: ^2.13.2
+        version: 2.13.2
       class-variance-authority:
         specifier: ^0.7.1
         version: 0.7.1
@@ -1427,8 +1427,8 @@ packages:
     engines: {node: '>=0.4.0'}
     hasBin: true
 
-  adofai@2.13.1:
-    resolution: {integrity: sha512-v2fOPUXZzXREJgdBHVlnLfPoaWA1MJPUd9PI8ATon2zwf8ydQXI65Y38ufLj+zNxxdI329WO2fi8Raimz6A/vQ==}
+  adofai@2.13.2:
+    resolution: {integrity: sha512-oOIvnFtLW3DBgWKCP+FDk4cBloQhVecxI0v0s7/PSl8JgMFhJr0h2+S8jEF0lpozaaX4aXp1ZH9bnyFcD/RtSQ==}
 
   ajv@6.12.6:
     resolution: {integrity: sha512-j3fVLgvTo527anyYyJOGTYJbG+vnnQYvE0m5mmkc1TK+nxAppkCLMIL0aZ4dblVCNoGShhm+kzE4ZUykBoMg4g==}
@@ -3781,7 +3781,7 @@ snapshots:
 
   acorn@8.15.0: {}
 
-  adofai@2.13.1:
+  adofai@2.13.2:
     dependencies:
       uuid: 13.0.0
 

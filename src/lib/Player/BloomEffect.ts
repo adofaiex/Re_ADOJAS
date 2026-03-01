@@ -31,8 +31,8 @@ const BrightnessShader = {
         
         void main() {
             vec4 color = texture2D(tDiffuse, vUv);
-            // Calculate brightness using luminance formula (same as Unity)
-            float brightness = dot(color.rgb, vec3(0.3, 0.59, 0.11));
+            // Use max of components for thresholding saturated colors better (like pure Red/Blue)
+            float brightness = max(max(color.r, color.g), color.b);
             
             if (brightness < threshold) {
                 gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
@@ -116,13 +116,19 @@ const CombineShader = {
             vec4 bloom = texture2D(tBloom, vUv);
             
             // Apply bloom color tint (like Unity's _Param1)
-            // bloom.rgb * bloomColor applies the color filter
             vec3 tintedBloom = bloom.rgb * bloomColor;
             
             // Additive blending with intensity
             vec3 result = original.rgb + tintedBloom * intensity;
             
+            // Convert Linear to Output space (sRGB) for screen output
+            #include <colorspace_fragment>
+            
+            // Note: colorspace_fragment usually sets gl_FragColor using outgoingLight
+            // But we don't have outgoingLight here. Let's do it manually if chunk not suitable.
+            // In Three.js r178, the chunk expects gl_FragColor to be Linear.
             gl_FragColor = vec4(result, 1.0);
+            #include <colorspace_fragment>
         }
     `
 };
@@ -247,10 +253,13 @@ export class BloomEffect {
     setSize(width: number, height: number): void {
         this.resolution.set(width, height);
         
+        // Pass 1 (Brightness) should be high-res to capture thin lines
+        this.rtBrightness.setSize(width, height);
+        
+        // Blur passes can be half-res for performance
         const w = Math.floor(width / 2);
         const h = Math.floor(height / 2);
         
-        this.rtBrightness.setSize(w, h);
         this.rtBlurH.setSize(w, h);
         this.rtBlurV.setSize(w, h);
         
