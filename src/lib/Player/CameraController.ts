@@ -176,14 +176,12 @@ export class CameraController {
      * @param floorIndex The floor index where the event occurs
      * @param elapsedTime Current elapsed time in ms
      * @param cameraSnapshot Current camera state snapshot { position, zoom, rotation }
-     * @param currentTileIndex Current tile index for BPM lookup
      */
     public processCameraEvent(
         event: any, 
         floorIndex: number, 
         elapsedTime: number,
-        cameraSnapshot?: { position: { x: number; y: number }; zoom: number; rotation: number },
-        currentTileIndex?: number
+        cameraSnapshot?: { position: { x: number; y: number }; zoom: number; rotation: number }
     ): void {
         // Skip disabled events
         if (!isEventActive(event)) return;
@@ -287,9 +285,9 @@ export class CameraController {
         }
 
         // Setup Transition
-        const tileIdx = currentTileIndex !== undefined ? currentTileIndex : 0;
-        const currentBPM = (this.tileBPM && this.tileBPM[tileIdx]) || 100;
-        const durationSeconds = duration * (60 / currentBPM);
+        // Use the event floor's BPM for duration calculation
+        const eventBPM = (this.tileBPM && this.tileBPM[floorIndex]) || 100;
+        const durationSeconds = duration * (60 / eventBPM);
 
         if (durationSeconds <= 0) {
             this.cameraTransition.active = false;

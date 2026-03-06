@@ -67,6 +67,12 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
           type: "hitsoundEnabled",
         },
         {
+          id: "showStats",
+          title: t("settings.showStats.title"),
+          description: t("settings.showStats.description"),
+          type: "showStats",
+        },
+        {
           id: "useWorker",
           title: t("settings.useWorker.title"),
           description: t("settings.useWorker.description"),
@@ -299,6 +305,26 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                       </button>
                       <span className="text-sm text-slate-600 dark:text-slate-400">
                         {settings.hitsoundEnabled ? t("settings.hitsoundEnabled.enabled") : t("settings.hitsoundEnabled.disabled")}
+                      </span>
+                    </div>
+                  )}
+
+                  {setting.type === "showStats" && (
+                    <div className="flex items-center gap-3">
+                      <button
+                        onClick={() => updateSettings({ showStats: !settings.showStats })}
+                        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                          settings.showStats ? "bg-purple-500" : "bg-slate-300 dark:bg-slate-600"
+                        }`}
+                      >
+                        <span
+                          className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                            settings.showStats ? "translate-x-6" : "translate-x-1"
+                          }`}
+                        />
+                      </button>
+                      <span className="text-sm text-slate-600 dark:text-slate-400">
+                        {settings.showStats ? t("settings.showStats.statsjs") : t("settings.showStats.default")}
                       </span>
                     </div>
                   )}

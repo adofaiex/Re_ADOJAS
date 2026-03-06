@@ -10,6 +10,7 @@ import { EasingFunctions } from './Easing';
 import { HTMLAudioMusic } from './HTMLAudioMusic';
 import { TileColorManager, isEventActive, TileColorConfig } from './TileColorManager';
 import { CameraController, CameraTimelineEntry } from './CameraController';
+import Stats from 'stats.js';
 
 export class Player implements IPlayer {
   private container: HTMLElement | null = null;
@@ -24,6 +25,7 @@ export class Player implements IPlayer {
   private animationId: number | null = null;
   private lastFrameTime: number = 0;
   private frameInterval: number = 0; // milliseconds between frames
+  private stats: Stats | null = null;
   
   private levelData: ILevelData;
   private planetRed: Planet | null = null;
@@ -215,17 +217,43 @@ export class Player implements IPlayer {
     
     // Build spatial index for fast visibility checks
     this.buildSpatialIndex();
-
-    // Pre-calculate hitsound schedule (Moved from startPlay to init for performance)
-    this.recalculateHitsoundSchedule();
+    
+    // Pre-synthesize hitsounds at load time
+    this.preSynthesizeHitsounds();
   }
 
   private formatHexColor(hex: string): string {
     return this.tileColorManager.formatHexColor(hex);
   }
-
-  private recalculateHitsoundSchedule(): void {
-    if (!this.tileStartTimes || this.tileStartTimes.length === 0) return;
+  
+  /**
+   * Pre-synthesize hitsounds at level load time
+   */
+  private async preSynthesizeHitsounds(): Promise<void> {
+    console.log('[Player] preSynthesizeHitsounds called');
+    if (!this.tileStartTimes || this.tileStartTimes.length === 0) {
+      console.log('[Player] No tileStartTimes, skipping hitsound synthesis');
+      return;
+    }
+    
+    // Calculate total duration (last tile time + some buffer)
+    const lastTileTime = this.tileStartTimes[this.tileStartTimes.length - 1] || 0;
+    const totalDuration = lastTileTime + 10; // Add 10 seconds buffer
+    
+    // Collect all hitsound timestamps
+    const hitsoundTimestamps: number[] = [];
+    for (let i = 1; i < this.tileStartTimes.length; i++) {
+        const t = this.tileStartTimes[i];
+        const tile = this.levelData.tiles[i];
+        if (tile && tile.angle !== 0) {
+            hitsoundTimestamps.push(t);
+        }
+    }
+    
+    console.log('[Player] Hitsound timestamps count:', hitsoundTimestamps.length, 'total duration:', totalDuration);
+    
+    // Pre-synthesize
+    await this.hitsoundManager.preSynthesize(hitsoundTimestamps, totalDuration);
   }
   
   /**
@@ -708,7 +736,7 @@ export class Player implements IPlayer {
     const unitsPerPixel = frustumHeight / this.container!.clientHeight;
 
     this.cameraPosition.x -= deltaX * unitsPerPixel;
-    this.cameraPosition.y += deltaY * deltaY; // Y is inverted in screen space vs world space usually
+    this.cameraPosition.y += deltaY * unitsPerPixel;
     
     this.camera.position.x = this.cameraPosition.x;
     this.camera.position.y = this.cameraPosition.y;
@@ -795,6 +823,31 @@ export class Player implements IPlayer {
     this.onStatsUpdate = callback;
   }
 
+  public setStatsPanel(enabled: boolean): void {
+    try {
+      if (enabled && !this.stats) {
+        // Create stats.js panel
+        this.stats = new Stats();
+        this.stats.showPanel(0); // 0: fps, 1: ms, 2: mb, 3+: custom
+        this.stats.dom.style.position = 'absolute';
+        this.stats.dom.style.top = '64px';
+        this.stats.dom.style.left = '16px';
+        if (this.container) {
+          this.container.appendChild(this.stats.dom);
+        }
+      } else if (!enabled && this.stats) {
+        // Remove stats.js panel
+        if (this.stats.dom.parentNode) {
+          this.stats.dom.parentNode.removeChild(this.stats.dom);
+        }
+        this.stats = null;
+      }
+    } catch (e) {
+      console.warn('Failed to initialize stats.js:', e);
+      this.stats = null;
+    }
+  }
+
   private startRenderLoop(): void {
     let lastTime = performance.now();
     let frameCount = 0;
@@ -802,12 +855,23 @@ export class Player implements IPlayer {
     let fpsTime = lastTime;
 
     const animate = (time: number) => {
+      try {
+        this.stats?.begin();
+      } catch (e) {
+        // ignore stats errors
+      }
+      
       this.animationId = requestAnimationFrame(animate);
       
       // Frame rate limiting
       if (this.frameInterval > 0) {
         const elapsed = time - this.lastFrameTime;
         if (elapsed < this.frameInterval) {
+          try {
+            this.stats?.end();
+          } catch (e) {
+            // ignore stats errors
+          }
           return; // Skip this frame
         }
         this.lastFrameTime = time - (elapsed % this.frameInterval);
@@ -837,6 +901,12 @@ export class Player implements IPlayer {
             tileIndex: this.currentTileIndex
           });
         }
+      }
+      
+      try {
+        this.stats?.end();
+      } catch (e) {
+        // ignore stats errors
       }
     };
     
@@ -882,7 +952,12 @@ export class Player implements IPlayer {
              const now = performance.now();
              this.elapsedTime = now - this.startTime;
 
-             if (this.music.hasAudio && !this.music.isPaused && this.elapsedTime >= countdownDuration * 1000) {
+             // Calculate music start time based on first tile angle
+             // tileStartTimes[0] is negative when first tile has duration
+             const firstTileOffset = this.tileStartTimes.length > 0 ? this.tileStartTimes[0] * 1000 : 0;
+             const musicStartTime = countdownDuration * 1000 + firstTileOffset;
+             
+             if (this.music.hasAudio && !this.music.isPaused && this.elapsedTime >= musicStartTime) {
                  this.music.play();
              }
         }
@@ -989,18 +1064,16 @@ export class Player implements IPlayer {
     const countdownTicks = settings.countdownTicks || 4;
     const countdownDuration = countdownTicks * initialSecPerBeat;
     const offset = this.music.hasAudio ? (settings.offset || 0) : 0;
-    const totalDelay = countdownDuration + (offset / 1000);
+    // Account for first tile angle - tileStartTimes[0] is negative when first tile has duration
+    const firstTileOffset = this.tileStartTimes.length > 0 ? this.tileStartTimes[0] : 0;
+    const totalDelay = countdownDuration + (offset / 1000) + firstTileOffset;
 
-    // Schedule all hitsounds for high performance
-    const hitsToSchedule: number[] = [];
-    for (let i = 1; i < this.tileStartTimes.length; i++) {
-        const t = this.tileStartTimes[i];
-        const tile = this.levelData.tiles[i];
-        if (tile && tile.angle !== 0) {
-            hitsToSchedule.push(t + totalDelay);
-        }
+    // Start pre-synthesized hitsound track
+    const synthesized = this.hitsoundManager.isSynthesized();
+    console.log('[Player] startPlay - hitsound synthesized:', synthesized, 'totalDelay:', totalDelay);
+    if (synthesized) {
+        this.hitsoundManager.start(totalDelay);
     }
-    this.hitsoundManager.scheduleAll(hitsToSchedule, performance.now());
   }
 
   private buildBloomTimeline(): void {
@@ -1066,7 +1139,8 @@ export class Player implements IPlayer {
       this.music.stop();
     }
     
-    this.hitsoundManager.stopAll();
+    // Stop pre-synthesized hitsound track
+    this.hitsoundManager.stop();
     
     if (this.videoElement) {
         this.videoElement.pause();
@@ -1099,7 +1173,8 @@ export class Player implements IPlayer {
     if (this.music && (this.music as any).hasAudio ? this.music.hasAudio : false) {
       this.music.pause();
     }
-    this.hitsoundManager.stopAll();
+    // Stop pre-synthesized hitsound track
+    this.hitsoundManager.stop();
   }
 
   public resumePlay(): void {
@@ -1118,17 +1193,15 @@ export class Player implements IPlayer {
     const initialSecPerBeat = 60 / countdownBPM;
     const countdownDuration = countdownTicks * initialSecPerBeat;
     const offset = this.music.hasAudio ? (this.levelData.settings.offset || 0) : 0;
-    const timeInLevel = (this.elapsedTime / 1000) - countdownDuration - (offset / 1000);
+    // Account for first tile angle - tileStartTimes[0] is negative when first tile has duration
+    const firstTileOffset = this.tileStartTimes.length > 0 ? this.tileStartTimes[0] : 0;
+    const totalDelay = countdownDuration + (offset / 1000) + firstTileOffset;
+    const timeInLevel = currentTimeInSeconds - totalDelay;
     
-    const hitsToSchedule: number[] = [];
-    for (let i = 1; i < this.tileStartTimes.length; i++) {
-        const t = this.tileStartTimes[i];
-        const tile = this.levelData.tiles[i];
-        if (t > timeInLevel && tile && tile.angle !== 0) {
-            hitsToSchedule.push(t - timeInLevel);
-        }
+    // Resume pre-synthesized hitsound track from current position
+    if (this.hitsoundManager.isSynthesized() && timeInLevel > 0) {
+        this.hitsoundManager.startAtOffset(timeInLevel);
     }
-    this.hitsoundManager.scheduleAll(hitsToSchedule, performance.now());
   }
 
   public resetPlayer(): void {
@@ -1534,8 +1607,9 @@ export class Player implements IPlayer {
     const countdownBPM = (this.tileBPM && this.tileBPM[0]) || settings.bpm || 100;
     const initialSecPerBeat = 60 / countdownBPM;
     const countdownDuration = countdownTicks * initialSecPerBeat;
-
-    const timeInLevel = (this.elapsedTime / 1000) - countdownDuration - (offset / 1000);
+    // Account for first tile angle - tileStartTimes[0] is negative when first tile has duration
+    const firstTileOffset = this.tileStartTimes.length > 0 ? this.tileStartTimes[0] : 0;
+    const timeInLevel = (this.elapsedTime / 1000) - countdownDuration - (offset / 1000) - firstTileOffset;
     
     // Process Recolor timeline
     if (this.lastRecolorTimelineIndex >= 0) {
@@ -1675,9 +1749,11 @@ export class Player implements IPlayer {
       const countdownTicks = settings.countdownTicks || 4;
       const countdownDuration = countdownTicks * initialSecPerBeat;
       const offset = this.music.hasAudio ? (this.levelData.settings.offset || 0) : 0;
+      // Account for first tile angle - tileStartTimes[0] is negative when first tile has duration
+      const firstTileOffset = this.tileStartTimes.length > 0 ? this.tileStartTimes[0] : 0;
       
       const currentTimeInSeconds = this.elapsedTime / 1000;
-      const timeInLevel = currentTimeInSeconds - countdownDuration - (offset / 1000);
+      const timeInLevel = currentTimeInSeconds - countdownDuration - (offset / 1000) - firstTileOffset;
 
       // Process camera events
       const lastIdx = this.cameraController.getLastCameraTimelineIndex();
@@ -1706,8 +1782,7 @@ export class Player implements IPlayer {
               entry.event, 
               entry.event.floor || 0, 
               this.elapsedTime,
-              cameraSnapshot,
-              this.currentTileIndex
+              cameraSnapshot
           );
       }
       this.cameraController.setLastCameraTimelineIndex(newIdx);
@@ -1849,8 +1924,10 @@ export class Player implements IPlayer {
     const countdownTicks = settings.countdownTicks || 4;
     const countdownDuration = countdownTicks * initialSecPerBeat;
     const audioOffset = this.music.hasAudio ? (settings.offset || 0) : 0;
+    // Account for first tile angle - tileStartTimes[0] is negative when first tile has duration
+    const firstTileOffset = this.tileStartTimes.length > 0 ? this.tileStartTimes[0] : 0;
     
-    const timeInLevel = (this.elapsedTime / 1000) - countdownDuration - (audioOffset / 1000);
+    const timeInLevel = (this.elapsedTime / 1000) - countdownDuration - (audioOffset / 1000) - firstTileOffset;
     
     const targetVideoTime = timeInLevel + (this.videoOffset / 1000);
 

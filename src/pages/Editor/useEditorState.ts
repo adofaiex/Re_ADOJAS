@@ -86,22 +86,26 @@ export function useEditorState() {
       player.setHitsoundEnabled(settings.hitsoundEnabled)
       player.setUseWorker(settings.useWorker)
       player.setTargetFramerate(settings.targetFramerate)
+      player.setStatsPanel(settings.showStats)
       
-      player.setStatsCallback((stats) => {
-        if (fpsCounterRef.current) {
-          fpsCounterRef.current.textContent = `FPS  ${stats.fps.toFixed(2)}`
-        }
-        if (infoRef.current) {
-          const bpm = loadedLevel.settings?.bpm || 0
-          infoRef.current.innerHTML = `
-            <div class="space-y-1">
-              <div>Time: ${(stats.time / 1000).toFixed(2)}s</div>
-              <div>Tile: ${stats.tileIndex} / ${loadedLevel.tiles?.length || 0}</div>
-              <div>BPM: ${bpm}</div>
-            </div>
-          `
-        }
-      })
+      // Only set stats callback if not using stats.js
+      if (!settings.showStats) {
+        player.setStatsCallback((stats) => {
+          if (fpsCounterRef.current) {
+            fpsCounterRef.current.textContent = `FPS  ${stats.fps.toFixed(2)}`
+          }
+          if (infoRef.current) {
+            const bpm = loadedLevel.settings?.bpm || 0
+            infoRef.current.innerHTML = `
+              <div class="space-y-1">
+                <div>Time: ${(stats.time / 1000).toFixed(2)}s</div>
+                <div>Tile: ${stats.tileIndex} / ${loadedLevel.tiles?.length || 0}</div>
+                <div>BPM: ${bpm}</div>
+              </div>
+            `
+          }
+        })
+      }
       
       previewerRef.current = player
     }
@@ -231,6 +235,13 @@ export function useEditorState() {
     }
   }, [settings.targetFramerate])
 
+  // 监听性能面板设置变化
+  useEffect(() => {
+    if (previewerRef.current) {
+      previewerRef.current.setStatsPanel(settings.showStats)
+    }
+  }, [settings.showStats])
+
   // 键盘快捷键
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent): void => {
@@ -279,22 +290,26 @@ export function useEditorState() {
             player.setHitsoundEnabled(settings.hitsoundEnabled)
             player.setUseWorker(settings.useWorker)
             player.setTargetFramerate(settings.targetFramerate)
+            player.setStatsPanel(settings.showStats)
             
-            player.setStatsCallback((stats) => {
-              if (fpsCounterRef.current) {
-                fpsCounterRef.current.textContent = `FPS  ${stats.fps.toFixed(2)}`
-              }
-              if (infoRef.current) {
-                const bpm = loadedLevel.settings?.bpm || 0
-                infoRef.current.innerHTML = `
-                  <div class="space-y-1">
-                    <div>Time: ${(stats.time / 1000).toFixed(2)}s</div>
-                    <div>Tile: ${stats.tileIndex} / ${loadedLevel.tiles?.length || 0}</div>
-                    <div>BPM: ${bpm}</div>
-                  </div>
-                `
-              }
-            })
+            // Only set stats callback if not using stats.js
+            if (!settings.showStats) {
+              player.setStatsCallback((stats) => {
+                if (fpsCounterRef.current) {
+                  fpsCounterRef.current.textContent = `FPS  ${stats.fps.toFixed(2)}`
+                }
+                if (infoRef.current) {
+                  const bpm = loadedLevel.settings?.bpm || 0
+                  infoRef.current.innerHTML = `
+                    <div class="space-y-1">
+                      <div>Time: ${(stats.time / 1000).toFixed(2)}s</div>
+                      <div>Tile: ${stats.tileIndex} / ${loadedLevel.tiles?.length || 0}</div>
+                      <div>BPM: ${bpm}</div>
+                    </div>
+                  `
+                }
+              })
+            }
             
             previewerRef.current = player
           }

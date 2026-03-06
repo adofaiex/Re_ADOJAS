@@ -133,6 +133,12 @@ export const translations = {
         enabled: "已启用",
         disabled: "已禁用",
       },
+      showStats: {
+        title: "性能面板",
+        description: "使用 stats.js 面板替代默认 FPS 显示。",
+        statsjs: "Stats.js",
+        default: "默认",
+      },
       useWorker: {
         title: "多线程渲染",
         description: "使用Web Worker进行多线程网格生成（推荐）。",
@@ -291,6 +297,12 @@ export const translations = {
         enabled: "Enabled",
         disabled: "Disabled",
       },
+      showStats: {
+        title: "Performance Panel",
+        description: "Use stats.js panel instead of default FPS display.",
+        statsjs: "Stats.js",
+        default: "Default",
+      },
       useWorker: {
         title: "Multi-threaded Rendering",
         description: "Use Web Worker for multi-threaded mesh generation (recommended).",
@@ -448,6 +460,12 @@ export const translations = {
         description: "惑星がタイルに着地した時のヒットサウンドを有効にします。",
         enabled: "有効",
         disabled: "無効",
+      },
+      showStats: {
+        title: "パフォーマンスパネル",
+        description: "デフォルトのFPS表示の代わりにstats.jsパネルを使用します。",
+        statsjs: "Stats.js",
+        default: "デフォルト",
       },
       useWorker: {
         title: "マルチスレッドレンダリング",

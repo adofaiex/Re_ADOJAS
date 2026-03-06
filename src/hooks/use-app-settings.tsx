@@ -15,6 +15,7 @@ interface AppSettings {
   targetFramerate: TargetFramerateType
   loadMethod: LoadMethodType
   hitsoundEnabled: boolean
+  showStats: boolean // 是否使用 stats.js 面板
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -25,6 +26,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   targetFramerate: "auto", // Default to auto (monitor refresh rate)
   loadMethod: "async", // Default to async loading
   hitsoundEnabled: true, // Default to enabled
+  showStats: false, // Default to using default FPS panel
 }
 
 export function useAppSettings() {

@@ -1,7 +1,10 @@
 /**
  * Hitsound Manager
- * Manages hit sound playback for tile hits
+ * Pre-synthesizes all hitsounds at level load time for accurate timing
  */
+
+// Static import of audio data JSON (Vite handles this at build time)
+import audioData from '../../sounds/audio_data.json';
 
 // Available hitsound types
 export type HitsoundType = 
@@ -35,48 +38,42 @@ export type HitsoundType =
   | 'Sizzle'
   | 'None';
 
-// Map hitsound type to file name
-const hitsoundFileMap: Record<HitsoundType, string> = {
-  'Kick': 'sndKick.wav',
-  'KickHouse': 'sndKickHouse.wav',
-  'KickChroma': 'sndKickChroma.wav',
-  'KickRupture': 'sndKickRupture.wav',
-  'Snare': 'sndSnareAcoustic2.wav',
-  'SnareHouse': 'sndSnareHouse.wav',
-  'SnareVapor': 'sndSnareVapor.wav',
-  'Clap': 'sndClapHit.wav',
-  'ClapHit': 'sndClapHit.wav',
-  'ClapHitEcho': 'sndClapHitEcho.wav',
-  'Hat': 'sndHat.wav',
-  'HatHouse': 'sndHatHouse.wav',
-  'Chuck': 'sndChuck.wav',
-  'Hammer': 'sndHammer.wav',
-  'Shaker': 'sndShaker.wav',
-  'ShakerLoud': 'sndShakerLoud.wav',
-  'Sidestick': 'sndSidestick.wav',
-  'Stick': 'sndStick.wav',
-  'ReverbClack': 'sndReverbClack.wav',
-  'ReverbClap': 'sndReverbClap.wav',
-  'Squareshot': 'sndSquareshot.wav',
-  'FireTile': 'sndFireTile.wav',
-  'IceTile': 'sndIceTile.wav',
-  'PowerUp': 'sndPowerUp.wav',
-  'PowerDown': 'sndPowerDown.wav',
-  'VehiclePositive': 'sndVehiclePositive.wav',
-  'VehicleNegative': 'sndVehicleNegative.wav',
-  'Sizzle': 'sndSizzle.wav',
+// Map hitsound type to JSON key
+const hitsoundKeyMap: Record<HitsoundType, string> = {
+  'Kick': 'sndKick',
+  'KickHouse': 'sndKickHouse',
+  'KickChroma': 'sndKickChroma',
+  'KickRupture': 'sndKickRupture',
+  'Snare': 'sndSnareAcoustic2',
+  'SnareHouse': 'sndSnareHouse',
+  'SnareVapor': 'sndSnareVapor',
+  'Clap': 'sndClapHit',
+  'ClapHit': 'sndClapHit',
+  'ClapHitEcho': 'sndClapHitEcho',
+  'Hat': 'sndHat',
+  'HatHouse': 'sndHatHouse',
+  'Chuck': 'sndChuck',
+  'Hammer': 'sndHammer',
+  'Shaker': 'sndShaker',
+  'ShakerLoud': 'sndShakerLoud',
+  'Sidestick': 'sndSidestick',
+  'Stick': 'sndStick',
+  'ReverbClack': 'sndReverbClack',
+  'ReverbClap': 'sndReverbClap',
+  'Squareshot': 'sndSquareshot',
+  'FireTile': 'sndFireTile',
+  'IceTile': 'sndIceTile',
+  'PowerUp': 'sndPowerUp',
+  'PowerDown': 'sndPowerDown',
+  'VehiclePositive': 'sndVehiclePositive',
+  'VehicleNegative': 'sndVehicleNegative',
+  'Sizzle': 'sndSizzle',
   'None': '',
 };
 
 // Audio buffer cache using AudioContext
 let audioContext: AudioContext | null = null;
 const audioBufferCache: Map<string, AudioBuffer> = new Map();
-
-// Base64 sounds for static pages (Fallback)
-const embeddedSounds: Record<string, string> = {
-  // We can fill this with small base64 samples or leave empty for dynamic fetch
-  // For now, we use a dynamic loader that works with Vite/Webpack assets
-};
 
 // Get or create AudioContext
 export function getAudioContext(): AudioContext {
@@ -86,70 +83,61 @@ export function getAudioContext(): AudioContext {
   return audioContext;
 }
 
-// Load audio buffer
-async function loadAudioBuffer(fileName: string): Promise<AudioBuffer | null> {
-  if (!fileName) return null;
-  if (audioBufferCache.has(fileName)) {
-    return audioBufferCache.get(fileName)!;
+// Load audio buffer from dataURL in JSON
+async function loadAudioBuffer(key: string): Promise<AudioBuffer | null> {
+  if (!key) return null;
+  if (audioBufferCache.has(key)) {
+    return audioBufferCache.get(key)!;
   }
   
   try {
-    // Check if we have an embedded version
-    if (embeddedSounds[fileName]) {
-        const base64 = embeddedSounds[fileName];
-        const binary = atob(base64);
-        const arrayBuffer = new ArrayBuffer(binary.length);
-        const uint8Array = new Uint8Array(arrayBuffer);
-        for (let i = 0; i < binary.length; i++) uint8Array[i] = binary.charCodeAt(i);
-        const audioBuffer = await getAudioContext().decodeAudioData(arrayBuffer);
-        audioBufferCache.set(fileName, audioBuffer);
-        return audioBuffer;
+    const dataURL = (audioData as Record<string, string>)[key];
+    if (!dataURL) {
+      console.warn(`[HitsoundManager] Sound "${key}" not found in audio_data.json`);
+      return null;
     }
-
-    // Try multiple possible paths for different environments
-    const paths = [
-        `/src/sounds/${fileName}`,
-        `./src/sounds/${fileName}`,
-        `./sounds/${fileName}`,
-        `../sounds/${fileName}`
-    ];
-
-    let response: Response | null = null;
-    for (const path of paths) {
-        try {
-            const res = await fetch(path);
-            if (res.ok) {
-                response = res;
-                break;
-            }
-        } catch (e) { /* ignore and try next path */ }
+    
+    // Extract base64 data from dataURL
+    const base64Match = dataURL.match(/^data:audio\/\w+;base64,(.+)$/);
+    if (!base64Match) {
+      console.warn(`[HitsoundManager] Invalid dataURL format for "${key}"`);
+      return null;
     }
-
-    if (!response || !response.ok) throw new Error(`Could not find ${fileName}`);
-
-    const arrayBuffer = await response.arrayBuffer();
+    
+    const base64 = base64Match[1];
+    const binary = atob(base64);
+    const arrayBuffer = new ArrayBuffer(binary.length);
+    const uint8Array = new Uint8Array(arrayBuffer);
+    for (let i = 0; i < binary.length; i++) {
+      uint8Array[i] = binary.charCodeAt(i);
+    }
+    
     const audioBuffer = await getAudioContext().decodeAudioData(arrayBuffer);
-    audioBufferCache.set(fileName, audioBuffer);
+    audioBufferCache.set(key, audioBuffer);
+    console.log(`[HitsoundManager] Loaded "${key}" from JSON dataURL`);
     return audioBuffer;
   } catch (e) {
-    console.warn(`Failed to load audio buffer: ${fileName}`, e);
+    console.warn(`[HitsoundManager] Failed to load audio buffer: ${key}`, e);
     return null;
   }
 }
 
 /**
  * Hitsound Manager class
- * Optimised for high performance and pre-scheduling
+ * Pre-synthesizes hitsounds at load time for perfect timing
  */
 export class HitsoundManager {
   private hitsoundType: HitsoundType = 'Kick';
   private volume: number = 100; // 0-100
   private enabled: boolean = true;
   private currentBuffer: AudioBuffer | null = null;
-  
-  // Scheduler state
-  private scheduledSources: AudioBufferSourceNode[] = [];
   private gainNode: GainNode | null = null;
+  
+  // Pre-synthesized hitsound track
+  private synthesizedBuffer: AudioBuffer | null = null;
+  private synthesizedSource: AudioBufferSourceNode | null = null;
+  private scheduledTimestamps: number[] = [];
+  private totalDuration: number = 0;
   
   constructor(hitsoundType: HitsoundType = 'Kick', volume: number = 100) {
     this.hitsoundType = hitsoundType;
@@ -173,9 +161,10 @@ export class HitsoundManager {
   private async preloadHitsound(type: HitsoundType): Promise<void> {
     if (type === 'None') return;
     
-    const fileName = hitsoundFileMap[type];
-    if (fileName) {
-      this.currentBuffer = await loadAudioBuffer(fileName);
+    const key = hitsoundKeyMap[type];
+    if (key) {
+      this.currentBuffer = await loadAudioBuffer(key);
+      console.log(`[HitsoundManager] Preloaded hitsound type "${type}", buffer:`, !!this.currentBuffer);
     }
   }
   
@@ -204,72 +193,165 @@ export class HitsoundManager {
   setEnabled(enabled: boolean): void {
     this.enabled = enabled;
     if (!enabled) {
-      this.stopAll();
+      this.stop();
     }
-  }
-  
-  /**
-   * Schedule all hitsounds based on tile timestamps
-   * @param timestamps Array of times (in seconds) to play hitsounds
-   * @param startTime The performance.now() reference for t=0
-   */
-  scheduleAll(timestamps: number[], startTime: number): void {
-    if (!this.enabled || this.hitsoundType === 'None' || !this.currentBuffer) return;
-    
-    this.stopAll();
-    
-    const ctx = getAudioContext();
-    const gain = this.getGainNode();
-    
-    // We schedule in batches if too many, but for now let's try direct
-    // Only schedule if within reasonable range or just do all?
-    // 60w nodes might be too many for the browser to handle at once.
-    // ADOFAI high BPM usually means many hits in short time.
-    
-    // For 60w tiles, we should only schedule a "window" of hits.
-    // However, the user wants "timestamp stitching" effect.
-    // Scheduling nodes is very cheap compared to playing them in a loop.
-    
-    const now = ctx.currentTime;
-    const baseTime = startTime / 1000; // startTime is usually performance.now()
-    
-    // Optimization: Only schedule what's ahead
-    // But since this is called at startPlay, we schedule everything.
-    
-    for (let i = 0; i < timestamps.length; i++) {
-        const t = timestamps[i];
-        if (t < 0) continue; // Skip countdown hits if needed, or schedule them too
-        
-        const source = ctx.createBufferSource();
-        source.buffer = this.currentBuffer;
-        source.connect(gain);
-        
-        // ctx.currentTime + (t - currentLevelTime)
-        // We assume t=0 is the moment we start playing.
-        source.start(now + t);
-        this.scheduledSources.push(source);
-    }
-    
-    console.log(`Scheduled ${this.scheduledSources.length} hitsounds`);
   }
 
   /**
-   * Stop all scheduled sounds
+   * Pre-synthesize hitsound track at level load time
+   * @param timestamps Array of times (in seconds) to play hitsounds
+   * @param totalDuration Total duration of the level in seconds
    */
-  stopAll(): void {
-    for (const source of this.scheduledSources) {
-      try {
-        source.stop();
-        source.disconnect();
-      } catch (e) {
-        // Already stopped or not started
+  async preSynthesize(timestamps: number[], totalDuration: number): Promise<void> {
+    console.log('[HitsoundManager] preSynthesize called, timestamps:', timestamps.length, 'duration:', totalDuration);
+    
+    // Wait for buffer to load if not ready
+    if (!this.currentBuffer && this.hitsoundType !== 'None') {
+      console.log('[HitsoundManager] Waiting for buffer to load...');
+      const key = hitsoundKeyMap[this.hitsoundType];
+      if (key) {
+        this.currentBuffer = await loadAudioBuffer(key);
       }
     }
-    this.scheduledSources = [];
+    
+    console.log('[HitsoundManager] currentBuffer:', !!this.currentBuffer, 'hitsoundType:', this.hitsoundType);
+    
+    if (!this.currentBuffer || this.hitsoundType === 'None') {
+      console.warn('[HitsoundManager] No currentBuffer or hitsoundType is None');
+      this.synthesizedBuffer = null;
+      return;
+    }
+    
+    this.scheduledTimestamps = [...timestamps].sort((a, b) => a - b);
+    this.totalDuration = totalDuration;
+    
+    const ctx = getAudioContext();
+    const sampleRate = ctx.sampleRate;
+    const hitDuration = this.currentBuffer.duration;
+    const numChannels = this.currentBuffer.numberOfChannels;
+    
+    console.log('[HitsoundManager] Synthesizing - sampleRate:', sampleRate, 'hitDuration:', hitDuration, 'numChannels:', numChannels);
+    
+    // Calculate total buffer length (add some padding at the end for last hitsound)
+    const bufferLength = Math.ceil((totalDuration + hitDuration + 1) * sampleRate);
+    
+    // Create offline context for synthesis
+    const offlineCtx = new OfflineAudioContext(numChannels, bufferLength, sampleRate);
+    
+    // Get the hitsound data
+    const hitBuffer = this.currentBuffer;
+    
+    // Place each hitsound at its timestamp
+    let placedCount = 0;
+    for (const t of this.scheduledTimestamps) {
+      if (t < 0) continue; // Skip negative timestamps
+      
+      const source = offlineCtx.createBufferSource();
+      source.buffer = hitBuffer;
+      source.connect(offlineCtx.destination);
+      source.start(t);
+      placedCount++;
+    }
+    
+    console.log('[HitsoundManager] Placed', placedCount, 'hitsounds in offline context');
+    
+    // Render the synthesized buffer
+    try {
+      this.synthesizedBuffer = await offlineCtx.startRendering();
+      console.log(`[HitsoundManager] Pre-synthesized ${placedCount} hitsounds, duration: ${totalDuration.toFixed(2)}s, buffer duration: ${this.synthesizedBuffer.duration.toFixed(2)}s`);
+    } catch (e) {
+      console.error('[HitsoundManager] Failed to synthesize hitsounds:', e);
+      this.synthesizedBuffer = null;
+    }
   }
-  
+
   /**
-   * Play hit sound (Real-time fallback)
+   * Start playing the pre-synthesized hitsound track
+   * @param delay Delay in seconds before starting playback
+   */
+  start(delay: number = 0): void {
+    console.log('[HitsoundManager] start called, delay:', delay, 'enabled:', this.enabled, 'hasBuffer:', !!this.synthesizedBuffer);
+    if (!this.enabled || !this.synthesizedBuffer) {
+      console.warn('[HitsoundManager] Cannot start - enabled:', this.enabled, 'synthesizedBuffer:', !!this.synthesizedBuffer);
+      return;
+    }
+    
+    this.stop();
+    
+    const ctx = getAudioContext();
+    if (ctx.state === 'suspended') {
+      console.log('[HitsoundManager] Resuming suspended AudioContext');
+      ctx.resume();
+    }
+    
+    this.synthesizedSource = ctx.createBufferSource();
+    this.synthesizedSource.buffer = this.synthesizedBuffer;
+    this.synthesizedSource.connect(this.getGainNode());
+    
+    // Cleanup after playback
+    this.synthesizedSource.onended = () => {
+      if (this.synthesizedSource) {
+        try {
+          this.synthesizedSource.disconnect();
+        } catch (e) {}
+        this.synthesizedSource = null;
+      }
+    };
+    
+    // Start at ctx.currentTime + delay
+    const startTime = ctx.currentTime + delay;
+    console.log('[HitsoundManager] Starting playback at', startTime, '(currentTime:', ctx.currentTime, ')');
+    this.synthesizedSource.start(startTime);
+  }
+
+  /**
+   * Start playing from a specific offset (for resume after pause)
+   * @param offset Offset in seconds from the beginning of the track
+   */
+  startAtOffset(offset: number): void {
+    if (!this.enabled || !this.synthesizedBuffer) return;
+    
+    this.stop();
+    
+    const ctx = getAudioContext();
+    if (ctx.state === 'suspended') ctx.resume();
+    
+    this.synthesizedSource = ctx.createBufferSource();
+    this.synthesizedSource.buffer = this.synthesizedBuffer;
+    this.synthesizedSource.connect(this.getGainNode());
+    
+    // Cleanup after playback
+    this.synthesizedSource.onended = () => {
+      if (this.synthesizedSource) {
+        try {
+          this.synthesizedSource.disconnect();
+        } catch (e) {}
+        this.synthesizedSource = null;
+      }
+    };
+    
+    // start(when, offset, duration) - play from offset immediately
+    const remainingDuration = this.synthesizedBuffer.duration - offset;
+    if (remainingDuration > 0) {
+      this.synthesizedSource.start(0, offset, remainingDuration);
+    }
+  }
+
+  /**
+   * Stop playing
+   */
+  stop(): void {
+    if (this.synthesizedSource) {
+      try {
+        this.synthesizedSource.stop();
+        this.synthesizedSource.disconnect();
+      } catch (e) {}
+      this.synthesizedSource = null;
+    }
+  }
+
+  /**
+   * Play single hit sound (for real-time fallback)
    */
   play(): void {
     if (!this.enabled || this.hitsoundType === 'None' || !this.currentBuffer) return;
@@ -280,16 +362,31 @@ export class HitsoundManager {
     const source = ctx.createBufferSource();
     source.buffer = this.currentBuffer;
     source.connect(this.getGainNode());
+    
+    source.onended = () => {
+      try {
+        source.disconnect();
+      } catch (e) {}
+    };
+    
     source.start(0);
+  }
+  
+  /**
+   * Check if hitsounds are pre-synthesized
+   */
+  isSynthesized(): boolean {
+    return this.synthesizedBuffer !== null;
   }
   
   /**
    * Dispose and clear
    */
   dispose(): void {
-    this.stopAll();
+    this.stop();
     this.currentBuffer = null;
+    this.synthesizedBuffer = null;
+    this.scheduledTimestamps = [];
     this.gainNode = null;
   }
 }
-

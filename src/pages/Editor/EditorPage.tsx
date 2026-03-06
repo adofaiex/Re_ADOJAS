@@ -230,12 +230,14 @@ export default function EditorPage() {
 
       {/* Full-screen Canvas Area */}
       <div ref={containerRef} className="absolute inset-0">
-        <div
-          ref={fpsCounterRef}
-          className="absolute top-16 left-4 text-sm font-medium text-white bg-black bg-opacity-50 px-2 py-1 rounded"
-        >
-          FPS 0.00
-        </div>
+        {!settings.showStats && (
+          <div
+            ref={fpsCounterRef}
+            className="absolute top-16 left-4 text-sm font-medium text-white bg-black bg-opacity-50 px-2 py-1 rounded"
+          >
+            FPS 0.00
+          </div>
+        )}
         <div
           ref={infoRef}
           className="absolute top-16 right-4 text-sm font-medium text-white bg-black bg-opacity-50 px-2 py-1 rounded"
