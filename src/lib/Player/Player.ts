@@ -218,8 +218,7 @@ export class Player implements IPlayer {
     // Build spatial index for fast visibility checks
     this.buildSpatialIndex();
     
-    // Pre-synthesize hitsounds at load time
-    this.preSynthesizeHitsounds();
+    // Hitsounds will be synthesized during loading process with progress display
   }
 
   private formatHexColor(hex: string): string {
@@ -227,7 +226,7 @@ export class Player implements IPlayer {
   }
   
   /**
-   * Pre-synthesize hitsounds at level load time
+   * Pre-synthesize hitsounds at level load time (called during initialization)
    */
   private async preSynthesizeHitsounds(): Promise<void> {
     console.log('[Player] preSynthesizeHitsounds called');
@@ -252,8 +251,39 @@ export class Player implements IPlayer {
     
     console.log('[Player] Hitsound timestamps count:', hitsoundTimestamps.length, 'total duration:', totalDuration);
     
-    // Pre-synthesize
+    // Pre-synthesize (no progress callback for private method)
     await this.hitsoundManager.preSynthesize(hitsoundTimestamps, totalDuration);
+  }
+  
+  /**
+   * Pre-synthesize hitsounds with progress callback (public method for UI)
+   * @param onProgress Progress callback (0-100)
+   */
+  public async preSynthesizeHitsoundsWithProgress(onProgress?: (percent: number) => void): Promise<void> {
+    console.log('[Player] preSynthesizeHitsoundsWithProgress called');
+    if (!this.tileStartTimes || this.tileStartTimes.length === 0) {
+      console.log('[Player] No tileStartTimes, skipping hitsound synthesis');
+      return;
+    }
+    
+    // Calculate total duration (last tile time + some buffer)
+    const lastTileTime = this.tileStartTimes[this.tileStartTimes.length - 1] || 0;
+    const totalDuration = lastTileTime + 10; // Add 10 seconds buffer
+    
+    // Collect all hitsound timestamps
+    const hitsoundTimestamps: number[] = [];
+    for (let i = 1; i < this.tileStartTimes.length; i++) {
+        const t = this.tileStartTimes[i];
+        const tile = this.levelData.tiles[i];
+        if (tile && tile.angle !== 0) {
+            hitsoundTimestamps.push(t);
+        }
+    }
+    
+    console.log('[Player] Hitsound timestamps count:', hitsoundTimestamps.length, 'total duration:', totalDuration);
+    
+    // Pre-synthesize with progress callback
+    await this.hitsoundManager.preSynthesize(hitsoundTimestamps, totalDuration, onProgress);
   }
   
   /**

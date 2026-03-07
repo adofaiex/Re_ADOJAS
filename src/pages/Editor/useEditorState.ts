@@ -271,7 +271,7 @@ export function useEditorState() {
     const initializeExample = async (): Promise<void> => {
       try {
         const level = new ADOFAI.Level(example, parser)
-        level.on("load", (loadedLevel: any): void => {
+        level.on("load", async (loadedLevel: any): Promise<void> => {
           loadedLevel.calculateTilePosition()
           setAdofaiFile(loadedLevel)
 
@@ -291,6 +291,9 @@ export function useEditorState() {
             player.setUseWorker(settings.useWorker)
             player.setTargetFramerate(settings.targetFramerate)
             player.setStatsPanel(settings.showStats)
+            
+            // Synthesize hitsounds
+            await player.preSynthesizeHitsoundsWithProgress()
             
             // Only set stats callback if not using stats.js
             if (!settings.showStats) {

@@ -201,13 +201,15 @@ export class HitsoundManager {
    * Pre-synthesize hitsound track at level load time
    * @param timestamps Array of times (in seconds) to play hitsounds
    * @param totalDuration Total duration of the level in seconds
+   * @param onProgress Optional progress callback (0-100)
    */
-  async preSynthesize(timestamps: number[], totalDuration: number): Promise<void> {
+  async preSynthesize(timestamps: number[], totalDuration: number, onProgress?: (percent: number) => void): Promise<void> {
     console.log('[HitsoundManager] preSynthesize called, timestamps:', timestamps.length, 'duration:', totalDuration);
     
     // Wait for buffer to load if not ready
     if (!this.currentBuffer && this.hitsoundType !== 'None') {
       console.log('[HitsoundManager] Waiting for buffer to load...');
+      if (onProgress) onProgress(1);
       const key = hitsoundKeyMap[this.hitsoundType];
       if (key) {
         this.currentBuffer = await loadAudioBuffer(key);
@@ -227,42 +229,98 @@ export class HitsoundManager {
     
     const ctx = getAudioContext();
     const sampleRate = ctx.sampleRate;
-    const hitDuration = this.currentBuffer.duration;
-    const numChannels = this.currentBuffer.numberOfChannels;
+    const hitBuffer = this.currentBuffer;
+    const hitDuration = hitBuffer.duration;
+    const numChannels = hitBuffer.numberOfChannels;
     
-    console.log('[HitsoundManager] Synthesizing - sampleRate:', sampleRate, 'hitDuration:', hitDuration, 'numChannels:', numChannels);
+    console.log('[HitsoundManager] Synthesizing - sampleRate:', sampleRate, 'hitDuration:', hitDuration, 'numChannels:', numChannels, 'hits:', this.scheduledTimestamps.length);
     
     // Calculate total buffer length (add some padding at the end for last hitsound)
     const bufferLength = Math.ceil((totalDuration + hitDuration + 1) * sampleRate);
     
-    // Create offline context for synthesis
-    const offlineCtx = new OfflineAudioContext(numChannels, bufferLength, sampleRate);
+    // Check if buffer is too large (Chrome limit is around 2^31 samples ~ 13 hours at 44.1kHz)
+    const maxBufferSize = 2147483647; // 2^31 - 1
+    if (bufferLength > maxBufferSize) {
+      console.error('[HitsoundManager] Buffer too large:', bufferLength, 'max:', maxBufferSize);
+      this.synthesizedBuffer = null;
+      if (onProgress) onProgress(100);
+      return;
+    }
     
-    // Get the hitsound data
-    const hitBuffer = this.currentBuffer;
+    console.log('[HitsoundManager] Buffer length:', bufferLength, 'samples, ~', (bufferLength / sampleRate / 60).toFixed(2), 'minutes');
     
-    // Place each hitsound at its timestamp
+    if (onProgress) onProgress(10);
+    
+    // Optimized approach: Create buffer and copy data directly instead of using AudioBufferSourceNodes
+    // This is MUCH faster for large numbers of hitsounds
+    const startTime = performance.now();
+    
+    // Create the output buffer
+    this.synthesizedBuffer = ctx.createBuffer(numChannels, bufferLength, sampleRate);
+    
+    // Get source and destination channel data
+    const hitChannelData: Float32Array[] = [];
+    for (let ch = 0; ch < numChannels; ch++) {
+      hitChannelData.push(hitBuffer.getChannelData(ch));
+    }
+    
+    const outputChannelData: Float32Array[] = [];
+    for (let ch = 0; ch < numChannels; ch++) {
+      outputChannelData.push(this.synthesizedBuffer.getChannelData(ch));
+    }
+    
+    // Copy each hitsound to its position in the output buffer
+    const totalHits = this.scheduledTimestamps.length;
+    const progressUpdateInterval = Math.max(100, Math.floor(totalHits / 30)); // Update ~30 times
+    
     let placedCount = 0;
+    const hitLengthSamples = Math.floor(hitDuration * sampleRate);
+    
     for (const t of this.scheduledTimestamps) {
       if (t < 0) continue; // Skip negative timestamps
       
-      const source = offlineCtx.createBufferSource();
-      source.buffer = hitBuffer;
-      source.connect(offlineCtx.destination);
-      source.start(t);
+      const startSample = Math.floor(t * sampleRate);
+      
+      // Copy data for each channel
+      for (let ch = 0; ch < numChannels; ch++) {
+        const hitData = hitChannelData[ch];
+        const outputData = outputChannelData[ch];
+        
+        // Calculate source and destination ranges
+        const outputStart = startSample;
+        const hitLength = Math.min(hitLengthSamples, bufferLength - outputStart);
+        
+        // Copy with mixing (add samples together for overlapping hitsounds)
+        for (let i = 0; i < hitLength; i++) {
+          const outputIdx = outputStart + i;
+          outputData[outputIdx] += hitData[i];
+        }
+      }
+      
       placedCount++;
+      
+      // Report progress periodically
+      if (onProgress && placedCount % progressUpdateInterval === 0) {
+        const copyPercent = 10 + (placedCount / totalHits) * 80; // 10% to 90%
+        onProgress(Math.min(90, copyPercent));
+      }
     }
     
-    console.log('[HitsoundManager] Placed', placedCount, 'hitsounds in offline context');
+    console.log('[HitsoundManager] Copied', placedCount, 'hitsounds in', (performance.now() - startTime).toFixed(2), 'ms');
     
-    // Render the synthesized buffer
-    try {
-      this.synthesizedBuffer = await offlineCtx.startRendering();
-      console.log(`[HitsoundManager] Pre-synthesized ${placedCount} hitsounds, duration: ${totalDuration.toFixed(2)}s, buffer duration: ${this.synthesizedBuffer.duration.toFixed(2)}s`);
-    } catch (e) {
-      console.error('[HitsoundManager] Failed to synthesize hitsounds:', e);
-      this.synthesizedBuffer = null;
+    // Clip the output to prevent distortion from mixing
+    if (onProgress) onProgress(95);
+    
+    for (let ch = 0; ch < numChannels; ch++) {
+      const outputData = outputChannelData[ch];
+      for (let i = 0; i < outputData.length; i++) {
+        // Clip to [-1, 1] range
+        outputData[i] = Math.max(-1, Math.min(1, outputData[i]));
+      }
     }
+    
+    if (onProgress) onProgress(100);
+    console.log(`[HitsoundManager] Pre-synthesized ${placedCount} hitsounds in ${((performance.now() - startTime) / 1000).toFixed(2)}s, duration: ${totalDuration.toFixed(2)}s`);
   }
 
   /**
@@ -350,28 +408,6 @@ export class HitsoundManager {
     }
   }
 
-  /**
-   * Play single hit sound (for real-time fallback)
-   */
-  play(): void {
-    if (!this.enabled || this.hitsoundType === 'None' || !this.currentBuffer) return;
-    
-    const ctx = getAudioContext();
-    if (ctx.state === 'suspended') ctx.resume();
-    
-    const source = ctx.createBufferSource();
-    source.buffer = this.currentBuffer;
-    source.connect(this.getGainNode());
-    
-    source.onended = () => {
-      try {
-        source.disconnect();
-      } catch (e) {}
-    };
-    
-    source.start(0);
-  }
-  
   /**
    * Check if hitsounds are pre-synthesized
    */

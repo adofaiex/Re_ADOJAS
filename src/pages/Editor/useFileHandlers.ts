@@ -104,6 +104,23 @@ export function useFileHandlers({
     [t, settings, setIsLoading, setLoadingProgress, setLoadingStatus]
   )
 
+  // 辅助函数：初始化玩家并合成打拍音
+  const initializePlayerWithHitsounds = async (loadedLevel: any): Promise<void> => {
+    initializePlayer(loadedLevel)
+    
+    // Synthesize hitsounds with progress display
+    if (previewerRef.current) {
+      setLoadingProgress(96)
+      setLoadingStatus(t("loading.synthesizingHitsounds"))
+      
+      await previewerRef.current.preSynthesizeHitsoundsWithProgress((percent) => {
+        // Map 0-100 to 96-100
+        const mappedPercent = 96 + (percent / 100) * 4
+        setLoadingProgress(mappedPercent)
+      })
+    }
+  }
+
   // Synchronous loading (blocks UI)
   const loadSync = (content: string): void => {
     const level = new ADOFAI.Level(content, parser)
@@ -114,7 +131,7 @@ export function useFileHandlers({
       setLoadingStatus(getStageText(progressEvent.stage, t))
     })
     
-    level.on("load", (loadedLevel: any): void => {
+    level.on("load", async (loadedLevel: any): Promise<void> => {
       // 计算瓦片位置时也会触发进度事件
       loadedLevel.on("parse:progress", (progressEvent: ParseProgressEvent): void => {
         setLoadingProgress(progressEvent.percent)
@@ -125,7 +142,8 @@ export function useFileHandlers({
       setLoadingProgress(95)
       setLoadingStatus(t("loading.buildingScene"))
       
-      initializePlayer(loadedLevel)
+      // Initialize player and synthesize hitsounds
+      await initializePlayerWithHitsounds(loadedLevel)
       
       setLoadingProgress(100)
       window.showNotification?.("success", t("editor.notifications.loadSuccess"))
@@ -147,7 +165,7 @@ export function useFileHandlers({
       setLoadingStatus(getStageText(progressEvent.stage, t))
     })
     
-    level.on("load", (loadedLevel: any): void => {
+    level.on("load", async (loadedLevel: any): Promise<void> => {
       // 计算瓦片位置时也会触发进度事件
       loadedLevel.on("parse:progress", (progressEvent: ParseProgressEvent): void => {
         setLoadingProgress(progressEvent.percent)
@@ -158,7 +176,8 @@ export function useFileHandlers({
       setLoadingProgress(95)
       setLoadingStatus(t("loading.buildingScene"))
       
-      initializePlayer(loadedLevel)
+      // Initialize player and synthesize hitsounds
+      await initializePlayerWithHitsounds(loadedLevel)
       
       setLoadingProgress(100)
       window.showNotification?.("success", t("editor.notifications.loadSuccess"))
@@ -190,7 +209,7 @@ export function useFileHandlers({
         { type: 'module' }
       )
       
-      worker.onmessage = (e) => {
+      worker.onmessage = async (e) => {
         const { type, progress, status, stage, current, total, data, error } = e.data
         
         if (type === 'progress') {
@@ -200,11 +219,11 @@ export function useFileHandlers({
         } else if (type === 'result') {
           const { levelData } = data
           
-          setLoadingProgress(98)
+          setLoadingProgress(95)
           setLoadingStatus(t("loading.buildingScene"))
           
-          // Create player with loaded data
-          initializePlayer(levelData)
+          // Create player and synthesize hitsounds
+          await initializePlayerWithHitsounds(levelData)
           
           setLoadingProgress(100)
           window.showNotification?.("success", t("editor.notifications.loadSuccess"))
