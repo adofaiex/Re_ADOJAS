@@ -421,11 +421,15 @@ export class LargeFileParser {
     if (settingsPos !== -1) {
       if (this.onProgress) this.onProgress('parsing_settings', 10);
       const settingsEnd = findValueEnd(view, settingsPos);
+      console.log('[LargeFileParser] Settings position:', settingsPos, 'end:', settingsEnd, 'size:', settingsEnd - settingsPos);
       if (settingsEnd !== -1) {
         const settingsStr = extractValueAsString(view, settingsPos, settingsEnd);
+        console.log('[LargeFileParser] Settings string preview:', settingsStr.substring(0, 500));
         try {
           result.settings = JSON.parse(settingsStr);
+          console.log('[LargeFileParser] Settings parsed, keys:', Object.keys(result.settings || {}));
           console.log('[LargeFileParser] Settings hitsound:', result.settings?.hitsound);
+          console.log('[LargeFileParser] Settings hitsoundVolume:', result.settings?.hitsoundVolume);
         } catch (e) {
           console.warn('[LargeFileParser] Failed to parse settings:', e);
           result.settings = {};
