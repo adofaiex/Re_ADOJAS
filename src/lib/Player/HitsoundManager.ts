@@ -10,6 +10,19 @@ import audioData from '../../sounds/audio_data.json';
 // Threshold for switching to real-time mode (to avoid extremely long synthesis)
 const REALTIME_MODE_THRESHOLD = 500000; // 500k hits - use real-time mode above this
 
+/**
+ * Soft clipping function - shared across all processing paths
+ * Uses polynomial approximation of tanh for smooth saturation
+ * @param x Input sample value
+ * @returns Soft-clipped output in range [-1, 1]
+ */
+const softClip = (x: number): number => {
+  const absX = x < 0 ? -x : x;
+  if (absX < 0.5) return x;  // Linear region - no distortion
+  if (absX < 1.5) return x * (1 - x * x / 3);  // Soft clipping region
+  return x < 0 ? -1 : 1;  // Hard limit for extreme values
+};
+
 // Available hitsound types
 export type HitsoundType = 
   | 'Kick'
@@ -385,19 +398,11 @@ export class HitsoundManager {
       
       console.log('[HitsoundManager] Processed', processedHits, 'hits in', ((performance.now() - startTime) / 1000).toFixed(2), 's, peak:', peakAmplitude.toFixed(2));
       
-      // Apply normalization and soft clipping
+      // Apply normalization and soft clipping (using shared softClip function)
       if (onProgress) onProgress(95);
       
       const TARGET_HEADROOM = 0.9;
       const gainReduction = peakAmplitude > TARGET_HEADROOM ? TARGET_HEADROOM / peakAmplitude : 1.0;
-      
-      // Soft clipping function
-      const softClip = (x: number): number => {
-        const absX = x < 0 ? -x : x;
-        if (absX < 0.5) return x;
-        if (absX < 1.5) return x * (1 - x * x / 3);
-        return x < 0 ? -1 : 1;
-      };
       
       // Apply to all channels in chunks to yield
       for (let ch = 0; ch < numChannels; ch++) {
@@ -465,18 +470,11 @@ export class HitsoundManager {
       
       console.log('[HitsoundManager] Copied', placedCount, 'hitsounds in', (performance.now() - startTime).toFixed(2), 'ms, peak:', peakAmplitude.toFixed(2));
       
-      // Apply normalization and soft clipping
+      // Apply normalization and soft clipping (using shared softClip function)
       if (onProgress) onProgress(95);
       
       const TARGET_HEADROOM = 0.9;
       const gainReduction = peakAmplitude > TARGET_HEADROOM ? TARGET_HEADROOM / peakAmplitude : 1.0;
-      
-      const softClip = (x: number): number => {
-        const absX = x < 0 ? -x : x;
-        if (absX < 0.5) return x;
-        if (absX < 1.5) return x * (1 - x * x / 3);
-        return x < 0 ? -1 : 1;
-      };
       
       for (let ch = 0; ch < numChannels; ch++) {
         const outputData = outputChannelData[ch];
@@ -585,7 +583,18 @@ export class HitsoundManager {
           if (playTime >= currentTime) {
             const source = ctx.createBufferSource();
             source.buffer = this.currentBuffer;
-            source.connect(this.getGainNode());
+            const gainNode = this.getGainNode();
+            source.connect(gainNode);
+            
+            // Clean up this source after it finishes playing to avoid bloating the audio graph
+            source.onended = () => {
+              try {
+                source.disconnect(gainNode);
+              } catch {
+                // Ignore disconnect errors (e.g., if already disconnected)
+              }
+            };
+            
             source.start(playTime);
           }
         }

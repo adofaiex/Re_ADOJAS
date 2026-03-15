@@ -3,6 +3,7 @@ import * as ADOFAI from "adofai"
 import { Parsers, Structure } from "adofai"
 import type { ILevelData } from "@/lib/Player/types"
 import { Player } from "@/lib/Player/Player"
+import { LargeFileParser } from "@/lib/LargeFileParser"
 
 // 类型导入
 type ParseProgressEvent = Structure.ParseProgressEvent;
@@ -18,13 +19,14 @@ const LARGE_FILE_THRESHOLD = 400 * 1024 * 1024 // 400MB
 const VERY_LARGE_FILE_THRESHOLD = 90 * 1024 * 1024 // 90MB
 
 // 获取加载阶段的显示文本
-const getStageText = (stage: ParseProgressEvent['stage'], t: (key: string) => string): string => {
+const getStageText = (stage: string, t: (key: string) => string): string => {
   switch (stage) {
     case 'start':
       return t("loading.stage.start")
     case 'pathData':
       return t("loading.stage.pathData")
     case 'angleData':
+    case 'parsing_angleData':
       return t("loading.stage.angleData")
     case 'relativeAngle':
       return t("loading.stage.relativeAngle")
@@ -32,6 +34,12 @@ const getStageText = (stage: ParseProgressEvent['stage'], t: (key: string) => st
       return t("loading.stage.tilePosition")
     case 'complete':
       return t("loading.stage.complete")
+    case 'scanning':
+      return t("loading.preparingLargeFile")
+    case 'parsing_settings':
+    case 'parsing_actions':
+    case 'parsing_decorations':
+      return t("loading.parsingLevel")
     default:
       return t("loading.parsingLevel")
   }
@@ -65,51 +73,6 @@ export function useFileHandlers({
   previewerRef
 }: UseFileHandlersProps) {
   
-  // 文件加载处理
-  const handleFileLoad = useCallback(
-    (event: React.ChangeEvent<HTMLInputElement>): void => {
-      const file = event.target.files?.[0]
-      if (!file) return
-
-      setIsLoading(true)
-      setLoadingProgress(0)
-      setLoadingStatus(t("loading.parsingLevel"))
-
-      const reader = new FileReader()
-
-      reader.onload = async (e): Promise<void> => {
-        try {
-          const content = e.target?.result as string
-          
-          // Choose loading method based on settings
-          if (settings.loadMethod === 'worker') {
-            await loadWithWorker(content)
-          } else if (settings.loadMethod === 'async') {
-            await loadAsync(content)
-          } else {
-            loadSync(content)
-          }
-        } catch (error) {
-          window.showNotification?.("error", t("editor.notifications.loadError"))
-          console.error(error)
-          setIsLoading(false)
-          setLoadingProgress(0)
-          setLoadingStatus("")
-        }
-      }
-
-      reader.onerror = (): void => {
-        window.showNotification?.("error", t("editor.notifications.fileReadError"))
-        setIsLoading(false)
-        setLoadingProgress(0)
-        setLoadingStatus("")
-      }
-
-      reader.readAsText(file)
-    },
-    [t, settings, setIsLoading, setLoadingProgress, setLoadingStatus]
-  )
-
   // 辅助函数：初始化玩家并合成打拍音
   const initializePlayerWithHitsounds = async (loadedLevel: any, isVeryLargeFile: boolean = false): Promise<void> => {
     initializePlayer(loadedLevel)
