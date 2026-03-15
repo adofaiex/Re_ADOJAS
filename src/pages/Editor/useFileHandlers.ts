@@ -3,6 +3,7 @@ import * as ADOFAI from "adofai"
 import { Parsers, Structure } from "adofai"
 import type { ILevelData } from "@/lib/Player/types"
 import { Player } from "@/lib/Player/Player"
+import { LargeFileParser } from "@/lib/LargeFileParser"
 
 // 类型导入
 type ParseProgressEvent = Structure.ParseProgressEvent;
@@ -11,14 +12,21 @@ type ParseProgressEvent = Structure.ParseProgressEvent;
 const StringParser = Parsers.StringParser
 const parser = new StringParser()
 
+// 大文件阈值 - V8 字符串限制约为 512MB，我们设置安全阈值
+const LARGE_FILE_THRESHOLD = 400 * 1024 * 1024 // 400MB
+
+// 超大文件阈值 - 需要提前预合成 hitsound
+const VERY_LARGE_FILE_THRESHOLD = 90 * 1024 * 1024 // 90MB
+
 // 获取加载阶段的显示文本
-const getStageText = (stage: ParseProgressEvent['stage'], t: (key: string) => string): string => {
+const getStageText = (stage: string, t: (key: string) => string): string => {
   switch (stage) {
     case 'start':
       return t("loading.stage.start")
     case 'pathData':
       return t("loading.stage.pathData")
     case 'angleData':
+    case 'parsing_angleData':
       return t("loading.stage.angleData")
     case 'relativeAngle':
       return t("loading.stage.relativeAngle")
@@ -26,6 +34,12 @@ const getStageText = (stage: ParseProgressEvent['stage'], t: (key: string) => st
       return t("loading.stage.tilePosition")
     case 'complete':
       return t("loading.stage.complete")
+    case 'scanning':
+      return t("loading.preparingLargeFile")
+    case 'parsing_settings':
+    case 'parsing_actions':
+    case 'parsing_decorations':
+      return t("loading.parsingLevel")
     default:
       return t("loading.parsingLevel")
   }
@@ -59,69 +73,98 @@ export function useFileHandlers({
   previewerRef
 }: UseFileHandlersProps) {
   
-  // 文件加载处理
-  const handleFileLoad = useCallback(
-    (event: React.ChangeEvent<HTMLInputElement>): void => {
-      const file = event.target.files?.[0]
-      if (!file) return
-
-      setIsLoading(true)
-      setLoadingProgress(0)
-      setLoadingStatus(t("loading.parsingLevel"))
-
-      const reader = new FileReader()
-
-      reader.onload = async (e): Promise<void> => {
-        try {
-          const content = e.target?.result as string
-          
-          // Choose loading method based on settings
-          if (settings.loadMethod === 'worker') {
-            await loadWithWorker(content)
-          } else if (settings.loadMethod === 'async') {
-            await loadAsync(content)
-          } else {
-            loadSync(content)
-          }
-        } catch (error) {
-          window.showNotification?.("error", t("editor.notifications.loadError"))
-          console.error(error)
-          setIsLoading(false)
-          setLoadingProgress(0)
-          setLoadingStatus("")
-        }
-      }
-
-      reader.onerror = (): void => {
-        window.showNotification?.("error", t("editor.notifications.fileReadError"))
-        setIsLoading(false)
-        setLoadingProgress(0)
-        setLoadingStatus("")
-      }
-
-      reader.readAsText(file)
-    },
-    [t, settings, setIsLoading, setLoadingProgress, setLoadingStatus]
-  )
-
   // 辅助函数：初始化玩家并合成打拍音
-  const initializePlayerWithHitsounds = async (loadedLevel: any): Promise<void> => {
+  const initializePlayerWithHitsounds = async (loadedLevel: any, isVeryLargeFile: boolean = false): Promise<void> => {
     initializePlayer(loadedLevel)
     
     // Synthesize hitsounds with progress display
     if (previewerRef.current) {
-      setLoadingProgress(96)
-      setLoadingStatus(t("loading.synthesizingHitsounds"))
-      
-      await previewerRef.current.preSynthesizeHitsoundsWithProgress((percent) => {
-        // Map 0-100 to 96-100
-        const mappedPercent = 96 + (percent / 100) * 4
-        setLoadingProgress(mappedPercent)
-      })
+      if (isVeryLargeFile) {
+        // 对于超大文件，显示详细的合成进度
+        setLoadingProgress(85)
+        setLoadingStatus(t("loading.synthesizingHitsounds"))
+        
+        await previewerRef.current.preSynthesizeHitsoundsWithProgress((percent) => {
+          // Map 0-100 to 85-99
+          const mappedPercent = 85 + (percent / 100) * 14
+          setLoadingProgress(mappedPercent)
+        })
+      } else {
+        setLoadingProgress(96)
+        setLoadingStatus(t("loading.synthesizingHitsounds"))
+        
+        await previewerRef.current.preSynthesizeHitsoundsWithProgress((percent) => {
+          // Map 0-100 to 96-100
+          const mappedPercent = 96 + (percent / 100) * 4
+          setLoadingProgress(mappedPercent)
+        })
+      }
     }
   }
 
-  // Synchronous loading (blocks UI)
+  // 大文件加载 - 使用 LargeFileParser 直接从 ArrayBuffer 解析
+  const loadLargeFile = async (arrayBuffer: ArrayBuffer, isVeryLargeFile: boolean = false): Promise<void> => {
+    console.log('[DEBUG] Using LargeFileParser for large file')
+    setLoadingStatus("正在预处理大文件...")
+    setLoadingProgress(0)
+
+    try {
+      // 创建大文件解析器
+      const largeFileParser = new LargeFileParser((stage, percent) => {
+        setLoadingStatus(getStageText(stage, t))
+        // 对于超大文件，解析进度 0-80%，对于普通大文件也是 0-80%
+        setLoadingProgress(Math.round(percent * 0.8))
+      })
+
+      // 解析文件
+      const parsedData = largeFileParser.parse(arrayBuffer)
+      console.log('[DEBUG] LargeFileParser result:', {
+        hasAngleData: !!parsedData.angleData,
+        angleDataLength: parsedData.angleData?.length,
+        hasSettings: !!parsedData.settings,
+        hasActions: !!parsedData.actions,
+        actionsLength: parsedData.actions?.length
+      })
+
+      // 使用解析后的数据创建 Level
+      const level = new ADOFAI.Level(parsedData, undefined)
+
+      // 监听进度事件
+      level.on("parse:progress", (progressEvent: ParseProgressEvent): void => {
+        setLoadingProgress(80 + Math.round(progressEvent.percent * 0.05))
+        setLoadingStatus(getStageText(progressEvent.stage, t))
+      })
+
+      level.on("load", async (loadedLevel: any): Promise<void> => {
+        // 计算瓦片位置
+        loadedLevel.on("parse:progress", (progressEvent: ParseProgressEvent): void => {
+          setLoadingProgress(80 + Math.round(progressEvent.percent * 0.05))
+          setLoadingStatus(getStageText(progressEvent.stage, t))
+        })
+        loadedLevel.calculateTilePosition()
+
+        setLoadingProgress(85)
+        setLoadingStatus(t("loading.buildingScene"))
+
+        // Initialize player and synthesize hitsounds
+        await initializePlayerWithHitsounds(loadedLevel, isVeryLargeFile)
+
+        setLoadingProgress(100)
+        window.showNotification?.("success", t("editor.notifications.loadSuccess"))
+        setIsLoading(false)
+        setLoadingProgress(0)
+        setLoadingStatus("")
+      })
+
+      await level.load()
+
+    } catch (error) {
+      console.error('[DEBUG] LargeFileParser error:', error)
+      throw error
+    }
+  }
+
+  // Synchronous loading (blocks UI) - for small files
   const loadSync = (content: string): void => {
     const level = new ADOFAI.Level(content, parser)
     
@@ -260,6 +303,82 @@ export function useFileHandlers({
       await loadAsync(content)
     }
   }
+
+  // 文件加载处理
+  const handleFileLoad = useCallback(
+    (event: React.ChangeEvent<HTMLInputElement>): void => {
+      const file = event.target.files?.[0]
+      if (!file) return
+
+      setIsLoading(true)
+      setLoadingProgress(0)
+      setLoadingStatus(t("loading.parsingLevel"))
+
+      const reader = new FileReader()
+
+      reader.onload = async (e): Promise<void> => {
+        try {
+          console.log('[DEBUG] File loaded, starting parse...')
+          
+          // Get ArrayBuffer directly
+          const arrayBuffer = e.target?.result as ArrayBuffer
+          const fileSize = arrayBuffer?.byteLength || 0
+          console.log('[DEBUG] ArrayBuffer size:', fileSize)
+          
+          // 判断是否为超大文件 (>90MB) 或大文件 (>400MB)
+          const isVeryLargeFile = fileSize > VERY_LARGE_FILE_THRESHOLD
+          const isLargeFile = fileSize > LARGE_FILE_THRESHOLD
+          console.log('[DEBUG] Is very large file:', isVeryLargeFile, '(threshold:', VERY_LARGE_FILE_THRESHOLD, ')')
+          console.log('[DEBUG] Is large file:', isLargeFile, '(threshold:', LARGE_FILE_THRESHOLD, ')')
+
+          if (isLargeFile) {
+            // 大文件：直接使用 ArrayBuffer 解析，不转换为字符串
+            console.log('[DEBUG] Using large file parser')
+            await loadLargeFile(arrayBuffer, isVeryLargeFile)
+          } else if (isVeryLargeFile) {
+            // 超大文件但不是极大文件：也使用 LargeFileParser
+            console.log('[DEBUG] Using large file parser for very large file')
+            await loadLargeFile(arrayBuffer, true)
+          } else {
+            // 小文件：转换为字符串后解析
+            const decoder = new TextDecoder('utf-8')
+            const content = decoder.decode(arrayBuffer)
+            console.log('[DEBUG] Content length:', content?.length)
+            
+            // Choose loading method based on settings
+            if (settings.loadMethod === 'worker') {
+              console.log('[DEBUG] Using worker loading')
+              await loadWithWorker(content)
+            } else if (settings.loadMethod === 'async') {
+              console.log('[DEBUG] Using async loading')
+              await loadAsync(content)
+            } else {
+              console.log('[DEBUG] Using sync loading')
+              loadSync(content)
+            }
+          }
+        } catch (error) {
+          console.error('[DEBUG] Loading error:', error)
+          window.showNotification?.("error", t("editor.notifications.loadError"))
+          console.error(error)
+          setIsLoading(false)
+          setLoadingProgress(0)
+          setLoadingStatus("")
+        }
+      }
+
+      reader.onerror = (): void => {
+        window.showNotification?.("error", t("editor.notifications.fileReadError"))
+        setIsLoading(false)
+        setLoadingProgress(0)
+        setLoadingStatus("")
+      }
+
+      // Always use readAsArrayBuffer
+      reader.readAsArrayBuffer(file)
+    },
+    [t, settings, setIsLoading, setLoadingProgress, setLoadingStatus]
+  )
 
   // 音频加载处理
   const handleAudioLoad = useCallback(
