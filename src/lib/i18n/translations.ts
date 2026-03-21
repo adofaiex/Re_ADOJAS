@@ -170,6 +170,7 @@ export const translations = {
         description: "点击进入全屏模式，再次点击退出全屏。",
         enter: "进入全屏",
         exit: "退出全屏",
+        notSupported: "您的浏览器不支持全屏功能",
       },
       themePreview: {
         title: "主题预览",
@@ -347,6 +348,7 @@ export const translations = {
         description: "Click to enter fullscreen mode, click again to exit.",
         enter: "Enter Fullscreen",
         exit: "Exit Fullscreen",
+        notSupported: "Your browser does not support fullscreen mode",
       },
       themePreview: {
         title: "Theme Preview",
@@ -524,6 +526,7 @@ export const translations = {
         description: "クリックしてフルスクリーンモードに入り、もう一度クリックして終了します。",
         enter: "フルスクリーンへ",
         exit: "フルスクリーン終了",
+        notSupported: "お使いのブラウザはフルスクリーン機能に対応していません",
       },
       themePreview: {
         title: "テーマプレビュー",

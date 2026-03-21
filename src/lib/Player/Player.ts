@@ -1704,20 +1704,6 @@ export class Player implements IPlayer {
         }
     }
     
-    // Better Camera: 当 Tile 变化时，瞬移镜头到新 Tile 中心
-    if (this.betterCameraEnabled && this.currentTileIndex !== previousTileIndex) {
-        const tile = this.levelData.tiles[this.currentTileIndex];
-        if (tile && tile.position) {
-            // 瞬移镜头到 Tile 中心
-            this.cameraPosition.x = tile.position[0];
-            this.cameraPosition.y = tile.position[1];
-            this.camera.position.x = this.cameraPosition.x;
-            this.camera.position.y = this.cameraPosition.y;
-            this.currentPivotPosition.x = tile.position[0];
-            this.currentPivotPosition.y = tile.position[1];
-        }
-    }
-    
     const tileIndex = this.currentTileIndex;
     
     // Check if we are past the last tile (Infinite Rotation)
@@ -1806,18 +1792,6 @@ export class Player implements IPlayer {
   private updateCameraFollow(delta: number): void {
       if (!this.planetRed || !this.planetBlue) return;
 
-      // Better Camera: 跳过所有摄像头事件处理，镜头已在 updatePlanetsPosition 中设置
-      if (this.betterCameraEnabled) {
-          // 只需更新视频背景和可见 Tile
-          if (this.videoMesh) {
-              this.videoMesh.position.x = this.camera.position.x;
-              this.videoMesh.position.y = this.camera.position.y;
-              this.videoMesh.rotation.z = 0;
-          }
-          this.updateVisibleTiles();
-          return;
-      }
-
       const settings = this.levelData.settings;
       const initialBPM = settings.bpm || 100;
       const initialSecPerBeat = 60 / initialBPM;
@@ -1830,7 +1804,7 @@ export class Player implements IPlayer {
       const currentTimeInSeconds = this.elapsedTime / 1000;
       const timeInLevel = currentTimeInSeconds - countdownDuration - (offset / 1000) - firstTileOffset;
 
-      // Process camera events
+      // Process camera events (still process even with Better Camera for zoom/rotation effects)
       const lastIdx = this.cameraController.getLastCameraTimelineIndex();
       const cameraTimeline = this.cameraController.getCameraTimeline();
       
@@ -1881,8 +1855,19 @@ export class Player implements IPlayer {
       // Get interpolated camera values
       const interpolated = this.cameraController.getInterpolatedValues(this.elapsedTime);
       
-      // Calculate target position
-      const target = this.cameraController.calculateTargetPosition(this.currentPivotPosition);
+      // Calculate target position - Better Camera only overrides position, not zoom/rotation
+      let target: { x: number; y: number };
+      if (this.betterCameraEnabled) {
+          // Better Camera: target is always the current tile center
+          const tile = this.levelData.tiles[this.currentTileIndex];
+          if (tile && tile.position) {
+              target = { x: tile.position[0], y: tile.position[1] };
+          } else {
+              target = this.cameraController.calculateTargetPosition(this.currentPivotPosition);
+          }
+      } else {
+          target = this.cameraController.calculateTargetPosition(this.currentPivotPosition);
+      }
 
       // Apply smoothing
       const currentBPM = (this.tileBPM && this.tileBPM[this.currentTileIndex]) || 100;

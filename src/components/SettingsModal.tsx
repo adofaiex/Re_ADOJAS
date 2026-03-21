@@ -19,27 +19,53 @@ interface SettingsModalProps {
 export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   const [searchQuery, setSearchQuery] = useState("")
   const [isFullscreen, setIsFullscreen] = useState(false)
+  const [fullscreenSupported, setFullscreenSupported] = useState(true)
   const { theme, setTheme } = useTheme()
   const { locale, setLocale, t, mounted } = useI18n()
   const { settings, updateSettings } = useAppSettings()
 
-  // Check fullscreen state on mount and when it changes
+  // Check fullscreen support and state on mount and when it changes
   useEffect(() => {
+    // Feature detection for Fullscreen API
+    const isSupported = !!(
+      document.documentElement.requestFullscreen ||
+      (document.documentElement as any).webkitRequestFullscreen ||
+      (document.documentElement as any).msRequestFullscreen
+    )
+    setFullscreenSupported(isSupported)
+    
     const checkFullscreen = () => {
-      setIsFullscreen(!!document.fullscreenElement)
+      setIsFullscreen(!!(document.fullscreenElement || (document as any).webkitFullscreenElement))
     }
     
     document.addEventListener('fullscreenchange', checkFullscreen)
+    document.addEventListener('webkitfullscreenchange', checkFullscreen)
     checkFullscreen()
-    return () => document.removeEventListener('fullscreenchange', checkFullscreen)
+    return () => {
+      document.removeEventListener('fullscreenchange', checkFullscreen)
+      document.removeEventListener('webkitfullscreenchange', checkFullscreen)
+    }
   }, [])
 
   const toggleFullscreen = async () => {
+    if (!fullscreenSupported) return
+    
     try {
-      if (!document.fullscreenElement) {
-        await document.documentElement.requestFullscreen()
+      const docEl = document.documentElement
+      const doc = document as any
+      
+      if (!document.fullscreenElement && !doc.webkitFullscreenElement) {
+        if (docEl.requestFullscreen) {
+          await docEl.requestFullscreen()
+        } else if (docEl.webkitRequestFullscreen) {
+          await docEl.webkitRequestFullscreen()
+        }
       } else {
-        await document.exitFullscreen()
+        if (document.exitFullscreen) {
+          await document.exitFullscreen()
+        } else if (doc.webkitExitFullscreen) {
+          await doc.webkitExitFullscreen()
+        }
       }
     } catch (error) {
       console.error('Fullscreen toggle failed:', error)
@@ -462,22 +488,34 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                   )}
 
                   {setting.type === "fullscreen" && (
-                    <Button
-                      onClick={toggleFullscreen}
-                      className="bg-purple-500 hover:bg-purple-600 dark:bg-purple-600 dark:hover:bg-purple-700 text-white flex items-center gap-2 w-full sm:w-auto"
-                    >
-                      {isFullscreen ? (
-                        <>
-                          <Minimize className="w-4 h-4" />
-                          {t("settings.fullscreen.exit")}
-                        </>
-                      ) : (
-                        <>
-                          <Maximize className="w-4 h-4" />
-                          {t("settings.fullscreen.enter")}
-                        </>
+                    <div className="space-y-2">
+                      <Button
+                        onClick={toggleFullscreen}
+                        disabled={!fullscreenSupported}
+                        className={`flex items-center gap-2 w-full sm:w-auto ${
+                          fullscreenSupported
+                            ? "bg-purple-500 hover:bg-purple-600 dark:bg-purple-600 dark:hover:bg-purple-700 text-white"
+                            : "bg-slate-300 dark:bg-slate-600 text-slate-500 dark:text-slate-400 cursor-not-allowed"
+                        }`}
+                      >
+                        {isFullscreen ? (
+                          <>
+                            <Minimize className="w-4 h-4" />
+                            {t("settings.fullscreen.exit")}
+                          </>
+                        ) : (
+                          <>
+                            <Maximize className="w-4 h-4" />
+                            {t("settings.fullscreen.enter")}
+                          </>
+                        )}
+                      </Button>
+                      {!fullscreenSupported && (
+                        <p className="text-xs text-amber-500 dark:text-amber-400">
+                          {t("settings.fullscreen.notSupported")}
+                        </p>
                       )}
-                    </Button>
+                    </div>
                   )}
                 </div>
               ))}
