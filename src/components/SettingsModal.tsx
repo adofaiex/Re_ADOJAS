@@ -441,6 +441,9 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                   {setting.type === "betterCamera" && (
                     <div className="flex items-center gap-3">
                       <button
+                        type="button"
+                        role="switch"
+                        aria-checked={settings.betterCamera}
                         onClick={() => updateSettings({ betterCamera: !settings.betterCamera })}
                         className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
                           settings.betterCamera ? "bg-purple-500" : "bg-slate-300 dark:bg-slate-600"
