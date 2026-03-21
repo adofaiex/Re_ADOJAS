@@ -22,6 +22,7 @@ export class Player implements IPlayer {
   private showTrail: boolean = false;
   private useWorker: boolean = true;
   private targetFramerate: TargetFramerateType = 'auto';
+  private betterCameraEnabled: boolean = false; // Better Camera: 锁定镜头到当前 Tile
   private animationId: number | null = null;
   private lastFrameTime: number = 0;
   private frameInterval: number = 0; // milliseconds between frames
@@ -668,6 +669,10 @@ export class Player implements IPlayer {
   public setTargetFramerate(framerate: TargetFramerateType): void {
     this.targetFramerate = framerate;
     this.updateFrameInterval();
+  }
+
+  public setBetterCamera(enabled: boolean): void {
+    this.betterCameraEnabled = enabled;
   }
 
   private updateFrameInterval(): void {
@@ -1675,6 +1680,9 @@ export class Player implements IPlayer {
         // Countdown phase - handled by standard logic
     }
     
+    // Store previous tile index for Better Camera detection
+    const previousTileIndex = this.currentTileIndex;
+    
     // Playing Phase
     if (this.tileStartTimes.length > 0) {
         if (timeInLevel < this.tileStartTimes[this.currentTileIndex]) {
@@ -1693,6 +1701,20 @@ export class Player implements IPlayer {
                    this.tileStartTimes[this.currentTileIndex + 1] <= timeInLevel) {
                 this.currentTileIndex++;
             }
+        }
+    }
+    
+    // Better Camera: 当 Tile 变化时，瞬移镜头到新 Tile 中心
+    if (this.betterCameraEnabled && this.currentTileIndex !== previousTileIndex) {
+        const tile = this.levelData.tiles[this.currentTileIndex];
+        if (tile && tile.position) {
+            // 瞬移镜头到 Tile 中心
+            this.cameraPosition.x = tile.position[0];
+            this.cameraPosition.y = tile.position[1];
+            this.camera.position.x = this.cameraPosition.x;
+            this.camera.position.y = this.cameraPosition.y;
+            this.currentPivotPosition.x = tile.position[0];
+            this.currentPivotPosition.y = tile.position[1];
         }
     }
     
@@ -1783,6 +1805,18 @@ export class Player implements IPlayer {
   
   private updateCameraFollow(delta: number): void {
       if (!this.planetRed || !this.planetBlue) return;
+
+      // Better Camera: 跳过所有摄像头事件处理，镜头已在 updatePlanetsPosition 中设置
+      if (this.betterCameraEnabled) {
+          // 只需更新视频背景和可见 Tile
+          if (this.videoMesh) {
+              this.videoMesh.position.x = this.camera.position.x;
+              this.videoMesh.position.y = this.camera.position.y;
+              this.videoMesh.rotation.z = 0;
+          }
+          this.updateVisibleTiles();
+          return;
+      }
 
       const settings = this.levelData.settings;
       const initialBPM = settings.bpm || 100;

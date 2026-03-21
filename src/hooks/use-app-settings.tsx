@@ -16,6 +16,7 @@ interface AppSettings {
   loadMethod: LoadMethodType
   hitsoundEnabled: boolean
   showStats: boolean // 是否使用 stats.js 面板
+  betterCamera: boolean // Better Camera: 镜头锁定在当前行星触发的 Tile 上
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -27,6 +28,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   loadMethod: "async", // Default to async loading
   hitsoundEnabled: true, // Default to enabled
   showStats: false, // Default to using default FPS panel
+  betterCamera: false, // Default to disabled - Better Camera mode
 }
 
 export function useAppSettings() {

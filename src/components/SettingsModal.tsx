@@ -1,13 +1,13 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { useTheme } from "@/hooks/use-theme"
 import { useI18n } from "@/lib/i18n/context"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { X, Search, Monitor, Sun, Moon, Globe } from "lucide-react"
+import { X, Search, Monitor, Sun, Moon, Globe, Maximize, Minimize } from "lucide-react"
 import { locales, localeNames, type Locale } from "@/lib/i18n/config"
 import { useAppSettings } from "@/hooks/use-app-settings"
 
@@ -18,9 +18,33 @@ interface SettingsModalProps {
 
 export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   const [searchQuery, setSearchQuery] = useState("")
+  const [isFullscreen, setIsFullscreen] = useState(false)
   const { theme, setTheme } = useTheme()
   const { locale, setLocale, t, mounted } = useI18n()
   const { settings, updateSettings } = useAppSettings()
+
+  // Check fullscreen state on mount and when it changes
+  useEffect(() => {
+    const checkFullscreen = () => {
+      setIsFullscreen(!!document.fullscreenElement)
+    }
+    
+    document.addEventListener('fullscreenchange', checkFullscreen)
+    checkFullscreen()
+    return () => document.removeEventListener('fullscreenchange', checkFullscreen)
+  }, [])
+
+  const toggleFullscreen = async () => {
+    try {
+      if (!document.fullscreenElement) {
+        await document.documentElement.requestFullscreen()
+      } else {
+        await document.exitFullscreen()
+      }
+    } catch (error) {
+      console.error('Fullscreen toggle failed:', error)
+    }
+  }
 
   if (!isOpen || !mounted) return null
 
@@ -89,6 +113,18 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
           title: t("settings.loadMethod.title"),
           description: t("settings.loadMethod.description"),
           type: "loadMethod",
+        },
+        {
+          id: "betterCamera",
+          title: t("settings.betterCamera.title"),
+          description: t("settings.betterCamera.description"),
+          type: "betterCamera",
+        },
+        {
+          id: "fullscreen",
+          title: t("settings.fullscreen.title"),
+          description: t("settings.fullscreen.description"),
+          type: "fullscreen",
         },
       ],
     },
@@ -400,6 +436,45 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                         </SelectItem>
                       </SelectContent>
                     </Select>
+                  )}
+
+                  {setting.type === "betterCamera" && (
+                    <div className="flex items-center gap-3">
+                      <button
+                        onClick={() => updateSettings({ betterCamera: !settings.betterCamera })}
+                        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                          settings.betterCamera ? "bg-purple-500" : "bg-slate-300 dark:bg-slate-600"
+                        }`}
+                      >
+                        <span
+                          className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                            settings.betterCamera ? "translate-x-6" : "translate-x-1"
+                          }`}
+                        />
+                      </button>
+                      <span className="text-sm text-slate-600 dark:text-slate-400">
+                        {settings.betterCamera ? t("settings.betterCamera.enabled") : t("settings.betterCamera.disabled")}
+                      </span>
+                    </div>
+                  )}
+
+                  {setting.type === "fullscreen" && (
+                    <Button
+                      onClick={toggleFullscreen}
+                      className="bg-purple-500 hover:bg-purple-600 dark:bg-purple-600 dark:hover:bg-purple-700 text-white flex items-center gap-2 w-full sm:w-auto"
+                    >
+                      {isFullscreen ? (
+                        <>
+                          <Minimize className="w-4 h-4" />
+                          {t("settings.fullscreen.exit")}
+                        </>
+                      ) : (
+                        <>
+                          <Maximize className="w-4 h-4" />
+                          {t("settings.fullscreen.enter")}
+                        </>
+                      )}
+                    </Button>
                   )}
                 </div>
               ))}

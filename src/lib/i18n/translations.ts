@@ -159,6 +159,18 @@ export const translations = {
         async: "异步（推荐）",
         worker: "Worker（后台线程）",
       },
+      betterCamera: {
+        title: "Better Camera",
+        description: "启用后镜头将锁定在当前行星触发的砖块上，忽略关卡中所有摄像头移动事件。退出播放后生效。",
+        enabled: "已启用",
+        disabled: "已禁用",
+      },
+      fullscreen: {
+        title: "全屏模式",
+        description: "点击进入全屏模式，再次点击退出全屏。",
+        enter: "进入全屏",
+        exit: "退出全屏",
+      },
       themePreview: {
         title: "主题预览",
       },
@@ -324,6 +336,18 @@ export const translations = {
         async: "Async (Recommended)",
         worker: "Worker (Background Thread)",
       },
+      betterCamera: {
+        title: "Better Camera",
+        description: "When enabled, camera locks onto the current planet's tile, ignoring all camera movement events. Takes effect after exiting playback.",
+        enabled: "Enabled",
+        disabled: "Disabled",
+      },
+      fullscreen: {
+        title: "Fullscreen Mode",
+        description: "Click to enter fullscreen mode, click again to exit.",
+        enter: "Enter Fullscreen",
+        exit: "Exit Fullscreen",
+      },
       themePreview: {
         title: "Theme Preview",
       },
@@ -488,6 +512,18 @@ export const translations = {
         sync: "同期（UIをブロック）",
         async: "非同期（推奨）",
         worker: "ワーカー（バックグラウンドスレッド）",
+      },
+      betterCamera: {
+        title: "Better Camera",
+        description: "有効にすると、カメラが現在の惑星のタイルにロックされ、すべてのカメラ移動イベントが無視されます。再生終了後に反映されます。",
+        enabled: "有効",
+        disabled: "無効",
+      },
+      fullscreen: {
+        title: "フルスクリーンモード",
+        description: "クリックしてフルスクリーンモードに入り、もう一度クリックして終了します。",
+        enter: "フルスクリーンへ",
+        exit: "フルスクリーン終了",
       },
       themePreview: {
         title: "テーマプレビュー",

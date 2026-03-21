@@ -1,6 +1,6 @@
 {
     "name": "re_adojas",
-    "version": "1.0.3",
+    "version": "1.0.4",
     "private": true,
     "type": "module",
     "scripts": {
@@ -42,6 +42,7 @@
         "eslint-plugin-react-refresh": "^0.4.20",
         "postcss": "^8.5.6",
         "tailwindcss": "^3.4.17",
+        "terser": "^5.46.1",
         "typescript": "^5.8.3",
         "vite": "^7.1.2"
     }
