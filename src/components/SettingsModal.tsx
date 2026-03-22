@@ -27,15 +27,17 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   // Check fullscreen support and state on mount and when it changes
   useEffect(() => {
     // Feature detection for Fullscreen API
+    const docEl = document.documentElement as any
     const isSupported = !!(
-      document.documentElement.requestFullscreen ||
-      (document.documentElement as any).webkitRequestFullscreen ||
-      (document.documentElement as any).msRequestFullscreen
+      docEl.requestFullscreen ||
+      docEl.webkitRequestFullscreen ||
+      docEl.msRequestFullscreen
     )
     setFullscreenSupported(isSupported)
     
     const checkFullscreen = () => {
-      setIsFullscreen(!!(document.fullscreenElement || (document as any).webkitFullscreenElement))
+      const doc = document as any
+      setIsFullscreen(!!(document.fullscreenElement || doc.webkitFullscreenElement))
     }
     
     document.addEventListener('fullscreenchange', checkFullscreen)
@@ -51,7 +53,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     if (!fullscreenSupported) return
     
     try {
-      const docEl = document.documentElement
+      const docEl = document.documentElement as any
       const doc = document as any
       
       if (!document.fullscreenElement && !doc.webkitFullscreenElement) {
