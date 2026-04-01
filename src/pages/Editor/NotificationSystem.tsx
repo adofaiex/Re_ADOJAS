@@ -54,5 +54,5 @@ export function NotificationSystem(): JSX.Element {
     }
   }, [])
 
-  return <></>;
+  return null
 }

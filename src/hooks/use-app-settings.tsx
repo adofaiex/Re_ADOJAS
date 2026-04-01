@@ -16,9 +16,6 @@ interface AppSettings {
   loadMethod: LoadMethodType
   hitsoundEnabled: boolean
   showStats: boolean // 是否使用 stats.js 面板
-  lockCamera: boolean // Lock Camera: 镜头锁定在当前行星触发的 Tile 上
-  maxTileRenderLimit: number // 最大轨道渲染数，0表示无限制
-  clearPreviousTile: boolean // 当行星触发轨道时清除上一轨道渲染
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -30,9 +27,6 @@ const DEFAULT_SETTINGS: AppSettings = {
   loadMethod: "async", // Default to async loading
   hitsoundEnabled: true, // Default to enabled
   showStats: false, // Default to using default FPS panel
-  lockCamera: false, // Default to disabled - Lock Camera mode
-  maxTileRenderLimit: 0, // Default to no limit (0 = unlimited)
-  clearPreviousTile: false, // Default to disabled
 }
 
 export function useAppSettings() {

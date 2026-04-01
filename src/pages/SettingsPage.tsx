@@ -87,24 +87,6 @@ export default function SettingsPage() {
           description: t("settings.loadMethod.description"),
           type: "loadMethod",
         },
-        {
-          id: "lockCamera",
-          title: t("settings.lockCamera.title"),
-          description: t("settings.lockCamera.description"),
-          type: "lockCamera",
-        },
-        {
-          id: "maxTileRenderLimit",
-          title: t("settings.maxTileRenderLimit.title"),
-          description: t("settings.maxTileRenderLimit.description"),
-          type: "maxTileRenderLimit",
-        },
-        {
-          id: "clearPreviousTile",
-          title: t("settings.clearPreviousTile.title"),
-          description: t("settings.clearPreviousTile.description"),
-          type: "clearPreviousTile",
-        },
       ],
     },
   ]
@@ -375,80 +357,6 @@ export default function SettingsPage() {
                         </SelectItem>
                       </SelectContent>
                     </Select>
-                  )}
-
-                  {setting.type === "lockCamera" && (
-                    <div className="flex items-center gap-3">
-                      <button
-                        onClick={() => updateSettings({ lockCamera: !settings.lockCamera })}
-                        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                          settings.lockCamera ? "bg-purple-500" : "bg-slate-300 dark:bg-slate-600"
-                        }`}
-                      >
-                        <span
-                          className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                            settings.lockCamera ? "translate-x-6" : "translate-x-1"
-                          }`}
-                        />
-                      </button>
-                      <span className="text-sm text-slate-600 dark:text-slate-400">
-                        {settings.lockCamera ? t("settings.lockCamera.enabled") : t("settings.lockCamera.disabled")}
-                      </span>
-                    </div>
-                  )}
-
-                  {setting.type === "maxTileRenderLimit" && (
-                    <div className="flex items-center gap-3">
-                      <Input
-                        type="number"
-                        min={0}
-                        max={10000}
-                        value={settings.maxTileRenderLimit ?? 0}
-                        onChange={(e) => {
-                          let value = parseInt(e.target.value) || 0
-                          // 避免负数
-                          if (value < 0) value = 0
-                          if (value > 10000) value = 10000
-                          updateSettings({ 
-                            maxTileRenderLimit: value,
-                            // 如果启用了限制，强制开启清除上一轨道功能
-                            clearPreviousTile: value > 0 ? true : settings.clearPreviousTile
-                          })
-                        }}
-                        className="bg-white dark:bg-slate-700 border-slate-200 dark:border-slate-600 text-slate-900 dark:text-white w-24"
-                      />
-                      <span className="text-sm text-slate-600 dark:text-slate-400">
-                        {t("settings.maxTileRenderLimit.unit")}
-                      </span>
-                    </div>
-                  )}
-
-                  {setting.type === "clearPreviousTile" && (
-                    <div className="flex items-center gap-3">
-                      <button
-                        type="button"
-                        role="switch"
-                        aria-checked={settings.clearPreviousTile}
-                        onClick={() => {
-                          if (settings.maxTileRenderLimit <= 0) {
-                            updateSettings({ clearPreviousTile: !settings.clearPreviousTile })
-                          }
-                        }}
-                        disabled={settings.maxTileRenderLimit > 0}
-                        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                          settings.clearPreviousTile ? "bg-purple-500" : "bg-slate-300 dark:bg-slate-600"
-                        } ${settings.maxTileRenderLimit > 0 ? "opacity-50 cursor-not-allowed" : ""}`}
-                      >
-                        <span
-                          className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                            settings.clearPreviousTile ? "translate-x-6" : "translate-x-1"
-                          }`}
-                        />
-                      </button>
-                      <span className="text-sm text-slate-600 dark:text-slate-400">
-                        {settings.clearPreviousTile ? t("settings.clearPreviousTile.enabled") : t("settings.clearPreviousTile.disabled")}
-                      </span>
-                    </div>
                   )}
                 </div>
               ))}

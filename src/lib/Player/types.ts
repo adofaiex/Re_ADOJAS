@@ -32,7 +32,6 @@ export interface IMusic {
   stop(): void;
   resume(): void;
   seek(position: number): void;
-  playScheduled(when: number, offset: number): void;
   readonly position: number;
   readonly duration: number;
   volume: number;
@@ -41,7 +40,6 @@ export interface IMusic {
   readonly isPaused: boolean;
   readonly hasAudio: boolean;
   readonly amplitude: number;
-  readonly audio?: HTMLAudioElement;
   dispose(): void;
 }
 
@@ -114,5 +112,4 @@ export interface ILevelData {
   tiles: any[];
   actions?: any[];
   decorations?: IDecorationEvent[];
-  angleData?: number[];
 }

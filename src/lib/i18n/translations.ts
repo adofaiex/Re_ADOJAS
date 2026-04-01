@@ -172,30 +172,6 @@ export const translations = {
         async: "异步（推荐）",
         worker: "Worker（后台线程）",
       },
-      lockCamera: {
-        title: "锁定镜头",
-        description: "启用后，每次行星触发砖块时镜头将瞬移至该砖块中心（仅保留缩放效果，忽略旋转）。退出播放后生效。",
-        enabled: "已启用",
-        disabled: "已禁用",
-      },
-      maxTileRenderLimit: {
-        title: "最大轨道渲染数",
-        description: "限制同时渲染的最大轨道数量，0表示无限制。启用后将强制开启「清除上一轨道」功能。",
-        unit: "个（0=无限制）",
-      },
-      clearPreviousTile: {
-        title: "清除上一轨道",
-        description: "当行星触发新轨道时，立即清除上一轨道的渲染。启用最大渲染数限制后自动开启。",
-        enabled: "已启用",
-        disabled: "已禁用",
-      },
-      fullscreen: {
-        title: "全屏模式",
-        description: "点击进入全屏模式，再次点击退出全屏。",
-        enter: "进入全屏",
-        exit: "退出全屏",
-        notSupported: "您的浏览器不支持全屏功能",
-      },
       themePreview: {
         title: "主题预览",
       },
@@ -374,30 +350,6 @@ export const translations = {
         async: "Async (Recommended)",
         worker: "Worker (Background Thread)",
       },
-      lockCamera: {
-        title: "Lock Camera",
-        description: "When enabled, camera instantly teleports to the current tile center on each tile trigger (preserving zoom only, ignoring rotation). Takes effect after exiting playback.",
-        enabled: "Enabled",
-        disabled: "Disabled",
-      },
-      maxTileRenderLimit: {
-        title: "Max Tile Render Limit",
-        description: "Limit the maximum number of tiles rendered simultaneously. 0 means unlimited. Enabling this will force 'Clear Previous Tile' on.",
-        unit: "tiles (0=unlimited)",
-      },
-      clearPreviousTile: {
-        title: "Clear Previous Tile",
-        description: "When planet triggers a new tile, immediately clear the previous tile's rendering. Auto-enabled when Max Tile Render Limit is set.",
-        enabled: "Enabled",
-        disabled: "Disabled",
-      },
-      fullscreen: {
-        title: "Fullscreen Mode",
-        description: "Click to enter fullscreen mode, click again to exit.",
-        enter: "Enter Fullscreen",
-        exit: "Exit Fullscreen",
-        notSupported: "Your browser does not support fullscreen mode",
-      },
       themePreview: {
         title: "Theme Preview",
       },
@@ -575,30 +527,6 @@ export const translations = {
         sync: "同期（UIをブロック）",
         async: "非同期（推奨）",
         worker: "ワーカー（バックグラウンドスレッド）",
-      },
-      lockCamera: {
-        title: "カメラロック",
-        description: "有効にすると、惑星がタイルをトリガーするたびにカメラが瞬時にそのタイルの中心に移動します（ズーム効果のみ保持、回転は無視）。再生終了後に反映されます。",
-        enabled: "有効",
-        disabled: "無効",
-      },
-      maxTileRenderLimit: {
-        title: "最大タイル描画数",
-        description: "同時に描画するタイルの最大数を制限します。0は無制限。有効にすると「前のタイルをクリア」が強制的にオンになります。",
-        unit: "個（0=無制限）",
-      },
-      clearPreviousTile: {
-        title: "前のタイルをクリア",
-        description: "惑星が新しいタイルをトリガーすると、前のタイルの描画を即座にクリアします。最大タイル描画数が設定されると自動的に有効になります。",
-        enabled: "有効",
-        disabled: "無効",
-      },
-      fullscreen: {
-        title: "フルスクリーンモード",
-        description: "クリックしてフルスクリーンモードに入り、もう一度クリックして終了します。",
-        enter: "フルスクリーンへ",
-        exit: "フルスクリーン終了",
-        notSupported: "お使いのブラウザはフルスクリーン機能に対応していません",
       },
       themePreview: {
         title: "テーマプレビュー",

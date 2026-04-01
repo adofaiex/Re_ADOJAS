@@ -1,13 +1,13 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState } from "react"
 import { useTheme } from "@/hooks/use-theme"
 import { useI18n } from "@/lib/i18n/context"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { X, Search, Monitor, Sun, Moon, Globe, Maximize, Minimize } from "lucide-react"
+import { X, Search, Monitor, Sun, Moon, Globe } from "lucide-react"
 import { locales, localeNames, type Locale } from "@/lib/i18n/config"
 import { useAppSettings } from "@/hooks/use-app-settings"
 
@@ -18,61 +18,9 @@ interface SettingsModalProps {
 
 export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   const [searchQuery, setSearchQuery] = useState("")
-  const [isFullscreen, setIsFullscreen] = useState(false)
-  const [fullscreenSupported, setFullscreenSupported] = useState(true)
   const { theme, setTheme } = useTheme()
   const { locale, setLocale, t, mounted } = useI18n()
   const { settings, updateSettings } = useAppSettings()
-
-  // Check fullscreen support and state on mount and when it changes
-  useEffect(() => {
-    // Feature detection for Fullscreen API
-    const docEl = document.documentElement as any
-    const isSupported = !!(
-      docEl.requestFullscreen ||
-      docEl.webkitRequestFullscreen ||
-      docEl.msRequestFullscreen
-    )
-    setFullscreenSupported(isSupported)
-    
-    const checkFullscreen = () => {
-      const doc = document as any
-      setIsFullscreen(!!(document.fullscreenElement || doc.webkitFullscreenElement))
-    }
-    
-    document.addEventListener('fullscreenchange', checkFullscreen)
-    document.addEventListener('webkitfullscreenchange', checkFullscreen)
-    checkFullscreen()
-    return () => {
-      document.removeEventListener('fullscreenchange', checkFullscreen)
-      document.removeEventListener('webkitfullscreenchange', checkFullscreen)
-    }
-  }, [])
-
-  const toggleFullscreen = async () => {
-    if (!fullscreenSupported) return
-    
-    try {
-      const docEl = document.documentElement as any
-      const doc = document as any
-      
-      if (!document.fullscreenElement && !doc.webkitFullscreenElement) {
-        if (docEl.requestFullscreen) {
-          await docEl.requestFullscreen()
-        } else if (docEl.webkitRequestFullscreen) {
-          await docEl.webkitRequestFullscreen()
-        }
-      } else {
-        if (document.exitFullscreen) {
-          await document.exitFullscreen()
-        } else if (doc.webkitExitFullscreen) {
-          await doc.webkitExitFullscreen()
-        }
-      }
-    } catch (error) {
-      console.error('Fullscreen toggle failed:', error)
-    }
-  }
 
   if (!isOpen || !mounted) return null
 
@@ -141,30 +89,6 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
           title: t("settings.loadMethod.title"),
           description: t("settings.loadMethod.description"),
           type: "loadMethod",
-        },
-        {
-          id: "lockCamera",
-          title: t("settings.lockCamera.title"),
-          description: t("settings.lockCamera.description"),
-          type: "lockCamera",
-        },
-        {
-          id: "maxTileRenderLimit",
-          title: t("settings.maxTileRenderLimit.title"),
-          description: t("settings.maxTileRenderLimit.description"),
-          type: "maxTileRenderLimit",
-        },
-        {
-          id: "clearPreviousTile",
-          title: t("settings.clearPreviousTile.title"),
-          description: t("settings.clearPreviousTile.description"),
-          type: "clearPreviousTile",
-        },
-        {
-          id: "fullscreen",
-          title: t("settings.fullscreen.title"),
-          description: t("settings.fullscreen.description"),
-          type: "fullscreen",
         },
       ],
     },
@@ -476,114 +400,6 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                         </SelectItem>
                       </SelectContent>
                     </Select>
-                  )}
-
-                  {setting.type === "lockCamera" && (
-                    <div className="flex items-center gap-3">
-                      <button
-                        type="button"
-                        role="switch"
-                        aria-checked={settings.lockCamera}
-                        onClick={() => updateSettings({ lockCamera: !settings.lockCamera })}
-                        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                          settings.lockCamera ? "bg-purple-500" : "bg-slate-300 dark:bg-slate-600"
-                        }`}
-                      >
-                        <span
-                          className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                            settings.lockCamera ? "translate-x-6" : "translate-x-1"
-                          }`}
-                        />
-                      </button>
-                      <span className="text-sm text-slate-600 dark:text-slate-400">
-                        {settings.lockCamera ? t("settings.lockCamera.enabled") : t("settings.lockCamera.disabled")}
-                      </span>
-                    </div>
-                  )}
-
-                  {setting.type === "maxTileRenderLimit" && (
-                    <div className="flex items-center gap-3">
-                      <Input
-                        type="number"
-                        min={0}
-                        max={10000}
-                        value={settings.maxTileRenderLimit ?? 0}
-                        onChange={(e) => {
-                          let value = parseInt(e.target.value) || 0
-                          // 避免负数
-                          if (value < 0) value = 0
-                          if (value > 10000) value = 10000
-                          updateSettings({ 
-                            maxTileRenderLimit: value,
-                            // 如果启用了限制，强制开启清除上一轨道功能
-                            clearPreviousTile: value > 0 ? true : settings.clearPreviousTile
-                          })
-                        }}
-                        className="bg-white dark:bg-slate-700 border-slate-200 dark:border-slate-600 text-slate-900 dark:text-white w-24"
-                      />
-                      <span className="text-sm text-slate-600 dark:text-slate-400">
-                        {t("settings.maxTileRenderLimit.unit")}
-                      </span>
-                    </div>
-                  )}
-
-                  {setting.type === "clearPreviousTile" && (
-                    <div className="flex items-center gap-3">
-                      <button
-                        type="button"
-                        role="switch"
-                        aria-checked={settings.clearPreviousTile}
-                        onClick={() => {
-                          if (settings.maxTileRenderLimit <= 0) {
-                            updateSettings({ clearPreviousTile: !settings.clearPreviousTile })
-                          }
-                        }}
-                        disabled={settings.maxTileRenderLimit > 0}
-                        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                          settings.clearPreviousTile ? "bg-purple-500" : "bg-slate-300 dark:bg-slate-600"
-                        } ${settings.maxTileRenderLimit > 0 ? "opacity-50 cursor-not-allowed" : ""}`}
-                      >
-                        <span
-                          className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                            settings.clearPreviousTile ? "translate-x-6" : "translate-x-1"
-                          }`}
-                        />
-                      </button>
-                      <span className="text-sm text-slate-600 dark:text-slate-400">
-                        {settings.clearPreviousTile ? t("settings.clearPreviousTile.enabled") : t("settings.clearPreviousTile.disabled")}
-                      </span>
-                    </div>
-                  )}
-
-                  {setting.type === "fullscreen" && (
-                    <div className="space-y-2">
-                      <Button
-                        onClick={toggleFullscreen}
-                        disabled={!fullscreenSupported}
-                        className={`flex items-center gap-2 w-full sm:w-auto ${
-                          fullscreenSupported
-                            ? "bg-purple-500 hover:bg-purple-600 dark:bg-purple-600 dark:hover:bg-purple-700 text-white"
-                            : "bg-slate-300 dark:bg-slate-600 text-slate-500 dark:text-slate-400 cursor-not-allowed"
-                        }`}
-                      >
-                        {isFullscreen ? (
-                          <>
-                            <Minimize className="w-4 h-4" />
-                            {t("settings.fullscreen.exit")}
-                          </>
-                        ) : (
-                          <>
-                            <Maximize className="w-4 h-4" />
-                            {t("settings.fullscreen.enter")}
-                          </>
-                        )}
-                      </Button>
-                      {!fullscreenSupported && (
-                        <p className="text-xs text-amber-500 dark:text-amber-400">
-                          {t("settings.fullscreen.notSupported")}
-                        </p>
-                      )}
-                    </div>
                   )}
                 </div>
               ))}
