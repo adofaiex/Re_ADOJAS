@@ -13,7 +13,7 @@ export function getSharedAudioContext(): AudioContext {
 }
 
 export class HTMLAudioMusic implements IMusic {
-  private audio: HTMLAudioElement;
+  private _audio: HTMLAudioElement;
   private _isPlaying: boolean = false;
   private _isPaused: boolean = false;
   
@@ -30,9 +30,14 @@ export class HTMLAudioMusic implements IMusic {
   private scheduledPlayTime: number = -1;
 
   constructor() {
-    this.audio = new Audio();
-    this.audio.preload = 'auto';
-    this.audio.crossOrigin = 'anonymous';
+    this._audio = new Audio();
+    this._audio.preload = 'auto';
+    this._audio.crossOrigin = 'anonymous';
+  }
+
+  // Expose audio as readonly for interface compatibility
+  get audio(): HTMLAudioElement | undefined {
+    return this._audio;
   }
 
   private initAudioContext(): void {
@@ -52,7 +57,7 @@ export class HTMLAudioMusic implements IMusic {
       this.analyser.fftSize = 256;
       this.dataArray = new Uint8Array(this.analyser.frequencyBinCount);
       
-      this.source = this.audioContext.createMediaElementSource(this.audio);
+      this.source = this.audioContext.createMediaElementSource(this._audio);
       this.source.connect(this.analyser);
       this.analyser.connect(this.audioContext.destination);
     } catch (e) {
@@ -61,18 +66,18 @@ export class HTMLAudioMusic implements IMusic {
   }
 
   load(src: string): void {
-    this.audio.src = src;
-    this.audio.load();
+    this._audio.src = src;
+    this._audio.load();
   }
 
   play(): void {
     this.initAudioContext();
-    this.audio.play().catch(e => console.error("Audio play failed", e));
+    this._audio.play().catch(e => console.error("Audio play failed", e));
     
     // Record sync time
     if (this.audioContext) {
       this.contextStartTime = this.audioContext.currentTime;
-      this.audioStartOffset = this.audio.currentTime;
+      this.audioStartOffset = this._audio.currentTime;
     }
     
     this._isPlaying = true;
@@ -97,7 +102,7 @@ export class HTMLAudioMusic implements IMusic {
     
     // Set the start position
     if (offset > 0) {
-      this.audio.currentTime = offset;
+      this._audio.currentTime = offset;
       this.audioStartOffset = offset;
     } else {
       this.audioStartOffset = 0;
@@ -110,7 +115,7 @@ export class HTMLAudioMusic implements IMusic {
     // We'll adjust the timing in getAudioTime()
     setTimeout(() => {
       if (this.scheduledPlayTime === when) {
-        this.audio.play().catch(e => console.error("Audio play failed", e));
+        this._audio.play().catch(e => console.error("Audio play failed", e));
         this._isPlaying = true;
         this._isPaused = false;
       }
@@ -123,15 +128,15 @@ export class HTMLAudioMusic implements IMusic {
       this.audioStartOffset = this.getAudioTime();
     }
     
-    this.audio.pause();
+    this._audio.pause();
     this._isPlaying = false;
     this._isPaused = true;
     this.scheduledPlayTime = -1;
   }
 
   stop(): void {
-    this.audio.pause();
-    this.audio.currentTime = 0;
+    this._audio.pause();
+    this._audio.currentTime = 0;
     this._isPlaying = false;
     this._isPaused = false;
     this.contextStartTime = 0;
@@ -140,13 +145,13 @@ export class HTMLAudioMusic implements IMusic {
   }
 
   resume(): void {
-    if (this._isPaused || (this.audio.paused && this.audio.currentTime > 0)) {
+    if (this._isPaused || (this._audio.paused && this._audio.currentTime > 0)) {
       this.play();
     }
   }
 
   seek(position: number): void {
-    this.audio.currentTime = position;
+    this._audio.currentTime = position;
     
     // Update sync offset
     if (this.audioContext && this._isPlaying) {
@@ -168,16 +173,16 @@ export class HTMLAudioMusic implements IMusic {
    */
   getAudioTime(): number {
     if (!this.audioContext || !this._isPlaying) {
-      return this.audio.currentTime;
+      return this._audio.currentTime;
     }
     
     // Calculate position based on AudioContext time
     const elapsed = this.audioContext.currentTime - this.contextStartTime;
-    const pitch = this.audio.playbackRate;
+    const pitch = this._audio.playbackRate;
     const calculatedPosition = this.audioStartOffset + elapsed * pitch;
     
     // Clamp to valid range
-    const duration = this.audio.duration || 0;
+    const duration = this._audio.duration || 0;
     if (duration > 0 && calculatedPosition > duration) {
       return duration;
     }
@@ -193,36 +198,36 @@ export class HTMLAudioMusic implements IMusic {
   }
 
   get duration(): number {
-    return this.audio.duration;
+    return this._audio.duration;
   }
 
   get volume(): number {
-    return this.audio.volume;
+    return this._audio.volume;
   }
 
   set volume(v: number) {
-    this.audio.volume = v;
+    this._audio.volume = v;
   }
 
   get pitch(): number {
-    return this.audio.playbackRate;
+    return this._audio.playbackRate;
   }
 
   set pitch(v: number) {
-    this.audio.playbackRate = v;
+    this._audio.playbackRate = v;
   }
 
   get isPlaying(): boolean {
-      return !this.audio.paused && !this.audio.ended;
+      return !this._audio.paused && !this._audio.ended;
   }
 
   get isPaused(): boolean {
-      return this.audio.paused && !this.audio.ended && this.audio.currentTime > 0;
+      return this._audio.paused && !this._audio.ended && this._audio.currentTime > 0;
   }
 
   get hasAudio(): boolean {
       // Check if src is set and valid
-      return !!this.audio.src && this.audio.src !== window.location.href;
+      return !!this._audio.src && this._audio.src !== window.location.href;
   }
 
   get amplitude(): number {
@@ -240,8 +245,8 @@ export class HTMLAudioMusic implements IMusic {
 
   dispose(): void {
     this.stop();
-    this.audio.src = '';
-    this.audio.remove();
+    this._audio.src = '';
+    this._audio.remove();
     // Don't close shared audio context - it's shared with hitsounds
     if (this.source) {
       try {

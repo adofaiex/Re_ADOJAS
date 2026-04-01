@@ -14,6 +14,7 @@ import { CameraController, CameraTimelineEntry } from './CameraController';
 import { DecorationManager } from './DecorationManager';
 import { MoveTrackManager } from './MoveTrackManager';
 import { PositionTrackManager } from './PositionTrackManager';
+import { VideoBackground } from './VideoBackground';
 import Stats from 'three/examples/jsm/libs/stats.module.js';
 
 export class Player implements IPlayer {
@@ -26,6 +27,10 @@ export class Player implements IPlayer {
   private showTrail: boolean = false;
   private useWorker: boolean = true;
   private targetFramerate: TargetFramerateType = 'auto';
+  private lockCameraEnabled: boolean = false; // Lock Camera: 强制锁定镜头到当前 Tile
+  private maxTileRenderLimit: number = 0; // 最大轨道渲染数，0表示无限制
+  private clearPreviousTile: boolean = false; // 当行星触发轨道时清除上一轨道渲染
+  private tileLimitActive: boolean = false; // 轨道限制是否激活（只在播放/暂停时生效）
   private animationId: number | null = null;
   private lastFrameTime: number = 0;
   private frameInterval: number = 0; // milliseconds between frames
@@ -795,6 +800,90 @@ export class Player implements IPlayer {
     }
   }
 
+  public setLockCamera(enabled: boolean): void {
+    this.lockCameraEnabled = enabled;
+  }
+
+  public setMaxTileRenderLimit(limit: number): void {
+    this.maxTileRenderLimit = limit;
+    // 如果启用了限制，强制开启清除上一轨道功能
+    if (limit > 0) {
+      this.clearPreviousTile = true;
+    }
+    // 如果正在播放，立即应用设置
+    if (this.isPlaying && this.tileLimitActive) {
+      this.enforceTileLimit();
+    }
+  }
+
+  public setClearPreviousTile(enabled: boolean): void {
+    this.clearPreviousTile = enabled;
+  }
+
+  /**
+   * 应用轨道渲染限制设置（在开始播放时调用）
+   */
+  private applyTileLimitSettings(): void {
+    if (this.maxTileRenderLimit > 0) {
+      this.tileLimitActive = true;
+      this.clearPreviousTile = true;
+    } else if (this.clearPreviousTile) {
+      this.tileLimitActive = true;
+    } else {
+      this.tileLimitActive = false;
+    }
+    // 立即执行限制
+    this.enforceTileLimit();
+  }
+
+  /**
+   * 强制执行轨道渲染限制（滑动窗口模式）
+   * 清除已触发的旧tiles，确保当前可见tiles不超过限制
+   * 滑动窗口：只保留当前tile之后的tiles，总数不超过限制
+   */
+  private enforceTileLimit(): void {
+    if (!this.tileLimitActive || this.maxTileRenderLimit <= 0) return;
+    
+    const currentIdx = this.currentTileIndex;
+    const limit = this.maxTileRenderLimit;
+    
+    // 1. 清除当前tile之前的所有tiles（已被触发的）
+    if (this.clearPreviousTile) {
+      const toRemove: string[] = [];
+      this.visibleTiles.forEach(id => {
+        const idx = parseInt(id);
+        if (idx < currentIdx) {
+          toRemove.push(id);
+        }
+      });
+      toRemove.forEach(id => {
+        const mesh = this.tiles.get(id);
+        if (mesh) {
+          this.scene.remove(mesh);
+        }
+        this.visibleTiles.delete(id);
+      });
+    }
+    
+    // 2. 如果可见tiles超过限制，优先保留当前tile之后的tiles
+    //    删除索引最大的（最远的后续tiles）
+    if (this.visibleTiles.size > limit) {
+      const visibleArray = Array.from(this.visibleTiles).map(id => parseInt(id));
+      // 按索引降序排序（索引大的排在前面，优先删除）
+      visibleArray.sort((a, b) => b - a);
+      
+      const toRemoveCount = this.visibleTiles.size - limit;
+      for (let i = 0; i < toRemoveCount && i < visibleArray.length; i++) {
+        const id = visibleArray[i].toString();
+        const mesh = this.tiles.get(id);
+        if (mesh) {
+          this.scene.remove(mesh);
+        }
+        this.visibleTiles.delete(id);
+      }
+    }
+  }
+
   public createPlayer(container: HTMLElement): void {
     this.container = container;
     
@@ -1131,7 +1220,9 @@ export class Player implements IPlayer {
               this.music.playScheduled(scheduledPlayTime, offsetInSeconds);
             } else {
               // Fallback to simple play if no AudioContext
-              this.music.audio.currentTime = offset / 1000;
+              if (this.music.audio) {
+                this.music.audio.currentTime = offset / 1000;
+              }
               this.music.play();
             }
           } catch (e) {
@@ -1274,6 +1365,9 @@ export class Player implements IPlayer {
     // Reset camera state
     this.cameraController.setLastCameraTimelineIndex(-1);
     this.cameraController.resetCameraState();
+    
+    // Apply tile render limit settings
+    this.applyTileLimitSettings();
     
     // Build Recolor timeline
     this.buildRecolorTimeline();
@@ -2027,6 +2121,11 @@ export class Player implements IPlayer {
     if (this.tiles.size > this.maxCachedTiles) {
         this.cleanupTileCache();
     }
+    
+    // Enforce tile render limit during playback
+    if (this.tileLimitActive && this.maxTileRenderLimit > 0) {
+        this.enforceTileLimit();
+    }
   }
 
   private cleanupTileCache(): void {
@@ -2436,17 +2535,24 @@ export class Player implements IPlayer {
       // Get interpolated camera values
       const interpolated = this.cameraController.getInterpolatedValues(this.elapsedTime);
       
-      // Calculate target position based on camera mode
-      const target = this.cameraController.calculateTargetPosition(this.currentPivotPosition);
+      // Lock Camera: instant teleport to current tile center, preserve zoom only
+      if (this.lockCameraEnabled) {
+          // Instantly teleport camera to current tile center (no smoothing)
+          const tile = this.levelData.tiles[this.currentTileIndex];
+          if (tile && tile.position) {
+              this.cameraPosition.x = tile.position[0];
+              this.cameraPosition.y = tile.position[1];
+          }
+      } else {
+          // Normal camera follow with smoothing
+          const target = this.cameraController.calculateTargetPosition(this.currentPivotPosition);
+          const currentBPM = (this.tileBPM && this.tileBPM[this.currentTileIndex]) || 100;
+          const smoothingIndex = 15 * Math.pow(100 / Math.max(1, currentBPM), 0.15);
+          const step = 1.0 - Math.pow(1.0 - 1.0 / smoothingIndex, delta * 60);
 
-      // Apply smoothing
-      const currentBPM = (this.tileBPM && this.tileBPM[this.currentTileIndex]) || 100;
-      const smoothingIndex = 15 * Math.pow(100 / Math.max(1, currentBPM), 0.15);
-      
-      const step = 1.0 - Math.pow(1.0 - 1.0 / smoothingIndex, delta * 60);
-      
-      this.cameraPosition.x += (target.x - this.cameraPosition.x) * step;
-      this.cameraPosition.y += (target.y - this.cameraPosition.y) * step;
+          this.cameraPosition.x += (target.x - this.cameraPosition.x) * step;
+          this.cameraPosition.y += (target.y - this.cameraPosition.y) * step;
+      }
 
       // Update camera position
       this.camera.position.x = this.cameraPosition.x;
@@ -2459,8 +2565,12 @@ export class Player implements IPlayer {
       this.camera.zoom = this.zoom * this.zoomMultiplier;
       this.camera.updateProjectionMatrix();
       
-      // Rotation (in degrees, convert to radians)
-      this.camera.rotation.z = interpolated.rotation * (Math.PI / 180);
+      // Rotation: only apply when Lock Camera is disabled
+      if (this.lockCameraEnabled) {
+          this.camera.rotation.z = 0;
+      } else {
+          this.camera.rotation.z = interpolated.rotation * (Math.PI / 180);
+      }
 
       // Sync Video Background
       if (this.videoMesh) {
