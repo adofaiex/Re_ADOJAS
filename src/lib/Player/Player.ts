@@ -14,7 +14,6 @@ import { CameraController, CameraTimelineEntry } from './CameraController';
 import { DecorationManager } from './DecorationManager';
 import { MoveTrackManager } from './MoveTrackManager';
 import { PositionTrackManager } from './PositionTrackManager';
-import { InstancedMeshManager } from './InstancedMeshManager';
 import Stats from 'three/examples/jsm/libs/stats.module.js';
 
 export class Player implements IPlayer {
@@ -116,11 +115,6 @@ export class Player implements IPlayer {
 
   // PositionTrack Manager
   private positionTrackManager: PositionTrackManager | null = null;
-
-  // Instanced Mesh Manager (GPU instancing for performance)
-  private instancedMeshManager: InstancedMeshManager | null = null;
-  private useInstancedMesh: boolean = false; // Disabled by default, can be enabled via config
-
   private isEditorMode: boolean = false; // Whether we're in editor preview mode
 
   // Bloom Effect
@@ -225,9 +219,6 @@ export class Player implements IPlayer {
     const bgColor = this.levelData.settings?.backgroundColor || '000000';
     this.scene.background = new THREE.Color(this.formatHexColor(bgColor));
     
-    // Initialize custom background from level settings (like ADOFAI does)
-    this.initializeCustomBGFromSettings();
-    
     // Initialize video settings
     this.videoOffset = this.levelData.settings?.vidOffset || 0;
 
@@ -285,26 +276,6 @@ export class Player implements IPlayer {
     );
     this.moveTrackManager.initializeMoveTrackEvents(this.tileMoveTrackEvents);
     this.moveTrackManager.setTilesReference(this.tiles);
-
-    // Initialize Instanced Mesh Manager (GPU instancing for performance)
-    this.instancedMeshManager = new InstancedMeshManager(
-      this.scene,
-      (shapeKey) => {
-        // Create geometry on-demand
-        const meshData = createTrackMesh(
-          0, 0, false, undefined, undefined, undefined, 'Standard'
-        );
-        if (!meshData || !meshData.faces) return null;
-
-        const geometry = new THREE.BufferGeometry();
-        geometry.setIndex(meshData.faces);
-        geometry.setAttribute('position', new THREE.Float32BufferAttribute(meshData.vertices, 3));
-        geometry.setAttribute('color', new THREE.Float32BufferAttribute(meshData.colors, 3));
-        geometry.computeVertexNormals();
-        return geometry;
-      },
-      this.useInstancedMesh
-    );
 
     // Add lights
     const ambientLight = new THREE.AmbientLight(0x404040, 1.0);
@@ -1146,26 +1117,32 @@ export class Player implements IPlayer {
         }
 
         // Start music at elapsedTime = musicStartDelay (when game starts + music delay)
-        if (this.music.hasAudio && !this.music.isPaused && this.elapsedTime >= this.musicStartDelay * 1000 && !this.music.isPlaying) {
+        if (this.music && this.music.hasAudio && !this.music.isPaused && this.elapsedTime >= this.musicStartDelay * 1000 && !this.music.isPlaying) {
           // Initialize AudioContext sync
+          const music = this.music;
           try {
             const audioContext = getSharedAudioContext();
             if (audioContext) {
               // Music should start at elapsedTime = musicStartDelay
               // AudioContext.currentTime should = audioContextStartOffset + musicStartDelay
               const scheduledPlayTime = this.audioContextStartOffset + this.musicStartDelay;
+              const offset = this.levelData.settings.offset || 0;
               const offsetInSeconds = offset / 1000;
               
               console.log('[Player] Scheduling music to play at AudioContext time:', scheduledPlayTime, 'with offset:', offsetInSeconds, 'musicStartDelay:', this.musicStartDelay);
-              this.music.playScheduled(scheduledPlayTime, offsetInSeconds);
+              if (music.playScheduled) {
+                music.playScheduled(scheduledPlayTime, offsetInSeconds);
+              }
             } else {
               // Fallback to simple play if no AudioContext
-              this.music.audio.currentTime = offset / 1000;
-              this.music.play();
+              if (music.audio) {
+                music.audio.currentTime = offset / 1000;
+                music.play();
+              }
             }
           } catch (e) {
             console.warn('[Player] Failed to schedule music:', e);
-            this.music.play();
+            music.play();
           }
         }
       }
@@ -1175,14 +1152,13 @@ export class Player implements IPlayer {
 
     this.updateCameraFollow(delta);
 
-    // Update MoveTrack animations BEFORE updating tile colors
-    // This ensures getTileOpacity() returns the correct value
-    this.updateMoveTrack();
-
     this.updateAnimatedTiles();
 
     // Update decorations
     this.updateDecorations();
+
+    // Update MoveTrack animations
+    this.updateMoveTrack();
   }
   
   private updateDecorations(): void {
@@ -1219,24 +1195,9 @@ export class Player implements IPlayer {
         const index = parseInt(id);
         const config = this.tileColorManager.getTileRecolorConfig(index);
         
-        if (config) {
-            // Get MoveTrack opacity for this tile (default 1.0 if no MoveTrack)
-            const moveTrackOpacity = this.moveTrackManager ? this.moveTrackManager.getTileOpacity(index) : 1.0;
-            const rendered = this.tileColorManager.getTileRenderer(index, time, config, this.music.amplitude, moveTrackOpacity);
-            
-            // Debug: log color updates
-            if (index === 0) { // Only log first tile to avoid spam
-                console.log(`[Player] Tile ${index} colors:`, {
-                    shadowColor: rendered.color,
-                    floorColor: rendered.bgcolor,
-                    alpha: rendered.alpha,
-                    moveTrackOpacity: moveTrackOpacity,
-                    trackColorAlpha: config.trackColorAlpha,
-                    trackColorType: config.trackColorType
-                });
-            }
-            
-            this.applyTileColor(index, rendered.color, rendered.bgcolor, rendered.alpha, rendered.shadowAlpha);
+        if (config && ['Glow', 'Blink', 'Rainbow', 'Volume'].includes(config.trackColorType)) {
+            const rendered = this.tileColorManager.getTileRenderer(index, time, config, this.music.amplitude);
+            this.applyTileColor(index, rendered.color, rendered.bgcolor);
         }
     });
   }
@@ -1466,43 +1427,6 @@ export class Player implements IPlayer {
       this.customBGTimeline = entries;
   }
   
-  /**
-   * Initialize custom background from level settings (like ADOFAI)
-   * Automatically applies background if image is registered
-   */
-  private initializeCustomBGFromSettings(): void {
-    const settings = this.levelData.settings;
-    if (!settings) return;
-    
-    // Get background image from settings
-    const bgImage = settings.bgImage || settings.backgroundImage;
-    
-    // Check if we have the image registered
-    if (!bgImage || !this.customBGImages.has(bgImage)) {
-      console.log('[Player] No custom background image in settings or image not registered');
-      return;
-    }
-    
-    console.log('[Player] Initializing custom background from settings:', bgImage);
-    
-    // Create background event with settings values
-    const bgEvent: any = {
-      color: settings.backgroundColor || '000000',
-      image: bgImage,
-      imageColor: settings.bgImageColor || settings.backgroundImageColor || 'ffffff',
-      parallax: settings.bgParallax || settings.backgroundParallax || [100, 100],
-      tiled: settings.bgTiled !== undefined ? settings.bgTiled : settings.backgroundTiled || false,
-      looping: settings.bgLooping !== undefined ? settings.bgLooping : settings.backgroundLooping || true,
-      fitScreen: settings.bgFitScreen !== undefined ? settings.bgFitScreen : settings.backgroundFitScreen || true,
-      lockRot: settings.bgLockRot !== undefined ? settings.bgLockRot : settings.backgroundLockRot || false,
-      scalingRatio: settings.bgScalingRatio !== undefined ? settings.bgScalingRatio : settings.backgroundScalingRatio || 1,
-      imageSmoothing: settings.bgImageSmoothing !== undefined ? settings.bgImageSmoothing : settings.backgroundImageSmoothing || true
-    };
-    
-    // Apply the background
-    this.processCustomBGEvent(bgEvent);
-  }
-  
   private processCustomBGEvent(event: any): void {
       // SetCustomBG event properties:
       // - color: background color (hex string)
@@ -1690,56 +1614,10 @@ export class Player implements IPlayer {
         // Re-apply PositionTrack transforms (PositionTrack is global and applies at all times)
         this.reapplyPositionTrackTransforms();
 
-    // Reset all tile scale to (1, 1, 1)
-    this.tiles.forEach((mesh, id) => {
-        mesh.scale.set(1, 1, 1);
+        this.tileColorManager.initTileColors();    this.lastRecolorTimelineIndex = -1;
+    this.tiles.forEach((_, id) => {
+        this.updateTileMeshColor(parseInt(id));
     });
-
-    // Reset all tile opacities to 1.0 (MoveTrack uses shader uniform uOpacity)
-    this.tiles.forEach((mesh, id) => {
-        if (mesh.material instanceof THREE.ShaderMaterial) {
-            mesh.material.uniforms.uOpacity.value = 1.0;
-            // Reset mesh opacity to 1.0 (ensure no interference with shader alpha)
-            mesh.material.opacity = 1.0;
-            // Reset all marker opacities (speed markers, twirl markers, etc.) to 1.0
-            mesh.children.forEach(child => {
-                if (child instanceof THREE.Mesh && child.material instanceof THREE.Material) {
-                    child.material.opacity = 1.0;
-                }
-            });
-        }
-    });
-
-    // Reset all tile colors to initial state
-    if (this.tileColorManager) {
-        this.tileColorManager.initTileColors();
-        this.lastRecolorTimelineIndex = -1;
-        this.tiles.forEach((_, id) => {
-            this.updateTileMeshColor(parseInt(id), 1.0);
-        });
-    }
-
-    // Reset camera rotation but keep position unchanged
-    if (this.camera) {
-        // Save current camera position
-        const savedPosition = {
-            x: this.camera.position.x,
-            y: this.camera.position.y
-        };
-        
-        // Reset camera state (this will reset rotation to default)
-        this.cameraController.resetCameraState();
-        this.cameraController.setLastCameraTimelineIndex(-1);
-        
-        // Restore camera position
-        this.camera.position.x = savedPosition.x;
-        this.camera.position.y = savedPosition.y;
-        this.cameraPosition.x = savedPosition.x;
-        this.cameraPosition.y = savedPosition.y;
-        
-        // Reset rotation to 0
-        this.camera.rotation.z = 0;
-    }
   }
 
   public pausePlay(): void {
@@ -1891,9 +1769,7 @@ export class Player implements IPlayer {
         secondaryTrackColor: colors.bgcolor,
         trackColorPulse: event.trackColorPulse || settings.trackColorPulse || 'None',
         trackColorAnimDuration: event.trackColorAnimDuration || settings.trackColorAnimDuration || 2,
-        trackPulseLength: event.trackPulseLength || settings.trackPulseLength || 10,
-        trackColorAlpha: this.tileColorManager.extractAlpha(event.trackColor || settings.trackColor || 'debb7b'),
-        secondaryTrackColorAlpha: this.tileColorManager.extractAlpha(event.secondaryTrackColor || settings.secondaryTrackColor || 'ffffff')
+        trackPulseLength: event.trackPulseLength || settings.trackPulseLength || 10
     };
 
     const minIdx = Math.max(0, Math.min(startIdx, endIdx));
@@ -1901,39 +1777,24 @@ export class Player implements IPlayer {
     
     for (let i = minIdx; i <= maxIdx; i += (gap + 1)) {
         this.tileColorManager.setTileRecolorConfig(i, config);
-        const moveTrackOpacity = this.moveTrackManager ? this.moveTrackManager.getTileOpacity(i) : 1.0;
-        const rendered = this.tileColorManager.getTileRenderer(i, this.elapsedTime / 1000, config, this.music.amplitude, moveTrackOpacity);
-        this.applyTileColor(i, rendered.color, rendered.bgcolor, rendered.alpha, rendered.shadowAlpha);
+        const rendered = this.tileColorManager.getTileRenderer(i, this.elapsedTime / 1000, config, this.music.amplitude);
+        this.applyTileColor(i, rendered.color, rendered.bgcolor);
     }
   }
 
-  private applyTileColor(index: number, color: string, bgcolor: string, alpha: number = 1.0, shadowAlpha: number = 1.0): void {
-    this.tileColorManager.setTileColor(index, color, bgcolor, shadowAlpha);
-    this.updateTileMeshColor(index, alpha);
+  private applyTileColor(index: number, color: string, bgcolor: string): void {
+    this.tileColorManager.setTileColor(index, color, bgcolor);
+    this.updateTileMeshColor(index);
   }
 
-  private updateTileMeshColor(index: number, alpha: number = 1.0): void {
+  private updateTileMeshColor(index: number): void {
     const id = index.toString();
     const mesh = this.tiles.get(id);
     if (mesh && mesh.material instanceof THREE.ShaderMaterial) {
         const colors = this.tileColorManager.getTileColor(index);
         if (colors) {
-            // ADOFAI: _ShadowColor = colors.color, floorRenderer.color = colors.secondaryColor
-            mesh.material.uniforms.uShadowColor.value.set(colors.color);
-            mesh.material.uniforms.uFloorColor.value.set(colors.secondaryColor || colors.color);
-            mesh.material.uniforms.uShadowAlpha.value = colors.shadowAlpha || 1.0;
-            mesh.material.uniforms.uOpacity.value = alpha;
-            // Ensure mesh.opacity is always 1.0 (no interference with shader alpha)
-            mesh.material.opacity = 1.0;
-            
-            // Update all marker opacities (speed markers, twirl markers, etc.)
-            // IMPORTANT: Ensure minimum marker opacity of 0.3 to prevent completely invisible markers
-            const markerOpacity = Math.max(0.3, alpha);
-            mesh.children.forEach(child => {
-                if (child instanceof THREE.Mesh && child.material instanceof THREE.Material) {
-                    child.material.opacity = markerOpacity;
-                }
-            });
+            mesh.material.uniforms.uColor.value.set(colors.color);
+            mesh.material.uniforms.uBgColor.value.set(colors.secondaryColor || colors.color);
         }
     }
   }
@@ -2099,22 +1960,9 @@ export class Player implements IPlayer {
     
     this.sharedDecoGeometry = new THREE.CircleGeometry(decoSize / 2, 16);
     
-    // Create decoration materials with transparency support
-    this.sharedTwirlMaterial = new THREE.MeshBasicMaterial({ 
-      color: 0x800080, 
-      transparent: true,
-      opacity: 1.0
-    });
-    this.sharedSpeedUpMaterial = new THREE.MeshBasicMaterial({ 
-      color: 0xff0000, 
-      transparent: true,
-      opacity: 1.0
-    });
-    this.sharedSpeedDownMaterial = new THREE.MeshBasicMaterial({ 
-      color: 0x0000ff, 
-      transparent: true,
-      opacity: 1.0
-    });
+    this.sharedTwirlMaterial = new THREE.MeshBasicMaterial({ color: 0x800080 });
+    this.sharedSpeedUpMaterial = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+    this.sharedSpeedDownMaterial = new THREE.MeshBasicMaterial({ color: 0x0000ff });
   }
 
   private lastVisibleCheckPos = new THREE.Vector3(Infinity, Infinity, Infinity);
@@ -2202,16 +2050,9 @@ export class Player implements IPlayer {
     for (let i = 0; i < tileEntries.length && removed < toRemoveCount; i++) {
         const [id, mesh] = tileEntries[i];
         if (!this.visibleTiles.has(id)) {
-            // Dispose tile mesh material
             if (mesh.material instanceof THREE.Material) {
                 mesh.material.dispose();
             }
-            // Dispose all child materials (speed markers, twirl markers, etc.)
-            mesh.children.forEach(child => {
-                if (child instanceof THREE.Mesh && child.material instanceof THREE.Material) {
-                    child.material.dispose();
-                }
-            });
             this.tiles.delete(id);
             removed++;
         }
@@ -2245,57 +2086,6 @@ export class Player implements IPlayer {
     const trackStyle = tileConfig?.trackStyle || 'Standard';
 
     const shapeKey = `${pred}_${currentDirection}_${is999}_${trackStyle}`;
-    
-    // Get tile colors
-    const colors = this.tileColorManager.getTileColor(index);
-    const color = colors?.color || '#ffffff';
-    const bgcolor = colors?.secondaryColor || color;
-
-    // Calculate transform from PositionTrack
-    let position: THREE.Vector3;
-    let rotation: THREE.Euler;
-    let scale: THREE.Vector3;
-    let opacity: number;
-
-    if (this.positionTrackManager) {
-      const transform = this.positionTrackManager.getTileTransform(index);
-      if (transform) {
-        position = transform.position.clone();
-        rotation = new THREE.Euler(0, 0, transform.rotation * (Math.PI / 180));
-        scale = transform.scale.clone();
-        // IMPORTANT: PositionTrack should NOT control opacity
-        // Opacity should only be controlled by MoveTrack or tile colors
-        // Ignore opacity from PositionTrack
-        opacity = 1;
-      } else {
-        position = new THREE.Vector3(x, y, (12 - index) * 0.001);
-        rotation = new THREE.Euler(0, 0, 0);
-        scale = new THREE.Vector3(1, 1, 1);
-        opacity = 1;
-      }
-    } else {
-      position = new THREE.Vector3(x, y, (12 - index) * 0.001);
-      rotation = new THREE.Euler(0, 0, 0);
-      scale = new THREE.Vector3(1, 1, 1);
-      opacity = 1;
-    }
-
-    // Use InstancedMesh if enabled
-    if (this.instancedMeshManager && this.useInstancedMesh) {
-      this.instancedMeshManager.updateTile(
-        index,
-        shapeKey,
-        position,
-        rotation,
-        scale,
-        color,
-        bgcolor,
-        opacity
-      );
-      return null; // Don't return a mesh when using instancing
-    }
-
-    // Fallback: create individual mesh
     let geometry = this.geometryCache.get(shapeKey);
 
     if (!geometry) {
@@ -2309,13 +2099,15 @@ export class Player implements IPlayer {
       geometry.computeVertexNormals();
       this.geometryCache.set(shapeKey, geometry);
     }
+
+    const colors = this.tileColorManager.getTileColor(index);
+    const color = colors?.color || '#ffffff';
+    const bgcolor = colors?.secondaryColor || color;
     
     const material = new THREE.ShaderMaterial({
         uniforms: {
-            uShadowColor: { value: new THREE.Color('#ffffff') },
-            uFloorColor: { value: new THREE.Color('#ffffff') },
-            uShadowAlpha: { value: 1.0 },
-            uOpacity: { value: 1.0 }
+            uColor: { value: new THREE.Color(color) },
+            uBgColor: { value: new THREE.Color(bgcolor) }
         },
         vertexShader: `
             varying vec3 vColor;
@@ -2325,30 +2117,40 @@ export class Player implements IPlayer {
             }
         `,
         fragmentShader: `
-            uniform vec3 uShadowColor;
-            uniform vec3 uFloorColor;
-            uniform float uShadowAlpha;
-            uniform float uOpacity;
+            uniform vec3 uColor;
+            uniform vec3 uBgColor;
             varying vec3 vColor;
             void main() {
-                // ADOFAI: mix(_ShadowColor, floorRenderer.color, vColor.r)
-                // Apply shadow alpha to the shadow part only
-                vec3 mixedColor = mix(uShadowColor, uFloorColor, vColor.r);
-                float alpha = mix(uShadowAlpha, 1.0, vColor.r) * uOpacity;
-                gl_FragColor = vec4(mixedColor, alpha);
+                vec3 finalColor = mix(uBgColor, uColor, vColor.r);
+                gl_FragColor = vec4(finalColor, 1.0);
             }
         `,
         vertexColors: true,
         side: THREE.DoubleSide,
-        transparent: false  // IMPORTANT: Don't use Three.js transparency, use custom shader alpha instead
+        transparent: false
     });
 
     const tileMesh = new THREE.Mesh(geometry, material);
 
-    tileMesh.position.copy(position);
-    tileMesh.rotation.copy(rotation);
-    tileMesh.scale.copy(scale);
-    
+    // Calculate transform from PositionTrack
+    if (this.positionTrackManager) {
+      const transform = this.positionTrackManager.getTileTransform(index);
+      if (transform) {
+        tileMesh.position.copy(transform.position);
+        tileMesh.rotation.z = transform.rotation * (Math.PI / 180); // Convert degrees to radians
+        tileMesh.scale.copy(transform.scale);
+        
+        // Apply opacity if supported by material
+        if (transform.opacity < 1 && (material as any).transparent !== undefined) {
+          (material as any).transparent = true;
+          (material as any).opacity = transform.opacity;
+        }
+      }
+    } else {
+      // Fallback to original position calculation
+      tileMesh.position.set(x, y, zLevel * 0.001);
+    }
+
     tileMesh.castShadow = true;
     tileMesh.receiveShadow = true;
     
@@ -2366,15 +2168,9 @@ export class Player implements IPlayer {
     }
     
     if (hasTwirl && this.sharedDecoGeometry && this.sharedTwirlMaterial) {
-        const twirlMaterial = this.sharedTwirlMaterial.clone();
-        const twirlMesh = new THREE.Mesh(this.sharedDecoGeometry, twirlMaterial);
+        const twirlMesh = new THREE.Mesh(this.sharedDecoGeometry, this.sharedTwirlMaterial);
         twirlMesh.position.set(0, 0, decoZ);
-        // Always set marker opacity to 1.0 initially
-        twirlMaterial.opacity = 1.0;
         tileMesh.add(twirlMesh);
-        
-        // Debug: log twirl marker creation
-        console.log(`[Player] Created twirl marker for tile ${index}, opacity: ${twirlMaterial.opacity}`);
     }
     
     if (hasSetSpeed && this.sharedDecoGeometry) {
@@ -2383,45 +2179,17 @@ export class Player implements IPlayer {
         const ratio = currentBPM / prevBPM;
         
         if (ratio > 1.05 && this.sharedSpeedUpMaterial) {
-            const speedMaterial = this.sharedSpeedUpMaterial.clone();
-            const speedMesh = new THREE.Mesh(this.sharedDecoGeometry, speedMaterial);
+            const speedMesh = new THREE.Mesh(this.sharedDecoGeometry, this.sharedSpeedUpMaterial);
             speedMesh.position.set(0, 0, decoZ + (hasTwirl ? 0.001 : 0));
-            // Always set marker opacity to 1.0 initially
-            speedMaterial.opacity = 1.0;
             tileMesh.add(speedMesh);
-            
-            // Debug: log speedUp marker creation
-            console.log(`[Player] Created speedUp marker for tile ${index}, opacity: ${speedMaterial.opacity}`);
         } else if (ratio < 0.95 && this.sharedSpeedDownMaterial) {
-            const speedMaterial = this.sharedSpeedDownMaterial.clone();
-            const speedMesh = new THREE.Mesh(this.sharedDecoGeometry, speedMaterial);
+            const speedMesh = new THREE.Mesh(this.sharedDecoGeometry, this.sharedSpeedDownMaterial);
             speedMesh.position.set(0, 0, decoZ + (hasTwirl ? 0.001 : 0));
-            // Always set marker opacity to 1.0 initially
-            speedMaterial.opacity = 1.0;
             tileMesh.add(speedMesh);
-            
-            // Debug: log speedDown marker creation
-            console.log(`[Player] Created speedDown marker for tile ${index}, opacity: ${speedMaterial.opacity}`);
         }
     }
     
     this.tiles.set(id, tileMesh);
-
-    // Set initial colors for the tile (using the colors variable from earlier)
-    if (colors) {
-        material.uniforms.uShadowColor.value.set(colors.color);
-        material.uniforms.uFloorColor.value.set(colors.secondaryColor || colors.color);
-        material.uniforms.uShadowAlpha.value = (colors as any).shadowAlpha || 1.0;
-        
-        // Debug: log initial color
-        if (index === 0) {
-            console.log(`[Player] Tile ${index} initial colors:`, {
-                shadowColor: colors.color,
-                floorColor: colors.secondaryColor || colors.color,
-                shadowAlpha: (colors as any).shadowAlpha || 1.0
-            });
-        }
-    }
 
     // Register tile initial state with MoveTrack manager
     if (this.moveTrackManager) {
@@ -2452,7 +2220,7 @@ export class Player implements IPlayer {
             this.tileColorManager.initTileColors();
             this.lastRecolorTimelineIndex = -1;
             this.tiles.forEach((_, id) => {
-                this.updateTileMeshColor(parseInt(id), 1.0);
+                this.updateTileMeshColor(parseInt(id));
             });
         }
     }
@@ -2674,8 +2442,8 @@ export class Player implements IPlayer {
       // Get interpolated camera values
       const interpolated = this.cameraController.getInterpolatedValues(this.elapsedTime);
       
-      // Calculate target position based on camera mode and interpolated logical position
-      const target = this.cameraController.calculateTargetPosition(this.currentPivotPosition, interpolated.position);
+      // Calculate target position based on camera mode
+      const target = this.cameraController.calculateTargetPosition(this.currentPivotPosition);
 
       // Apply smoothing
       const currentBPM = (this.tileBPM && this.tileBPM[this.currentTileIndex]) || 100;
@@ -2719,49 +2487,6 @@ export class Player implements IPlayer {
     cameraMode.zoom = logicalZoom;
     this.zoom = 100 / logicalZoom;
     this.onWindowResize();
-  }
-
-  /**
-   * Enable or disable GPU instancing for tiles
-   * Note: When enabling, existing tiles will be re-created as instances
-   */
-  public setUseInstancedMesh(enabled: boolean): void {
-    if (this.useInstancedMesh === enabled) return;
-    
-    this.useInstancedMesh = enabled;
-    
-    if (this.instancedMeshManager) {
-      this.instancedMeshManager.setUseInstancedMesh(enabled);
-      
-      // Clear existing tiles to force recreation
-      if (enabled) {
-        this.tiles.forEach((mesh, id) => {
-          if (mesh.material instanceof THREE.Material) {
-            mesh.material.dispose();
-          }
-          // Dispose all child materials before clearing
-          mesh.children.forEach(child => {
-            if (child instanceof THREE.Mesh && child.material instanceof THREE.Material) {
-              child.material.dispose();
-            }
-          });
-          mesh.children.length = 0;
-        });
-        this.tiles.clear();
-        this.visibleTiles.clear();
-        this.instancedMeshManager.clear();
-      } else {
-        this.instancedMeshManager.clear();
-      }
-    }
-  }
-
-  /**
-   * Get InstancedMesh statistics (for debugging)
-   */
-  public getInstancedMeshStats() {
-    if (!this.instancedMeshManager) return null;
-    return this.instancedMeshManager.getStats();
   }
 
   public loadMusic(src: string): void {
@@ -2956,23 +2681,11 @@ export class Player implements IPlayer {
       this.moveTrackManager = null;
     }
 
-    // Cleanup InstancedMesh manager
-    if (this.instancedMeshManager) {
-      this.instancedMeshManager.dispose();
-      this.instancedMeshManager = null;
-    }
-
     // Cleanup Three.js resources
     this.tiles.forEach(mesh => {
         if (mesh.material instanceof THREE.Material) {
             mesh.material.dispose();
         }
-        // Dispose all child materials before clearing
-        mesh.children.forEach(child => {
-            if (child instanceof THREE.Mesh && child.material instanceof THREE.Material) {
-                child.material.dispose();
-            }
-        });
         mesh.children.length = 0;
     });
     this.tiles.clear();

@@ -46,6 +46,7 @@ export interface DecorationConfig {
     // Visual effects
     parallax: [number, number];
     parallaxOffset: [number, number];
+    pivotOffset: [number, number];
     depth: number;
     color: string;
     opacity: number;
@@ -84,6 +85,7 @@ export const defaultDecorationConfig: DecorationConfig = {
     scale: [100, 100],
     parallax: [100, 100],
     parallaxOffset: [0, 0],
+    pivotOffset: [0, 0],
     depth: 0,
     color: 'ffffff',
     opacity: 100,

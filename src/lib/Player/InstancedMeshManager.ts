@@ -55,9 +55,9 @@ export class InstancedMeshManager {
     /**
      * Initialize an instanced mesh for a specific shape
      */
-    private createInstancedMesh(shapeKey: string, maxInstances: number): ShapeInstancedMesh | null {
+    private createInstancedMesh(shapeKey: string, maxInstances: number): ShapeInstancedMesh | undefined {
         const geometry = this.onGeometryNeeded(shapeKey);
-        if (!geometry) return null;
+        if (!geometry) return undefined;
 
         // Create a basic shader material that supports instance colors
         const material = new THREE.ShaderMaterial({
@@ -237,7 +237,9 @@ export class InstancedMeshManager {
         // Create new instanced mesh with double capacity
         const oldMesh = shapeData.instancedMesh;
         const geometry = oldMesh.geometry.clone();
-        const material = oldMesh.material.clone();
+        const material = Array.isArray(oldMesh.material)
+            ? oldMesh.material.map(m => m.clone())
+            : oldMesh.material.clone();
 
         const newMesh = new THREE.InstancedMesh(geometry, material, newMax);
         newMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);

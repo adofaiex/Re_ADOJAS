@@ -539,30 +539,6 @@ export class DecorationManager {
         }
         this.texturesLoaded.delete(filename);
     }
-    
-    /**
-     * Get placeholder texture for decorations without images
-     */
-    private getPlaceholderTexture(): THREE.Texture {
-        if (!this.placeholderTexture) {
-            const canvas = document.createElement('canvas');
-            canvas.width = 64;
-            canvas.height = 64;
-            const ctx = canvas.getContext('2d')!;
-            
-            // Create a simple pattern
-            ctx.fillStyle = '#ffffff';
-            ctx.fillRect(0, 0, 64, 64);
-            ctx.fillStyle = '#ff0000';
-            ctx.beginPath();
-            ctx.arc(32, 32, 20, 0, Math.PI * 2);
-            ctx.fill();
-            
-            this.placeholderTexture = new THREE.CanvasTexture(canvas);
-            this.placeholderTexture.colorSpace = THREE.SRGBColorSpace;
-        }
-        return this.placeholderTexture;
-    }
 
     /**
      * Get base name from filename (strip path)

@@ -277,18 +277,7 @@ export class MoveTrackManager {
         const positionOffset = event.positionOffset || [0, 0];
         const rotationOffset = event.rotationOffset || 0;
         const scale = event.scale || [100, 100];
-        // ADOFAI: opacity is in 0-100 range, needs to be divided by 100 to get 0-1
-        // BUT: check if it's already normalized (0-1) or in percentage (0-100)
-        let opacity: number;
-        if (event.opacity !== undefined) {
-            // If opacity > 1, it's in percentage range (0-100), normalize to 0-1
-            // If opacity <= 1, it's already normalized (0-1)
-            opacity = event.opacity > 1 ? event.opacity / 100 : event.opacity;
-        } else {
-            opacity = 1.0;
-        }
-
-        console.log(`[MoveTrackManager] Event parameters: duration=${duration}, ease=${ease}, positionOffset=[${positionOffset}], rotationOffset=${rotationOffset}, scale=[${scale}], event.opacity=${event.opacity}, calculated opacity=${opacity}`);
+        const opacity = event.opacity !== undefined ? event.opacity / 100 : 1;
 
         // Check if planet should follow this track (default true)
         const follow = event.follow !== false; // Default to true
@@ -308,17 +297,11 @@ export class MoveTrackManager {
         });
 
         // Apply animation to tiles in range
-        console.log(`[MoveTrackManager] Processing tiles from ${start} to ${end} with gap ${gapLength}`);
         for (let i = start; i <= end; i += 1 + gapLength) {
             const tileId = i.toString();
             const tileMesh = this.tiles.get(tileId);
 
-            if (!tileMesh) {
-                console.log(`[MoveTrackManager] Tile ${i} not found in tiles map`);
-                continue;
-            }
-
-            console.log(`[MoveTrackManager] Applying MoveTrack to tile ${i}, opacity target: ${opacity}`);
+            if (!tileMesh) continue;
 
             // Get current tile state as start state for this animation
             const startPos = tileMesh.position.clone();
@@ -347,13 +330,10 @@ export class MoveTrackManager {
             this.tileAnimationStates.set(i, state);
 
             // Calculate target values
-            // ADOFAI: targetPos = startPos + (positionOffset * tileSize)
-            const TILE_SIZE = 1.0; // Tile size in world units (matches Re_ADOJAS system)
-            const targetX = startPos.x + positionOffset[0] * TILE_SIZE;
-            const targetY = startPos.y + positionOffset[1] * TILE_SIZE;
+            const targetX = startPos.x + positionOffset[0];
+            const targetY = startPos.y + positionOffset[1];
             // Convert rotationOffset from degrees to radians
             const targetRot = startRot.z + (rotationOffset * Math.PI / 180);
-            // ADOFAI: targetScaleV2 = (Vector2)evnt.data["scale"] / 100f
             const targetScaleX = scale[0] / 100;
             const targetScaleY = scale[1] / 100;
 
@@ -488,11 +468,7 @@ export class MoveTrackManager {
                     }
                     break;
                 case 'opacity':
-                    if (mesh.material instanceof THREE.ShaderMaterial) {
-                        // ShaderMaterial uses uOpacity uniform
-                        mesh.material.uniforms.uOpacity.value = value;
-                    } else if (mesh.material && 'opacity' in mesh.material) {
-                        // Regular materials use opacity property
+                    if (mesh.material && 'opacity' in mesh.material) {
                         (mesh.material as any).opacity = value;
                     }
                     break;
@@ -616,50 +592,14 @@ export class MoveTrackManager {
                 }
             }
 
-            // Reset opacity to 1.0 for ALL tiles (whether initialState exists or not)
-            if (tileMesh.material instanceof THREE.ShaderMaterial) {
-                tileMesh.material.uniforms.uOpacity.value = 1.0;
-                // Reset mesh opacity to 1.0 (ensure no interference with shader alpha)
-                tileMesh.material.opacity = 1.0;
-            } else if (tileMesh.material && 'opacity' in tileMesh.material) {
-                (tileMesh.material as any).opacity = 1.0;
+            // Reset opacity (if material supports it)
+            if ((tileMesh.material as any).opacity !== undefined) {
+                (tileMesh.material as any).opacity = 1;
+                (tileMesh.material as any).transparent = false;
             }
-            // Reset all child (markers) opacities to 1.0
-            tileMesh.children.forEach(child => {
-                if (child instanceof THREE.Mesh && child.material instanceof THREE.Material) {
-                    child.material.opacity = 1.0;
-                }
-            });
         });
 
         console.log('[MoveTrackManager] resetTiles: successfully reset', resetCount, 'tiles');
-    }
-
-    /**
-     * Get current opacity of a tile (0-1)
-     * Returns 1.0 if tile doesn't exist or material doesn't support opacity
-     */
-    public getTileOpacity(tileIndex: number): number {
-        if (!this.tiles) return 1.0;
-
-        const tileId = tileIndex.toString();
-        const tileMesh = this.tiles.get(tileId);
-
-        if (!tileMesh || !tileMesh.material) return 1.0;
-
-        // Check if it's a ShaderMaterial (tiles use ShaderMaterial with uOpacity uniform)
-        if (tileMesh.material instanceof THREE.ShaderMaterial) {
-            const opacity = tileMesh.material.uniforms.uOpacity.value;
-            return typeof opacity === 'number' ? opacity : 1.0;
-        }
-
-        // For regular materials, check material.opacity
-        if ('opacity' in tileMesh.material) {
-            const opacity = (tileMesh.material as any).opacity;
-            return typeof opacity === 'number' ? opacity : 1.0;
-        }
-
-        return 1.0;
     }
 
     /**
