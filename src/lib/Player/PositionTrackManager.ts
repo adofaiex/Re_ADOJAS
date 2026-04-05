@@ -250,7 +250,7 @@ export class PositionTrackManager {
                 const zLevel = 12 - i;
 
                 transforms.set(i, {
-                    position: new THREE.Vector3(finalX, finalY, zLevel * 0.001),
+                    position: new THREE.Vector3(finalX, finalY, zLevel * 0.00001),
                     rotation: tileRotation,
                     scale: new THREE.Vector3(tileScale, tileScale, tileScale),
                     opacity: tileOpacity,

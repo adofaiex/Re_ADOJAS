@@ -2148,7 +2148,7 @@ export class Player implements IPlayer {
       }
     } else {
       // Fallback to original position calculation
-      tileMesh.position.set(x, y, zLevel * 0.001);
+      tileMesh.position.set(x, y, zLevel * 0.00001);
     }
 
     tileMesh.castShadow = true;
