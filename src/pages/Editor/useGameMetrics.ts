@@ -25,7 +25,7 @@ export interface DisplayMetrics {
   tbpm: number
   /** Current BPM: real-time BPM based on actual time between tiles */
   cbpm: number
-  /** Map Time in mm:ss~mm:ss format */
+  /** Map Time in mm:ss.d~mm:ss.d format (0.1s precision) */
   mapTime: string
   /** Tiles progress: e.g. "123 / 1000 (12.3%)" */
   tiles: string
@@ -86,7 +86,7 @@ export function useGameMetrics() {
       ? (tileStartTimes[tileStartTimes.length - 1] ?? 0)
       : 0
     const currentMapTime = Math.min(timeInLevelSec, totalMapTime)
-    const mapTime = `${formatTime(currentMapTime)}~${formatTime(totalMapTime)}`
+    const mapTime = `${formatTimePrecise(currentMapTime)}~${formatTimePrecise(totalMapTime)}`
 
     // --- Tiles: current / total (percentage%) ---
     const safeTile = Math.min(tileIndex + 1, totalTiles) // display as 1-based
@@ -129,11 +129,25 @@ export function useGameMetrics() {
 }
 
 /**
- * Format seconds into mm:ss string.
+ * Format seconds into mm:ss string (integer seconds only).
+ * Kept for potential future use.
  */
 function formatTime(seconds: number): string {
   if (!isFinite(seconds) || seconds < 0) seconds = 0
   const m = Math.floor(seconds / 60)
   const s = Math.floor(seconds % 60)
   return `${m}:${s.toString().padStart(2, "0")}`
+}
+
+/**
+ * Format seconds into mm:ss.d string (0.1s precision).
+ * Updates visually every 100ms instead of once per second.
+ */
+function formatTimePrecise(seconds: number): string {
+  if (!isFinite(seconds) || seconds < 0) seconds = 0
+  const m = Math.floor(seconds / 60)
+  const sFloat = seconds % 60
+  const s = Math.floor(sFloat)
+  const d = Math.floor((sFloat - s) * 10)
+  return `${m}:${s.toString().padStart(2, "0")}.${d}`
 }

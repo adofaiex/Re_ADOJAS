@@ -67,6 +67,8 @@ export function useEditorState() {
   // Game metrics (TBPM, CBPM, Map Time, Tiles progress)
   const { update: updateMetrics, reset: resetMetrics } = useGameMetrics()
   const metricsRef = useRef<DisplayMetrics | null>(null)
+  // Cache last innerHTML to avoid redundant DOM writes
+  const lastMetricsHTMLRef = useRef<string>("")
   
   // State
   const [isLoading, setIsLoading] = useState<boolean>(false)
@@ -125,7 +127,11 @@ export function useEditorState() {
           })
           if (metrics && infoRef.current) {
             metricsRef.current = metrics
-            infoRef.current.innerHTML = renderMetricsHTML(metrics)
+            const html = renderMetricsHTML(metrics)
+            if (html !== lastMetricsHTMLRef.current) {
+              lastMetricsHTMLRef.current = html
+              infoRef.current.innerHTML = html
+            }
           }
         })
       }
@@ -355,7 +361,11 @@ export function useEditorState() {
                 })
                 if (metrics && infoRef.current) {
                   metricsRef.current = metrics
-                  infoRef.current.innerHTML = renderMetricsHTML(metrics)
+                  const html = renderMetricsHTML(metrics)
+                  if (html !== lastMetricsHTMLRef.current) {
+                    lastMetricsHTMLRef.current = html
+                    infoRef.current.innerHTML = html
+                  }
                 }
               })
             }
