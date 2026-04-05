@@ -54,7 +54,7 @@ export function useGameMetrics() {
    */
   function update(raw: GameMetricsData): DisplayMetrics | null {
     // Build a change-detection key (cheap string comparison)
-    const key = `${raw.tileIndex}:${raw.elapsedTime.toFixed(0)}:${raw.totalTiles}`
+    const key = `${raw.tileIndex}:${raw.elapsedTime}:${raw.totalTiles}`
 
     // Nothing changed → skip all computation and DOM update
     if (key === lastRaw.current) {
