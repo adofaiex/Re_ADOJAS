@@ -1,11 +1,12 @@
 "use client"
 
 import { Button } from "@/components/ui/button"
-import { ArrowLeft, Settings, Save, Upload, Download, Music, Video, Image } from "lucide-react"
+import { ArrowLeft, Settings, Save, Upload, Download, Music, Video, Image, Maximize, Minimize } from "lucide-react"
 import { SettingsModal } from "@/components/SettingsModal"
 import { LoadingModal } from "@/components/LoadingModal"
 import { NotificationSystem } from "./NotificationSystem"
 import { useEditorState } from "./useEditorState"
+import { useFullscreen } from "./useFullscreen"
 
 // 主编辑器页面
 export default function EditorPage() {
@@ -59,6 +60,8 @@ export default function EditorPage() {
     // Translation
     t
   } = useEditorState()
+
+  const { isFullscreen, toggleFullscreen } = useFullscreen()
 
   // 如果还没有完全挂载，显示加载状态
   if (!mounted || !i18nMounted || !themeReady) {
@@ -180,6 +183,21 @@ export default function EditorPage() {
             title={t("common.settings")}
           >
             <Settings className="w-4 h-4" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => toggleFullscreen()}
+            className={`${
+              isDark
+                ? "text-slate-300 hover:text-white hover:bg-slate-700"
+                : "text-slate-700 hover:text-slate-900 hover:bg-slate-100"
+            } bg-black/20 backdrop-blur-sm`}
+            title={isFullscreen ? "退出全屏" : "全屏"}
+          >
+            {isFullscreen
+              ? <Minimize className="w-4 h-4" />
+              : <Maximize className="w-4 h-4" />}
           </Button>
         </div>
       </div>
