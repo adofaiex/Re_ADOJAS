@@ -15,8 +15,8 @@ WEBGL/WEBGPU
 
 ## Deploy
 ```bash
-git clone https://github.com/adofaiex/Re_ADOJAS.git ADOJAS
-cd ADOJAS
+git clone https://github.com/Maicy0609/ADOR3T.git ADOR3T
+cd ADOR3T
 pnpm install
 # npm install
 # yarn install
