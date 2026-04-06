@@ -8,8 +8,87 @@
 import audioData from '../../sounds/audio_data.json';
 import { getSharedAudioContext } from './HTMLAudioMusic';
 
-// Threshold for switching to real-time mode (to avoid extremely long synthesis)
-const REALTIME_MODE_THRESHOLD = 500000; // 500k hits - use real-time mode above this
+// Pre-synthesis mode only - real-time mode removed due to performance concerns
+
+/**
+ * Compress AudioBuffer to OGG format using MediaRecorder
+ * This reduces memory usage significantly for large hit counts
+ * @param buffer The AudioBuffer to compress
+ * @param mimeType The MIME type for encoding (default: audio/ogg; codecs=opus)
+ * @returns Promise<Blob> The compressed OGG blob
+ */
+async function compressAudioBufferToOGG(
+  buffer: AudioBuffer,
+  mimeType: string = 'audio/ogg; codecs=opus'
+): Promise<Blob> {
+  return new Promise((resolve, reject) => {
+    const ctx = getSharedAudioContext();
+    const numberOfChannels = buffer.numberOfChannels;
+    const sampleRate = buffer.sampleRate;
+    const duration = buffer.duration;
+
+    // Create a new AudioBuffer for the offline context
+    const offlineCtx = new OfflineAudioContext(numberOfChannels, buffer.length, sampleRate);
+    const source = offlineCtx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(offlineCtx.destination);
+    source.start();
+
+    // Render the audio
+    offlineCtx.startRendering().then((renderedBuffer) => {
+      // Create a MediaStreamDestination
+      const destination = ctx.createMediaStreamDestination();
+      const source2 = ctx.createBufferSource();
+      source2.buffer = renderedBuffer;
+      source2.connect(destination);
+      source2.start();
+
+      // Use MediaRecorder to record the audio
+      const mediaRecorder = new MediaRecorder(destination.stream, {
+        mimeType: mimeType,
+        audioBitsPerSecond: 128000, // 128 kbps for good quality
+      });
+
+      const chunks: BlobPart[] = [];
+
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          chunks.push(event.data);
+        }
+      };
+
+      mediaRecorder.onstop = () => {
+        const blob = new Blob(chunks, { type: mimeType });
+        resolve(blob);
+      };
+
+      mediaRecorder.onerror = (event) => {
+        reject(new Error(`MediaRecorder error: ${event}`));
+      };
+
+      // Start recording
+      mediaRecorder.start();
+
+      // Stop recording when the audio finishes playing
+      setTimeout(() => {
+        mediaRecorder.stop();
+        source2.stop();
+      }, duration * 1000 + 100); // Add 100ms buffer
+    }).catch((error) => {
+      reject(error);
+    });
+  });
+}
+
+/**
+ * Load OGG Blob as AudioBuffer
+ * @param blob The OGG blob to load
+ * @returns Promise<AudioBuffer> The decoded AudioBuffer
+ */
+async function loadOGGBlob(blob: Blob): Promise<AudioBuffer> {
+  const arrayBuffer = await blob.arrayBuffer();
+  return getSharedAudioContext().decodeAudioData(arrayBuffer);
+}
 
 /**
  * Soft clipping function - shared across all processing paths
@@ -134,7 +213,7 @@ async function loadAudioBuffer(key: string): Promise<AudioBuffer | null> {
 /**
  * Hitsound Manager class
  * Pre-synthesizes hitsounds at load time for perfect timing
- * Falls back to real-time mode for very large hit counts
+ * Supports OGG compression to reduce memory usage
  */
 export class HitsoundManager {
   private hitsoundType: HitsoundType = 'Kick';
@@ -142,24 +221,37 @@ export class HitsoundManager {
   private enabled: boolean = true;
   private currentBuffer: AudioBuffer | null = null;
   private gainNode: GainNode | null = null;
-  
+
   // Pre-synthesized hitsound track
   private synthesizedBuffer: AudioBuffer | null = null;
   private synthesizedSource: AudioBufferSourceNode | null = null;
   private scheduledTimestamps: number[] = [];
   private totalDuration: number = 0;
-  
-  // Real-time playback mode
-  private useRealtimeMode: boolean = false;
-  private nextHitIndex: number = 0;
-  private playbackStartTime: number = 0;
-  private isPlaying: boolean = false;
-  private animationFrameId: number | null = null;
-  
-  constructor(hitsoundType: HitsoundType = 'Kick', volume: number = 100) {
+
+  // OGG compression
+  private useOGGCompression: boolean = false;
+  private compressedOGGBlob: Blob | null = null;
+  private compressedBuffer: AudioBuffer | null = null;
+
+  constructor(hitsoundType: HitsoundType = 'Kick', volume: number = 100, useOGGCompression: boolean = false) {
     this.hitsoundType = hitsoundType;
     this.volume = volume;
+    this.useOGGCompression = useOGGCompression;
     this.preloadHitsound(hitsoundType);
+  }
+
+  /**
+   * Set whether to use OGG compression for synthesized hitsounds
+   */
+  setOGGCompression(enabled: boolean): void {
+    this.useOGGCompression = enabled;
+  }
+
+  /**
+   * Check if OGG compression is enabled
+   */
+  isOGGCompressionEnabled(): boolean {
+    return this.useOGGCompression;
   }
   
   private getGainNode(): GainNode {
@@ -236,39 +328,18 @@ export class HitsoundManager {
    */
   async preSynthesize(timestamps: number[], totalDuration: number, onProgress?: (percent: number) => void): Promise<void> {
     console.log('[HitsoundManager] preSynthesize called, timestamps:', timestamps.length, 'duration:', totalDuration);
-    
+
     // Skip if disabled or hitsound type is None
     if (!this.enabled || this.hitsoundType === 'None') {
       console.log('[HitsoundManager] Skipping - enabled:', this.enabled, 'type:', this.hitsoundType);
       if (onProgress) onProgress(100);
       return;
     }
-    
-    // Store timestamps for both modes
+
+    // Store timestamps
     this.scheduledTimestamps = [...timestamps].sort((a, b) => a - b);
     this.totalDuration = totalDuration;
-    
-    // Check if we should use real-time mode for very large hit counts
-    if (this.scheduledTimestamps.length > REALTIME_MODE_THRESHOLD) {
-      console.log('[HitsoundManager] Using real-time mode for', this.scheduledTimestamps.length, 'hits (threshold:', REALTIME_MODE_THRESHOLD, ')');
-      this.useRealtimeMode = true;
-      this.synthesizedBuffer = null;
-      
-      // Wait for buffer to load if not ready
-      if (!this.currentBuffer) {
-        const key = hitsoundKeyMap[this.hitsoundType];
-        if (key) {
-          this.currentBuffer = await loadAudioBuffer(key);
-        }
-      }
-      
-      if (onProgress) onProgress(100);
-      console.log('[HitsoundManager] Real-time mode ready');
-      return;
-    }
-    
-    this.useRealtimeMode = false;
-    
+
     // Wait for buffer to load if not ready
     if (!this.currentBuffer) {
       console.log('[HitsoundManager] Waiting for buffer to load...');
@@ -488,6 +559,35 @@ export class HitsoundManager {
       if (onProgress) onProgress(100);
       console.log(`[HitsoundManager] Pre-synthesized ${placedCount} hitsounds in ${((performance.now() - startTime) / 1000).toFixed(2)}s, duration: ${totalDuration.toFixed(2)}s, gain: ${gainReduction.toFixed(3)}`);
     }
+
+    // Compress to OGG if enabled and buffer exists
+    if (this.useOGGCompression && this.synthesizedBuffer) {
+      try {
+        console.log('[HitsoundManager] Compressing hitsounds to OGG format...');
+        const compressionStartTime = performance.now();
+
+        this.compressedOGGBlob = await compressAudioBufferToOGG(this.synthesizedBuffer);
+
+        const compressionTime = (performance.now() - compressionStartTime) / 1000;
+        const originalSize = this.synthesizedBuffer.length * this.synthesizedBuffer.numberOfChannels * 4; // 4 bytes per sample
+        const compressedSize = this.compressedOGGBlob.size;
+        const compressionRatio = ((1 - compressedSize / originalSize) * 100).toFixed(1);
+
+        console.log(`[HitsoundManager] OGG compression complete in ${compressionTime.toFixed(2)}s`);
+        console.log(`[HitsoundManager] Original size: ${(originalSize / 1024 / 1024).toFixed(2)} MB, Compressed: ${(compressedSize / 1024 / 1024).toFixed(2)} MB (${compressionRatio}% reduction)`);
+
+        // Load compressed buffer for playback
+        this.compressedBuffer = await loadOGGBlob(this.compressedOGGBlob);
+
+        // Free up the large uncompressed buffer
+        this.synthesizedBuffer = null;
+
+        if (onProgress) onProgress(100);
+      } catch (error) {
+        console.error('[HitsoundManager] OGG compression failed, falling back to uncompressed:', error);
+        // Keep the uncompressed buffer if compression fails
+      }
+    }
   }
 
   /**
@@ -495,26 +595,41 @@ export class HitsoundManager {
    * @param delay Delay in seconds before starting playback
    */
   start(delay: number = 0): void {
-    console.log('[HitsoundManager] start called, delay:', delay, 'enabled:', this.enabled, 'realtimeMode:', this.useRealtimeMode);
-    
+    console.log('[HitsoundManager] start called, delay:', delay, 'enabled:', this.enabled);
+
     if (!this.enabled) {
       console.warn('[HitsoundManager] Cannot start - disabled');
       return;
     }
-    
+
     this.stop();
-    
+
     const ctx = getSharedAudioContext();
     if (ctx.state === 'suspended') {
       console.log('[HitsoundManager] Resuming suspended AudioContext');
       ctx.resume();
     }
-    
-    if (this.useRealtimeMode) {
-      // Real-time mode: use requestAnimationFrame to play hitsounds
-      this.startRealtimePlayback(delay);
+
+    if (this.compressedBuffer) {
+      // Pre-synthesized mode with OGG compression: play the compressed buffer
+      this.synthesizedSource = ctx.createBufferSource();
+      this.synthesizedSource.buffer = this.compressedBuffer;
+      this.synthesizedSource.connect(this.getGainNode());
+
+      this.synthesizedSource.onended = () => {
+        if (this.synthesizedSource) {
+          try {
+            this.synthesizedSource.disconnect();
+          } catch (e) {}
+          this.synthesizedSource = null;
+        }
+      };
+
+      const startTime = ctx.currentTime + delay;
+      console.log('[HitsoundManager] Starting compressed OGG playback at', startTime);
+      this.synthesizedSource.start(startTime);
     } else if (this.synthesizedBuffer) {
-      // Pre-synthesized mode: play the buffer
+      // Pre-synthesized mode: play the uncompressed buffer
       this.synthesizedSource = ctx.createBufferSource();
       this.synthesizedSource.buffer = this.synthesizedBuffer;
       this.synthesizedSource.connect(this.getGainNode());
@@ -537,97 +652,38 @@ export class HitsoundManager {
   }
 
   /**
-   * Start real-time playback mode
-   */
-  private startRealtimePlayback(delay: number): void {
-    console.log('[HitsoundManager] Starting real-time playback mode');
-    
-    const ctx = getSharedAudioContext();
-    this.isPlaying = true;
-    this.playbackStartTime = ctx.currentTime + delay;
-    this.nextHitIndex = 0;
-    
-    // Start the playback loop
-    this.scheduleHitsounds();
-  }
-
-  /**
-   * Schedule hitsounds in real-time using requestAnimationFrame
-   */
-  private scheduleHitsounds(): void {
-    if (!this.isPlaying || !this.currentBuffer) return;
-    
-    const ctx = getSharedAudioContext();
-    const currentTime = ctx.currentTime;
-    const elapsed = currentTime - this.playbackStartTime;
-    
-    // Look ahead 100ms and schedule hitsounds in that window
-    const lookAhead = 0.1;
-    
-    while (this.nextHitIndex < this.scheduledTimestamps.length) {
-      const hitTime = this.scheduledTimestamps[this.nextHitIndex];
-      
-      if (hitTime <= elapsed + lookAhead) {
-        // Schedule this hitsound
-        if (hitTime >= elapsed - 0.01) { // Small tolerance for already-passed hits
-          const playTime = this.playbackStartTime + hitTime;
-          
-          if (playTime >= currentTime) {
-            const source = ctx.createBufferSource();
-            source.buffer = this.currentBuffer;
-            const gainNode = this.getGainNode();
-            source.connect(gainNode);
-            
-            // Clean up this source after it finishes playing to avoid bloating the audio graph
-            source.onended = () => {
-              try {
-                source.disconnect(gainNode);
-              } catch {
-                // Ignore disconnect errors (e.g., if already disconnected)
-              }
-            };
-            
-            source.start(playTime);
-          }
-        }
-        this.nextHitIndex++;
-      } else {
-        break;
-      }
-    }
-    
-    // Continue scheduling if not finished
-    if (this.isPlaying && this.nextHitIndex < this.scheduledTimestamps.length) {
-      this.animationFrameId = requestAnimationFrame(() => this.scheduleHitsounds());
-    } else {
-      this.isPlaying = false;
-      console.log('[HitsoundManager] Real-time playback finished');
-    }
-  }
-
-  /**
    * Start playing from a specific offset (for resume after pause)
    * @param offset Offset in seconds from the beginning of the track
    */
   startAtOffset(offset: number): void {
     if (!this.enabled) return;
-    
+
     this.stop();
-    
+
     const ctx = getSharedAudioContext();
     if (ctx.state === 'suspended') ctx.resume();
-    
-    if (this.useRealtimeMode) {
-      // Real-time mode: start from offset
-      this.isPlaying = true;
-      this.playbackStartTime = ctx.currentTime - offset;
-      
-      // Find the starting index
-      this.nextHitIndex = this.scheduledTimestamps.findIndex(t => t >= offset);
-      if (this.nextHitIndex < 0) this.nextHitIndex = this.scheduledTimestamps.length;
-      
-      this.scheduleHitsounds();
+
+    if (this.compressedBuffer) {
+      // Compressed OGG mode
+      this.synthesizedSource = ctx.createBufferSource();
+      this.synthesizedSource.buffer = this.compressedBuffer;
+      this.synthesizedSource.connect(this.getGainNode());
+
+      this.synthesizedSource.onended = () => {
+        if (this.synthesizedSource) {
+          try {
+            this.synthesizedSource.disconnect();
+          } catch (e) {}
+          this.synthesizedSource = null;
+        }
+      };
+
+      const remainingDuration = this.compressedBuffer.duration - offset;
+      if (remainingDuration > 0) {
+        this.synthesizedSource.start(0, offset, remainingDuration);
+      }
     } else if (this.synthesizedBuffer) {
+      // Uncompressed mode
       this.synthesizedSource = ctx.createBufferSource();
       this.synthesizedSource.buffer = this.synthesizedBuffer;
       this.synthesizedSource.connect(this.getGainNode());
@@ -652,13 +708,6 @@ export class HitsoundManager {
    * Stop playing
    */
   stop(): void {
-    // Stop real-time playback
-    this.isPlaying = false;
-    if (this.animationFrameId !== null) {
-      cancelAnimationFrame(this.animationFrameId);
-      this.animationFrameId = null;
-    }
-    
     // Stop pre-synthesized playback
     if (this.synthesizedSource) {
       try {
@@ -670,12 +719,12 @@ export class HitsoundManager {
   }
 
   /**
-   * Check if hitsounds are pre-synthesized or ready for real-time playback
+   * Check if hitsounds are pre-synthesized
    */
   isSynthesized(): boolean {
-    return this.synthesizedBuffer !== null || (this.useRealtimeMode && this.currentBuffer !== null);
+    return this.synthesizedBuffer !== null || this.compressedBuffer !== null;
   }
-  
+
   /**
    * Dispose and clear
    */
@@ -683,9 +732,9 @@ export class HitsoundManager {
     this.stop();
     this.currentBuffer = null;
     this.synthesizedBuffer = null;
+    this.compressedBuffer = null;
+    this.compressedOGGBlob = null;
     this.scheduledTimestamps = [];
     this.gainNode = null;
-    this.useRealtimeMode = false;
-    this.isPlaying = false;
   }
 }

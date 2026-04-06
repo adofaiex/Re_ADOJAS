@@ -76,6 +76,18 @@ export default function SettingsPage() {
           type: "useWorker",
         },
         {
+          id: "hitsoundEnabled",
+          title: t("settings.hitsoundEnabled.title"),
+          description: t("settings.hitsoundEnabled.description"),
+          type: "hitsoundEnabled",
+        },
+        {
+          id: "showStats",
+          title: t("settings.showStats.title"),
+          description: t("settings.showStats.description"),
+          type: "showStats",
+        },
+        {
           id: "targetFramerate",
           title: t("settings.targetFramerate.title"),
           description: t("settings.targetFramerate.description"),
@@ -86,6 +98,12 @@ export default function SettingsPage() {
           title: t("settings.loadMethod.title"),
           description: t("settings.loadMethod.description"),
           type: "loadMethod",
+        },
+        {
+          id: "useOGGCompression",
+          title: t("settings.useOGGCompression.title"),
+          description: t("settings.useOGGCompression.description"),
+          type: "useOGGCompression",
         },
       ],
     },
@@ -306,6 +324,46 @@ export default function SettingsPage() {
                     </div>
                   )}
 
+                  {setting.type === "hitsoundEnabled" && (
+                    <div className="flex items-center gap-3">
+                      <button
+                        onClick={() => updateSettings({ hitsoundEnabled: !settings.hitsoundEnabled })}
+                        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                          settings.hitsoundEnabled ? "bg-purple-500" : "bg-slate-300 dark:bg-slate-600"
+                        }`}
+                      >
+                        <span
+                          className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                            settings.hitsoundEnabled ? "translate-x-6" : "translate-x-1"
+                          }`}
+                        />
+                      </button>
+                      <span className="text-sm text-slate-600 dark:text-slate-400">
+                        {settings.hitsoundEnabled ? t("settings.hitsoundEnabled.enabled") : t("settings.hitsoundEnabled.disabled")}
+                      </span>
+                    </div>
+                  )}
+
+                  {setting.type === "showStats" && (
+                    <div className="flex items-center gap-3">
+                      <button
+                        onClick={() => updateSettings({ showStats: !settings.showStats })}
+                        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                          settings.showStats ? "bg-purple-500" : "bg-slate-300 dark:bg-slate-600"
+                        }`}
+                      >
+                        <span
+                          className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                            settings.showStats ? "translate-x-6" : "translate-x-1"
+                          }`}
+                        />
+                      </button>
+                      <span className="text-sm text-slate-600 dark:text-slate-400">
+                        {settings.showStats ? t("settings.showStats.statsjs") : t("settings.showStats.default")}
+                      </span>
+                    </div>
+                  )}
+
                   {setting.type === "targetFramerate" && (
                     <Select value={settings.targetFramerate} onValueChange={(value: any) => updateSettings({ targetFramerate: value })}>
                       <SelectTrigger className="bg-white dark:bg-slate-700 border-slate-200 dark:border-slate-600 text-slate-900 dark:text-white w-full sm:w-48 hover:bg-slate-50 dark:hover:bg-slate-600 focus:border-purple-500 dark:focus:border-purple-400 focus:ring-purple-500/20 dark:focus:ring-purple-400/20">
@@ -357,6 +415,26 @@ export default function SettingsPage() {
                         </SelectItem>
                       </SelectContent>
                     </Select>
+                  )}
+
+                  {setting.type === "useOGGCompression" && (
+                    <div className="flex items-center gap-3">
+                      <button
+                        onClick={() => updateSettings({ useOGGCompression: !settings.useOGGCompression })}
+                        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                          settings.useOGGCompression ? "bg-purple-500" : "bg-slate-300 dark:bg-slate-600"
+                        }`}
+                      >
+                        <span
+                          className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                            settings.useOGGCompression ? "translate-x-6" : "translate-x-1"
+                          }`}
+                        />
+                      </button>
+                      <span className="text-sm text-slate-600 dark:text-slate-400">
+                        {settings.useOGGCompression ? t("settings.useOGGCompression.enabled") : t("settings.useOGGCompression.disabled")}
+                      </span>
+                    </div>
                   )}
                 </div>
               ))}

@@ -21,10 +21,9 @@ const createCircle = (
     color: Color,
     vertices: number[],
     faces: number[],
-    colors: number[],
-    resolution: number = 32
+    colors: number[]
 ) => {
-    if (resolution <= 0) resolution = 32;
+    const resolution = 32;
 
     const centerIndex = vertices.length / 3;
 

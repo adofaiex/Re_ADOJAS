@@ -172,6 +172,12 @@ export const translations = {
         async: "异步（推荐）",
         worker: "Worker（后台线程）",
       },
+      useOGGCompression: {
+        title: "OGG 压缩",
+        description: "将预合成的打击音压缩为 OGG 格式以减少内存占用（可能影响音质）",
+        enabled: "已启用",
+        disabled: "已禁用",
+      },
       themePreview: {
         title: "主题预览",
       },

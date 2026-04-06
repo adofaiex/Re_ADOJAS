@@ -110,8 +110,9 @@ export function useEditorState() {
       player.setHitsoundEnabled(settings.hitsoundEnabled)
       player.setUseWorker(settings.useWorker)
       player.setTargetFramerate(settings.targetFramerate)
+      player.setOGGCompression(settings.useOGGCompression)
       player.setStatsPanel(settings.showStats)
-      
+
       // Only set stats callback if not using stats.js
       if (!settings.showStats) {
         player.setStatsCallback((stats) => {
@@ -139,6 +140,54 @@ export function useEditorState() {
       previewerRef.current = player
     }
   }, [settings])
+
+  // Apply settings changes to existing player in real-time
+  useEffect(() => {
+    const player = previewerRef.current
+    if (player) {
+      player.setRenderer(settings.renderer)
+      player.setRenderMethod(settings.renderMethod)
+      player.setShowTrail(settings.showTrail)
+      player.setHitsoundEnabled(settings.hitsoundEnabled)
+      player.setUseWorker(settings.useWorker)
+      player.setTargetFramerate(settings.targetFramerate)
+      player.setOGGCompression(settings.useOGGCompression)
+      player.setStatsPanel(settings.showStats)
+
+      // Only set stats callback if not using stats.js
+      if (!settings.showStats) {
+        player.setStatsCallback((stats) => {
+          if (fpsCounterRef.current) {
+            fpsCounterRef.current.textContent = `FPS  ${stats.fps.toFixed(2)}`
+          }
+          const metrics = updateMetrics({
+            tileIndex: stats.tileIndex,
+            elapsedTime: stats.time,
+            totalTiles: stats.totalTiles,
+            tileBPM: stats.tileBPM,
+            tileStartTimes: stats.tileStartTimes,
+          })
+          if (metrics && infoRef.current) {
+            metricsRef.current = metrics
+            const html = renderMetricsHTML(metrics)
+            if (html !== lastMetricsHTMLRef.current) {
+              lastMetricsHTMLRef.current = html
+              infoRef.current.innerHTML = html
+            }
+          }
+        })
+      }
+    }
+  }, [
+    settings.renderer,
+    settings.renderMethod,
+    settings.showTrail,
+    settings.hitsoundEnabled,
+    settings.useWorker,
+    settings.targetFramerate,
+    settings.showStats,
+    updateMetrics,
+  ])
 
   // File handlers
   const { handleFileLoad, handleAudioLoad, handleVideoLoad, handleDecorationLoad, handleBGImageLoad, handleExport } = useFileHandlers({
