@@ -256,11 +256,17 @@ export class MoveTrackManager {
 
     /**
      * Process a single MoveTrack event
+     * Based on official ffxMoveFloorPlus.StartEffect() logic
+     * Key improvements:
+     * - Kill individual property tweens instead of all tweens
+     * - Use tileInitialStates as base for calculations (like startPos in official)
+     * - Check approximate values to avoid unnecessary tweens
+     * - Handle NaN values properly for optional properties
      */
     private processMoveTrackEvent(event: any, currentTime: number): void {
         if (!this.tiles) return;
 
-        console.log(`[MoveTrackManager] Processing MoveTrack event at currentTime=${currentTime.toFixed(3)}s, event.startTime=${event.startTime.toFixed(3)}s}`);
+        console.log(`[MoveTrackManager] Processing MoveTrack event at currentTime=${currentTime.toFixed(3)}s`);
 
         // Parse tile range
         const startTile = this.parseTileReference(event.startTile, event.floor);
@@ -279,10 +285,11 @@ export class MoveTrackManager {
         const scale = event.scale || [100, 100];
         const opacity = event.opacity !== undefined ? event.opacity / 100 : 1;
 
-        // Check if planet should follow this track (default true)
-        const follow = event.follow !== false; // Default to true
-
-        console.log(`[MoveTrackManager] Animating tiles ${start}-${end}, duration=${duration.toFixed(3)}s, ease=${ease}, follow=${follow}`);
+        // Check which properties are actually used (not disabled)
+        const positionUsed = positionOffset[0] !== 0 || positionOffset[1] !== 0;
+        const rotationUsed = rotationOffset !== 0;
+        const scaleUsed = scale[0] !== 100 || scale[1] !== 100;
+        const opacityUsed = opacity !== 1;
 
         // Store active MoveTrack for planet following
         const moveTrackId = this.activeMoveTracks.size;
@@ -296,6 +303,9 @@ export class MoveTrackManager {
             ease
         });
 
+        // Get easing function once
+        const easingFunc = this.getEasingFunction(ease);
+
         // Apply animation to tiles in range
         for (let i = start; i <= end; i += 1 + gapLength) {
             const tileId = i.toString();
@@ -303,107 +313,183 @@ export class MoveTrackManager {
 
             if (!tileMesh) continue;
 
-            // Get current tile state as start state for this animation
-            const startPos = tileMesh.position.clone();
-            const startRot = tileMesh.rotation.clone() as THREE.Euler;
-            const startScale = tileMesh.scale.clone();
+            // Get or create animation state
+            let state = this.tileAnimationStates.get(i);
+            if (!state) {
+                state = {
+                    startPos: tileMesh.position.clone(),
+                    startRot: tileMesh.rotation.clone() as THREE.Euler,
+                    startScale: tileMesh.scale.clone(),
+                    startOpacity: 1,
+                    tweens: new Map()
+                };
+                this.tileAnimationStates.set(i, state);
+            }
 
-            // Kill existing tweens for this tile
-            if (this.tileAnimationStates.has(i)) {
-                const state = this.tileAnimationStates.get(i)!;
-                state.tweens.forEach(tween => {
-                    if (tween.tween) {
-                        tween.tween.stop();
+            // Get initial state for this tile (used as base like in official code)
+            const initialState = this.tileInitialStates.get(i);
+            const tileBasePos = initialState ? initialState.position : state.startPos;
+            const tileBaseRot = initialState ? initialState.rotation.z : state.startRot.z;
+            const tileBaseScale = initialState ? initialState.scale : state.startScale;
+
+            // Position animation - following official logic
+            if (positionUsed) {
+                const targetX = tileBasePos.x + positionOffset[0];
+                const targetY = tileBasePos.y + positionOffset[1];
+
+                // Kill old positionX tween if exists
+                if (state.tweens.has('positionX')) {
+                    const oldTween = state.tweens.get('positionX');
+                    if (oldTween?.tween?.frameId) {
+                        cancelAnimationFrame(oldTween.tween.frameId);
                     }
-                });
-                state.tweens.clear();
+                }
+
+                // Only create new tween if target differs from current (approximate check)
+                if (!this.approximatelyEqual(tileMesh.position.x, targetX)) {
+                    this.animateProperty(
+                        tileMesh,
+                        'positionX',
+                        tileMesh.position.x,
+                        targetX,
+                        duration,
+                        easingFunc,
+                        state
+                    );
+                }
+
+                // Kill old positionY tween if exists
+                if (state.tweens.has('positionY')) {
+                    const oldTween = state.tweens.get('positionY');
+                    if (oldTween?.tween?.frameId) {
+                        cancelAnimationFrame(oldTween.tween.frameId);
+                    }
+                }
+
+                // Only create new tween if target differs from current
+                if (!this.approximatelyEqual(tileMesh.position.y, targetY)) {
+                    this.animateProperty(
+                        tileMesh,
+                        'positionY',
+                        tileMesh.position.y,
+                        targetY,
+                        duration,
+                        easingFunc,
+                        state
+                    );
+                }
             }
 
-            // Create new animation state
-            const state = {
-                startPos,
-                startRot,
-                startScale,
-                startOpacity: 1,
-                tweens: new Map()
-            };
-            this.tileAnimationStates.set(i, state);
+            // Rotation animation
+            if (rotationUsed) {
+                // Convert rotation offset from degrees to radians
+                const rotationOffsetRad = rotationOffset * Math.PI / 180;
+                const targetRot = tileBaseRot + rotationOffsetRad;
 
-            // Calculate target values
-            const targetX = startPos.x + positionOffset[0];
-            const targetY = startPos.y + positionOffset[1];
-            // Convert rotationOffset from degrees to radians
-            const targetRot = startRot.z + (rotationOffset * Math.PI / 180);
-            const targetScaleX = scale[0] / 100;
-            const targetScaleY = scale[1] / 100;
+                console.log(`[MoveTrackManager] Tile ${i} rotation: base=${(tileBaseRot * 180 / Math.PI).toFixed(1)}°, offset=${rotationOffset}°, target=${(targetRot * 180 / Math.PI).toFixed(1)}°, current=${(tileMesh.rotation.z * 180 / Math.PI).toFixed(1)}°`);
 
-            // Get easing function
-            const easingFunc = this.getEasingFunction(ease);
+                // Kill old rotation tween if exists
+                if (state.tweens.has('rotation')) {
+                    const oldTween = state.tweens.get('rotation');
+                    if (oldTween?.tween?.frameId) {
+                        cancelAnimationFrame(oldTween.tween.frameId);
+                    }
+                    state.tweens.delete('rotation');
+                }
 
-            // Animate position X
-            if (positionOffset[0] !== 0) {
-                this.animateProperty(
-                    tileMesh,
-                    'positionX',
-                    state.startPos.x,
-                    targetX,
-                    duration,
-                    easingFunc,
-                    state
-                );
+                // For rotation comparison, normalize angles to -π to π range
+                // This prevents issues with angle wraparound (e.g., -π ≈ π)
+                const normalizedCurrent = this.normalizeAngle(tileMesh.rotation.z);
+                const normalizedTarget = this.normalizeAngle(targetRot);
+                const angleDiff = Math.abs(normalizedCurrent - normalizedTarget);
+
+                // Only create new tween if target differs from current
+                if (!this.approximatelyEqual(normalizedCurrent, normalizedTarget, 0.001)) {
+                    console.log(`[MoveTrackManager] Tile ${i} starting rotation animation: ${angleDiff * 180 / Math.PI}° change`);
+                    this.animateProperty(
+                        tileMesh,
+                        'rotation',
+                        tileMesh.rotation.z,
+                        targetRot,
+                        duration,
+                        easingFunc,
+                        state
+                    );
+                } else {
+                    console.log(`[MoveTrackManager] Tile ${i} rotation already at target, skipping animation`);
+                }
             }
 
-            // Animate position Y
-            if (positionOffset[1] !== 0) {
-                this.animateProperty(
-                    tileMesh,
-                    'positionY',
-                    state.startPos.y,
-                    targetY,
-                    duration,
-                    easingFunc,
-                    state
-                );
+            // Scale animation
+            if (scaleUsed) {
+                const targetScaleX = scale[0] / 100;
+                const targetScaleY = scale[1] / 100;
+
+                // Handle scaleX
+                if (scale[0] !== 100) {
+                    if (state.tweens.has('scaleX')) {
+                        const oldTween = state.tweens.get('scaleX');
+                        if (oldTween?.tween?.frameId) {
+                            cancelAnimationFrame(oldTween.tween.frameId);
+                        }
+                    }
+
+                    if (!this.approximatelyEqual(tileMesh.scale.x, targetScaleX)) {
+                        this.animateProperty(
+                            tileMesh,
+                            'scaleX',
+                            tileMesh.scale.x,
+                            targetScaleX,
+                            duration,
+                            easingFunc,
+                            state
+                        );
+                    }
+                }
+
+                // Handle scaleY
+                if (scale[1] !== 100) {
+                    if (state.tweens.has('scaleY')) {
+                        const oldTween = state.tweens.get('scaleY');
+                        if (oldTween?.tween?.frameId) {
+                            cancelAnimationFrame(oldTween.tween.frameId);
+                        }
+                    }
+
+                    if (!this.approximatelyEqual(tileMesh.scale.y, targetScaleY)) {
+                        this.animateProperty(
+                            tileMesh,
+                            'scaleY',
+                            tileMesh.scale.y,
+                            targetScaleY,
+                            duration,
+                            easingFunc,
+                            state
+                        );
+                    }
+                }
             }
 
-            // Animate rotation
-            if (rotationOffset !== 0) {
-                this.animateProperty(
-                    tileMesh,
-                    'rotation',
-                    state.startRot.z,
-                    targetRot,
-                    duration,
-                    easingFunc,
-                    state
-                );
-            }
+            // Opacity animation
+            if (opacityUsed) {
+                if (state.tweens.has('opacity')) {
+                    const oldTween = state.tweens.get('opacity');
+                    if (oldTween?.tween?.frameId) {
+                        cancelAnimationFrame(oldTween.tween.frameId);
+                    }
+                }
 
-            // Animate scale
-            if (scale[0] !== 100 || scale[1] !== 100) {
-                this.animateProperty(
-                    tileMesh,
-                    'scale',
-                    1,
-                    targetScaleX,
-                    duration,
-                    easingFunc,
-                    state,
-                    { scaleY: targetScaleY }
-                );
-            }
-
-            // Animate opacity (if material supports it)
-            if (opacity !== 1) {
-                this.animateProperty(
-                    tileMesh,
-                    'opacity',
-                    1,
-                    opacity,
-                    duration,
-                    easingFunc,
-                    state
-                );
+                if (!this.approximatelyEqual(tileMesh.userData.opacity || 1, opacity)) {
+                    this.animateProperty(
+                        tileMesh,
+                        'opacity',
+                        tileMesh.userData.opacity || 1,
+                        opacity,
+                        duration,
+                        easingFunc,
+                        state
+                    );
+                }
             }
         }
     }
@@ -426,6 +512,28 @@ export class MoveTrackManager {
         }
 
         return Number(ref) || currentFloor;
+    }
+
+    /**
+     * Normalize angle to -π to π range
+     * Prevents issues with angle wraparound (e.g., -π and π are the same rotation)
+     */
+    private normalizeAngle(angle: number): number {
+        let normalized = angle % (2 * Math.PI);
+        if (normalized > Math.PI) {
+            normalized -= 2 * Math.PI;
+        } else if (normalized < -Math.PI) {
+            normalized += 2 * Math.PI;
+        }
+        return normalized;
+    }
+
+    /**
+     * Check if two values are approximately equal (with epsilon tolerance)
+     * Matches Unity's Mathf.Approximately logic
+     */
+    private approximatelyEqual(a: number, b: number, epsilon: number = 1e-5): boolean {
+        return Math.abs(a - b) < epsilon;
     }
 
     /**

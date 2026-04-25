@@ -1690,10 +1690,9 @@ export class Player implements IPlayer {
           mesh.rotation.z = transform.rotation * (Math.PI / 180);
           mesh.scale.copy(transform.scale);
           
-          if ((mesh.material as any).transparent !== undefined) {
+          if ((mesh.material as any).opacity !== undefined) {
             const opacity = transform.opacity < 1 ? transform.opacity : 1;
             (mesh.material as any).opacity = opacity;
-            (mesh.material as any).transparent = transform.opacity < 1;
           }
         }
       });
@@ -1725,8 +1724,6 @@ export class Player implements IPlayer {
         mesh.rotation.z = transform.rotation * (Math.PI / 180);
         mesh.scale.copy(transform.scale);
         
-        // Note: Don't modify transparent property as our shader handles transparency
-        // The icon plane uses alpha channel for transparency
         if ((mesh.material as any).opacity !== undefined) {
           const opacity = transform.opacity < 1 ? transform.opacity : 1;
           (mesh.material as any).opacity = opacity;

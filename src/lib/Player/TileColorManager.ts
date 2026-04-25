@@ -6,14 +6,7 @@ import * as THREE from 'three';
  * active: false | "Disabled" -> inactive (skip event)
  */
 export const isEventActive = (event: any): boolean => {
-    if (event.active === undefined) return true;
-    if (event.active === true) return true;
-    if (event.active === "") return true;
-    if (event.active === "Enabled") return true;
-    if (event.active === false) return false;
-    if (event.active === "Disabled") return false;
-    // Default to active for unknown values
-    return true;
+    return ![false, "Disabled"].includes(event.active);
 };
 
 /**
@@ -30,12 +23,25 @@ export interface TileColorConfig {
 }
 
 /**
+ * Volume pulse data - stores amplitude for each tile
+ * Used when trackColorType is "Volume" and trackColorPulse is not "None"
+ */
+export interface VolumePulseData {
+    startFloor: number;
+    pulseLength: number;
+    amplitudes: number[]; // amplitudes[i] represents the volume at (startFloor + i)
+}
+
+/**
  * Manager for tile colors and color events
  */
 export class TileColorManager {
     private tileColors: { color: string, secondaryColor: string }[] = [];
     private tileRecolorConfigs: (TileColorConfig | null)[] = [];
     private levelData: any;
+    
+    // Volume pulse data storage - maps tile index to its volume amplitude
+    private volumePulseMap: Map<number, number> = new Map();
     
     constructor(levelData: any) {
         this.levelData = levelData;
@@ -163,6 +169,47 @@ export class TileColorManager {
     }
 
     /**
+     * Set volume amplitude for a specific tile
+     * Used for Volume color type with pulse effects
+     * 
+     * @param floor Tile index
+     * @param amplitude Volume amplitude (0-1)
+     */
+    public setVolumePulseAmplitude(floor: number, amplitude: number): void {
+        this.volumePulseMap.set(floor, Math.max(0, Math.min(1, amplitude)));
+    }
+
+    /**
+     * Get volume amplitude for a specific tile
+     * 
+     * @param floor Tile index
+     * @returns Volume amplitude (0-1), defaults to 0
+     */
+    public getVolumePulseAmplitude(floor: number): number {
+        return this.volumePulseMap.get(floor) ?? 0;
+    }
+
+    /**
+     * Clear all volume pulse data
+     */
+    public clearVolumePulseData(): void {
+        this.volumePulseMap.clear();
+    }
+
+    /**
+     * Set volume pulse data from amplitude array
+     * This allows batch setting of amplitudes based on pulse pattern
+     * 
+     * @param startFloor Starting tile index
+     * @param amplitudes Array of amplitudes indexed from startFloor
+     */
+    public setVolumePulseArray(startFloor: number, amplitudes: number[]): void {
+        amplitudes.forEach((amp, index) => {
+            this.setVolumePulseAmplitude(startFloor + index, amp);
+        });
+    }
+
+    /**
      * Process position relative keywords
      */
     /**
@@ -245,6 +292,11 @@ export class TileColorManager {
 
     /**
      * Core tile color renderer based on trackColorType
+     * Uses official ADOFAI pulse formula for accurate animation
+     * 
+     * For Volume color type:
+     * - If trackColorPulse is "None": uses provided amplitude parameter
+     * - If trackColorPulse is "Forward" or "Backward": uses volumePulseMap for tile-specific amplitudes
      */
     public getTileRenderer(id: number, time: number, rct: TileColorConfig, amplitude?: number): { color: string, bgcolor: string } {
         const {
@@ -259,15 +311,30 @@ export class TileColorManager {
         const isNeon = trackStyle === "Neon";
         const isNeonLight = trackStyle === "NeonLight";
 
-        // Calculate pulse offset based on tile ID (matches ADOFAI logic)
-        let pulseOffset = 0;
-        if (trackColorPulse === "Forward") {
-            pulseOffset = (1 - (id % trackPulseLength) / trackPulseLength) * trackColorAnimDuration;
+        // Calculate pulse percentage using official ADOFAI formula
+        // Based on ffxRecolorFloorPlus.StartEffect() logic
+        let pulsePercent = 0;
+        
+        if (trackColorType === "Stripes") {
+            // Stripes uses tile position modulo for alternation
+            pulsePercent = (id % trackPulseLength) / trackPulseLength;
+        } else if (trackColorPulse === "None") {
+            // Simple time-based pulse
+            pulsePercent = (time % trackColorAnimDuration) / trackColorAnimDuration;
+        } else if (trackColorPulse === "Forward") {
+            // Forward pulse using official formula:
+            // specialTimeOffset = (1 - 1/pulseLength * (id % pulseLength)) * animDuration
+            const specialTimeOffset = (1 - (1 / trackPulseLength) * (id % trackPulseLength)) * trackColorAnimDuration;
+            pulsePercent = ((time - specialTimeOffset) % trackColorAnimDuration) / trackColorAnimDuration;
         } else if (trackColorPulse === "Backward") {
-            pulseOffset = ((id % trackPulseLength) / trackPulseLength) * trackColorAnimDuration;
+            // Backward pulse using official formula:
+            // specialTimeOffset = 1/pulseLength * (id % pulseLength) * animDuration
+            const specialTimeOffset = (1 / trackPulseLength) * (id % trackPulseLength) * trackColorAnimDuration;
+            pulsePercent = ((time - specialTimeOffset) % trackColorAnimDuration) / trackColorAnimDuration;
         }
 
-        const effectiveTime = time + pulseOffset;
+        // Normalize to 0-1 range for calculations
+        pulsePercent = (pulsePercent % 1 + 1) % 1;
 
         // A. Single - Solid color
         if (trackColorType === "Single") {
@@ -304,53 +371,65 @@ export class TileColorManager {
             shouldDraw = 1;
         }
 
-        // C. Glow - Pulsing glow effect (matches ADOFAI ColorFloor logic)
+        // C. Glow - Pulsing glow effect with intensity modulation
         else if (trackColorType === "Glow") {
-            const t = 0.5 * Math.sin(Math.PI * 2 * effectiveTime / trackColorAnimDuration) + 0.5;
-
-            // Glow uses white base with color overlay
-            const glowColor = this.genColor("#ffffff", secondaryTrackColor, t);
+            // ColorType.js formula: p = 1 - Math.abs(1 - 2 * percent)
+            // Creates a smooth pulsing effect from 0 to 1 back to 0
+            const p = 1 - Math.abs(1 - 2 * pulsePercent);
+            
+            // Glow blends between trackColor and secondaryTrackColor
+            // The intensity modulation makes the glow more dynamic
+            const glowIntensity = 0.5 + p * 0.5;  // Range: 0.5 to 1.0
+            const glowColor = this.genColor(trackColor, secondaryTrackColor, p);
+            
+            // Apply intensity modulation to the glow color
+            const modulated = this.modulateColorIntensity(glowColor, glowIntensity);
 
             if (isNeon) {
                 // Neon: black fill, glowing border
                 renderer_tileClientColor.color = "#000000";
-                renderer_tileClientColor.bgcolor = glowColor;
+                renderer_tileClientColor.bgcolor = modulated;
             } else if (isNeonLight) {
-                // NeonLight: lighter fill, glowing border
-                renderer_tileClientColor.color = glowColor;
-                renderer_tileClientColor.bgcolor = glowColor;
+                // NeonLight: color fill with glow effect
+                renderer_tileClientColor.color = modulated;
+                renderer_tileClientColor.bgcolor = modulated;
             } else {
                 // Standard: colored fill with glow
-                renderer_tileClientColor.color = glowColor;
-                renderer_tileClientColor.bgcolor = this.processHexColor(trackColor)[1];
+                renderer_tileClientColor.color = modulated;
+                renderer_tileClientColor.bgcolor = this.processHexColor(modulated)[1];
             }
             shouldDraw = 1;
         }
 
-        // D. Blink - On/off blinking
+        // D. Blink - Smooth blinking between two colors (matches ColorType.js logic)
         else if (trackColorType === "Blink") {
-            const t = (effectiveTime / trackColorAnimDuration) % 1;
-            // Sharp transition at 0.5
-            const isOn = t < 0.5;
+            // ColorType.js uses smooth RGB interpolation between colors
+            // pulsePercent ranges 0-1, we use it to smoothly transition
+            const blinkColor = this.genColor(trackColor, secondaryTrackColor, pulsePercent);
 
             if (isNeon) {
                 renderer_tileClientColor.color = "#000000";
-                renderer_tileClientColor.bgcolor = isOn ? secondaryTrackColor : trackColor;
+                renderer_tileClientColor.bgcolor = blinkColor;
+            } else if (isNeonLight) {
+                renderer_tileClientColor.color = this.processHexColor(blinkColor)[0];
+                renderer_tileClientColor.bgcolor = blinkColor;
             } else {
-                renderer_tileClientColor.color = isOn ? secondaryTrackColor : trackColor;
-                renderer_tileClientColor.bgcolor = this.processHexColor(renderer_tileClientColor.color)[1];
+                renderer_tileClientColor.color = blinkColor;
+                renderer_tileClientColor.bgcolor = this.processHexColor(blinkColor)[1];
             }
             shouldDraw = 1;
         }
 
-        // E. Switch - Switch between two colors
+        // E. Switch - Smooth switching between two colors (matches ColorType.js logic)
         else if (trackColorType === "Switch") {
-            const t = (effectiveTime / trackColorAnimDuration) % 1;
-            // Smooth transition
-            const switchColor = this.genColor(trackColor, secondaryTrackColor, t);
+            // ColorType.js uses genColor for smooth transitions
+            const switchColor = this.genColor(trackColor, secondaryTrackColor, pulsePercent);
 
             if (isNeon) {
                 renderer_tileClientColor.color = "#000000";
+                renderer_tileClientColor.bgcolor = switchColor;
+            } else if (isNeonLight) {
+                renderer_tileClientColor.color = this.processHexColor(switchColor)[0];
                 renderer_tileClientColor.bgcolor = switchColor;
             } else {
                 renderer_tileClientColor.color = switchColor;
@@ -359,28 +438,38 @@ export class TileColorManager {
             shouldDraw = 1;
         }
 
-        // F. Rainbow - HSV rainbow animation
+        // F. Rainbow - Rainbow animation through full color spectrum
         else if (trackColorType === "Rainbow") {
-            const hue = (effectiveTime / trackColorAnimDuration) % 1;
-            const color = new THREE.Color().setHSL(hue, 0.8, 0.6);
-            const rainbowHex = '#' + color.getHexString();
+            // Use enriched Rainbow logic based on official ADOFAI HSV handling
+            // Cycles through full hue spectrum with preserved saturation and value
+            const rainbowColor = this.rainbowColorFromHSV(trackColor, secondaryTrackColor, pulsePercent);
 
             if (isNeon) {
                 renderer_tileClientColor.color = "#000000";
-                renderer_tileClientColor.bgcolor = rainbowHex;
+                renderer_tileClientColor.bgcolor = rainbowColor;
             } else if (isNeonLight) {
-                renderer_tileClientColor.color = this.processHexColor(rainbowHex)[0];
-                renderer_tileClientColor.bgcolor = rainbowHex;
+                renderer_tileClientColor.color = this.processHexColor(rainbowColor)[0];
+                renderer_tileClientColor.bgcolor = rainbowColor;
             } else {
-                renderer_tileClientColor.color = rainbowHex;
-                renderer_tileClientColor.bgcolor = this.processHexColor(rainbowHex)[1];
+                renderer_tileClientColor.color = rainbowColor;
+                renderer_tileClientColor.bgcolor = this.processHexColor(rainbowColor)[1];
             }
             shouldDraw = 1;
         }
 
         // G. Volume - Audio amplitude based
         else if (trackColorType === "Volume") {
-            const amp = amplitude || 0;
+            // Get amplitude based on pulse type
+            let amp = 0;
+            if (trackColorPulse === "None") {
+                // Use provided amplitude (real-time audio data)
+                amp = amplitude || 0;
+            } else if (trackColorPulse === "Forward" || trackColorPulse === "Backward") {
+                // Use pre-computed volume pulse data from volumePulseMap
+                // This allows volume to be baked per-tile for pulse effects
+                amp = this.getVolumePulseAmplitude(id);
+            }
+            
             // Volume modulates lightness
             const baseColor = isNeon ? secondaryTrackColor : trackColor;
             const color = new THREE.Color(baseColor);
@@ -400,7 +489,8 @@ export class TileColorManager {
             shouldDraw = 1;
         }
 
-        // H. Default fallback
+        // H. Default fallback for unsupported or custom color types
+        // This includes types not in ColorType.js that may be added by mods or future updates
         if (shouldDraw === 0) {
             renderer_tileClientColor.color = trackColor;
             renderer_tileClientColor.bgcolor = secondaryTrackColor;
@@ -408,6 +498,64 @@ export class TileColorManager {
         }
 
         return renderer_tileClientColor;
+    }
+
+    /**
+     * List of supported color types
+     * Note: Some types like "Volume" have special handling for pulse effects
+     */
+    public static readonly SUPPORTED_COLOR_TYPES = [
+        "Single",       // Solid color
+        "Stripes",      // Alternating tile colors
+        "Glow",         // Pulsing glow effect
+        "Blink",        // On/off blinking
+        "Switch",       // Smooth color transition
+        "Rainbow",      // HSV rainbow animation
+        "Volume"        // Audio amplitude based (with pulse support)
+    ];
+
+    /**
+     * Validate if a color type is supported
+     * Returns true for standard types and any unrecognized types (for forward compatibility)
+     */
+    public static isColorTypeSupported(colorType: string): boolean {
+        return TileColorManager.SUPPORTED_COLOR_TYPES.includes(colorType) || colorType !== "";
+    }
+
+    /**
+     * Enhanced Rainbow color animation using HSV color space
+     * Based on official ADOFAI ColorFloor RainbowColor logic:
+     * - Preserves saturation and value from base color
+     * - Cycles through full hue spectrum
+     */
+    private rainbowColorFromHSV(baseColor: string, secondaryColor: string, percent: number): string {
+        // Get HSV from base color
+        const baseColorObj = new THREE.Color(baseColor);
+        const hsl = { h: 0, s: 0, l: 0 };
+        baseColorObj.getHSL(hsl);
+        
+        // Convert HSL to HSV approximation for richer color handling
+        // H stays the same, S and V are preserved from base
+        const hue = percent; // Cycle through full hue spectrum based on animation progress
+        const saturation = Math.max(hsl.s, 0.75); // Ensure vibrant colors
+        const value = Math.max(hsl.l, 0.55); // Ensure sufficient brightness
+        
+        // Create rainbow color with cycled hue
+        const rainbowColor = new THREE.Color();
+        rainbowColor.setHSL(hue, saturation, value);
+        
+        return '#' + rainbowColor.getHexString();
+    }
+
+    /**
+     * Modulate color intensity by scaling RGB values
+     * Used for glow intensity effects
+     */
+    private modulateColorIntensity(hexColor: string, intensity: number): string {
+        const color = new THREE.Color(hexColor);
+        // Scale RGB channels by intensity factor
+        color.multiplyScalar(intensity);
+        return '#' + color.getHexString();
     }
 
     /**

@@ -227,7 +227,7 @@ export class HitsoundManager {
   private synthesizedSource: AudioBufferSourceNode | null = null;
   private scheduledTimestamps: number[] = [];
   private totalDuration: number = 0;
-
+  
   // OGG compression
   private useOGGCompression: boolean = false;
   private compressedOGGBlob: Blob | null = null;
@@ -335,7 +335,7 @@ export class HitsoundManager {
       if (onProgress) onProgress(100);
       return;
     }
-
+    
     // Store timestamps
     this.scheduledTimestamps = [...timestamps].sort((a, b) => a - b);
     this.totalDuration = totalDuration;
@@ -647,7 +647,7 @@ export class HitsoundManager {
       console.log('[HitsoundManager] Starting pre-synthesized playback at', startTime);
       this.synthesizedSource.start(startTime);
     } else {
-      console.warn('[HitsoundManager] Cannot start - no synthesized buffer and not in realtime mode');
+      console.warn('[HitsoundManager] Cannot start - no synthesized or compressed buffer');
     }
   }
 
@@ -662,7 +662,7 @@ export class HitsoundManager {
 
     const ctx = getSharedAudioContext();
     if (ctx.state === 'suspended') ctx.resume();
-
+    
     if (this.compressedBuffer) {
       // Compressed OGG mode
       this.synthesizedSource = ctx.createBufferSource();

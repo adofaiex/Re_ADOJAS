@@ -139,7 +139,7 @@ const CombineShader = {
 export class BloomEffect {
     private enabled: boolean = false;
     private threshold: number = 0.5;
-    private intensity: number = 1.0;
+    private intensity: number = 0.7;  // Reduced to 70% of original strength
     private bloomColor: THREE.Color = new THREE.Color(1, 1, 1);
     
     private resolution: THREE.Vector2;
@@ -200,6 +200,9 @@ export class BloomEffect {
             vertexShader: CombineShader.vertexShader,
             fragmentShader: CombineShader.fragmentShader,
         });
+        
+        // Initialize intensity uniform to 0.7 (70% of original strength)
+        this.combineMaterial.uniforms.intensity.value = 0.7;
         
         this.scene = new THREE.Scene();
         this.camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
