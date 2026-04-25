@@ -586,7 +586,7 @@ export class MoveTrackManager {
                 if (tile) {
                     const [x, y] = tile.position;
                     const zLevel = 12 - index;
-                    tileMesh.position.set(x, y, zLevel * 0.001);
+                    tileMesh.position.set(x, y, zLevel * 0.1);
                     tileMesh.rotation.set(0, 0, 0);
                     tileMesh.scale.set(1, 1, 1);
                 }

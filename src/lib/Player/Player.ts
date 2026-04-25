@@ -783,6 +783,10 @@ export class Player implements IPlayer {
     this.updateFrameInterval();
   }
 
+  public setOGGCompression(enabled: boolean): void {
+    this.hitsoundManager.setOGGCompression(enabled);
+  }
+
   private updateFrameInterval(): void {
     if (this.targetFramerate === 'auto') {
       // Use monitor refresh rate (no limiting)
@@ -1676,10 +1680,9 @@ export class Player implements IPlayer {
           mesh.rotation.z = transform.rotation * (Math.PI / 180);
           mesh.scale.copy(transform.scale);
           
-          if ((mesh.material as any).transparent !== undefined) {
+          if ((mesh.material as any).opacity !== undefined) {
             const opacity = transform.opacity < 1 ? transform.opacity : 1;
             (mesh.material as any).opacity = opacity;
-            (mesh.material as any).transparent = transform.opacity < 1;
           }
         }
       });
@@ -1711,10 +1714,9 @@ export class Player implements IPlayer {
         mesh.rotation.z = transform.rotation * (Math.PI / 180);
         mesh.scale.copy(transform.scale);
         
-        if ((mesh.material as any).transparent !== undefined) {
+        if ((mesh.material as any).opacity !== undefined) {
           const opacity = transform.opacity < 1 ? transform.opacity : 1;
           (mesh.material as any).opacity = opacity;
-          (mesh.material as any).transparent = transform.opacity < 1;
         }
       }
     });
@@ -2152,7 +2154,7 @@ export class Player implements IPlayer {
       }
     } else {
       // Fallback to original position calculation
-      tileMesh.position.set(x, y, zLevel * 0.00001);
+      tileMesh.position.set(x, y, zLevel * 0.1);
     }
 
     tileMesh.castShadow = true;
@@ -2276,7 +2278,7 @@ export class Player implements IPlayer {
              const pivotPos = lastTile.position;
              this.currentPivotPosition.x = pivotPos[0];
              this.currentPivotPosition.y = pivotPos[1];
-             pivotPlanet.position.set(pivotPos[0], pivotPos[1], 0);
+             pivotPlanet.position.set(pivotPos[0], pivotPos[1], 0.1);
              
              let startAngle = 0;
              if (lastIndex > 0) {

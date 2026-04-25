@@ -90,6 +90,12 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
           description: t("settings.loadMethod.description"),
           type: "loadMethod",
         },
+        {
+          id: "useOGGCompression",
+          title: t("settings.useOGGCompression.title"),
+          description: t("settings.useOGGCompression.description"),
+          type: "useOGGCompression",
+        },
       ],
     },
   ]
@@ -400,6 +406,26 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                         </SelectItem>
                       </SelectContent>
                     </Select>
+                  )}
+
+                  {setting.type === "useOGGCompression" && (
+                    <div className="flex items-center gap-3">
+                      <button
+                        onClick={() => updateSettings({ useOGGCompression: !settings.useOGGCompression })}
+                        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                          settings.useOGGCompression ? "bg-purple-500" : "bg-slate-300 dark:bg-slate-600"
+                        }`}
+                      >
+                        <span
+                          className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                            settings.useOGGCompression ? "translate-x-6" : "translate-x-1"
+                          }`}
+                        />
+                      </button>
+                      <span className="text-sm text-slate-600 dark:text-slate-400">
+                        {settings.useOGGCompression ? t("settings.useOGGCompression.enabled") : t("settings.useOGGCompression.disabled")}
+                      </span>
+                    </div>
                   )}
                 </div>
               ))}

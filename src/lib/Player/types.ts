@@ -18,6 +18,7 @@ export interface IPlayer {
   setHitsoundEnabled(enabled: boolean): void;
   setUseWorker(use: boolean): void;
   setTargetFramerate(framerate: TargetFramerateType): void;
+  setOGGCompression(enabled: boolean): void;
   setZoom(zoom: number): void;
   loadMusic(src: string): void;
   registerDecorationImage?(filename: string, url: string): void;

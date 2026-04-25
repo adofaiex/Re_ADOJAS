@@ -16,6 +16,7 @@ interface AppSettings {
   loadMethod: LoadMethodType
   hitsoundEnabled: boolean
   showStats: boolean // 是否使用 stats.js 面板
+  useOGGCompression: boolean // 是否使用 OGG 压缩减少内存占用
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -27,6 +28,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   loadMethod: "async", // Default to async loading
   hitsoundEnabled: true, // Default to enabled
   showStats: false, // Default to using default FPS panel
+  useOGGCompression: false, // Default to disabled (may affect quality)
 }
 
 export function useAppSettings() {
