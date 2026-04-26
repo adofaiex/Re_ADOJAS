@@ -2159,6 +2159,7 @@ export class Player implements IPlayer {
 
     tileMesh.castShadow = true;
     tileMesh.receiveShadow = true;
+    tileMesh.renderOrder = -index;
     
     // Add decorations
     const decoZ = 0.002;

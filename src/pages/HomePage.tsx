@@ -32,6 +32,16 @@ export default function HomePage() {
           <span className="text-lg sm:text-xl font-bold text-slate-900 dark:text-white">Re_ADOJAS</span>
         </div>
         <div className="flex items-center gap-2">
+          <Link to="/mesh">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-slate-700 dark:text-white hover:bg-slate-100 dark:hover:bg-white/10 hover:text-slate-900 dark:hover:text-white"
+            >
+              <Code className="w-4 h-4 text-slate-700 dark:text-white" />
+              Mesh 测试
+            </Button>
+          </Link>
           <a href="https://github.com/flutas-web/Re_ADOJAS" target="_blank" rel="noopener noreferrer">
             <Button
               variant="ghost"
