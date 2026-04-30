@@ -2307,24 +2307,10 @@ export class Player implements IPlayer {
 
     tileMesh.castShadow = true;
     tileMesh.receiveShadow = true;
-
-    // Set render order based on tile index to ensure proper layering
-    // Higher index = lower render order = appears below
-    const maxIndex = this.levelData.tiles.length - 1;
-    const reversedIndex = maxIndex - index;
-    tileMesh.renderOrder = reversedIndex * 100;
-
-    // Disable depth write to ensure render order controls layering
-    tileMesh.material.depthWrite = false;
-    tileMesh.material.depthTest = false;
-
-    // Calculate tile ratio for icon aspect correction
-    const tileWidth = bounds.maxX - bounds.minX;
-    const tileHeight = bounds.maxY - bounds.minY;
-    const tileRatio = tileWidth / tileHeight;
-    (material.uniforms as any).uTileRatio.value = tileRatio;
-
-    // Add event icons via shader
+    tileMesh.renderOrder = -index;
+    
+    // Add decorations
+    const decoZ = 0.002;
     let hasTwirl = false;
     let hasSetSpeed = false;
     let twirlAngle = 0;
