@@ -221,7 +221,7 @@ export class HitsoundManager {
   private enabled: boolean = true;
   private currentBuffer: AudioBuffer | null = null;
   private gainNode: GainNode | null = null;
-
+  
   // Pre-synthesized hitsound track
   private synthesizedBuffer: AudioBuffer | null = null;
   private synthesizedSource: AudioBufferSourceNode | null = null;
@@ -328,7 +328,7 @@ export class HitsoundManager {
    */
   async preSynthesize(timestamps: number[], totalDuration: number, onProgress?: (percent: number) => void): Promise<void> {
     console.log('[HitsoundManager] preSynthesize called, timestamps:', timestamps.length, 'duration:', totalDuration);
-
+    
     // Skip if disabled or hitsound type is None
     if (!this.enabled || this.hitsoundType === 'None') {
       console.log('[HitsoundManager] Skipping - enabled:', this.enabled, 'type:', this.hitsoundType);
@@ -629,7 +629,7 @@ export class HitsoundManager {
       console.log('[HitsoundManager] Starting compressed OGG playback at', startTime);
       this.synthesizedSource.start(startTime);
     } else if (this.synthesizedBuffer) {
-      // Pre-synthesized mode: play the uncompressed buffer
+      // Pre-synthesized mode: play the buffer
       this.synthesizedSource = ctx.createBufferSource();
       this.synthesizedSource.buffer = this.synthesizedBuffer;
       this.synthesizedSource.connect(this.getGainNode());
@@ -657,9 +657,9 @@ export class HitsoundManager {
    */
   startAtOffset(offset: number): void {
     if (!this.enabled) return;
-
+    
     this.stop();
-
+    
     const ctx = getSharedAudioContext();
     if (ctx.state === 'suspended') ctx.resume();
     
@@ -683,7 +683,6 @@ export class HitsoundManager {
         this.synthesizedSource.start(0, offset, remainingDuration);
       }
     } else if (this.synthesizedBuffer) {
-      // Uncompressed mode
       this.synthesizedSource = ctx.createBufferSource();
       this.synthesizedSource.buffer = this.synthesizedBuffer;
       this.synthesizedSource.connect(this.getGainNode());
@@ -719,12 +718,12 @@ export class HitsoundManager {
   }
 
   /**
-   * Check if hitsounds are pre-synthesized
+   * Check if hitsounds are pre-synthesized or ready for real-time playback
    */
   isSynthesized(): boolean {
     return this.synthesizedBuffer !== null || this.compressedBuffer !== null;
   }
-
+  
   /**
    * Dispose and clear
    */

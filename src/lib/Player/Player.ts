@@ -14,7 +14,6 @@ import { CameraController, CameraTimelineEntry } from './CameraController';
 import { DecorationManager } from './DecorationManager';
 import { MoveTrackManager } from './MoveTrackManager';
 import { PositionTrackManager } from './PositionTrackManager';
-import { EventIconLoader } from './EventIconLoader';
 import Stats from 'three/examples/jsm/libs/stats.module.js';
 
 export class Player implements IPlayer {
@@ -51,9 +50,6 @@ export class Player implements IPlayer {
   private sharedTwirlMaterial: THREE.MeshBasicMaterial | null = null;
   private sharedSpeedUpMaterial: THREE.MeshBasicMaterial | null = null;
   private sharedSpeedDownMaterial: THREE.MeshBasicMaterial | null = null;
-
-  // Event icon loader
-  private eventIconLoader: EventIconLoader;
   
   // Hitsound
   private hitsoundManager: HitsoundManager;
@@ -215,9 +211,6 @@ export class Player implements IPlayer {
     const hitsoundVolume = this.levelData.settings?.hitsoundVolume ?? 100;
     console.log('[Player] Initializing HitsoundManager with type:', hitsoundType, 'volume:', hitsoundVolume, '(raw:', rawHitsound, ')');
     this.hitsoundManager = new HitsoundManager(hitsoundType, hitsoundVolume);
-
-    // Initialize EventIconLoader
-    this.eventIconLoader = new EventIconLoader();
 
     // Initialize Three.js components
     this.scene = new THREE.Scene();
@@ -703,9 +696,6 @@ export class Player implements IPlayer {
     }
     
     this.renderer.setPixelRatio(window.devicePixelRatio);
-
-    // Enable render order sorting to ensure proper layering
-    this.renderer.sortObjects = true;
     
     // Initialize Bloom Effect (WebGL only)
     if (this.rendererType === 'webgl') {
@@ -1934,10 +1924,6 @@ export class Player implements IPlayer {
     this.planetRed = new Planet(0xff0000, undefined, this.showTrail);
     this.planetBlue = new Planet(0x0000ff, undefined, this.showTrail);
     
-    // Set renderOrder to ensure planets are always above all tiles
-    this.planetRed.mesh.renderOrder = 999999;
-    this.planetBlue.mesh.renderOrder = 999999;
-    
     this.planetRed.render(this.scene);
     this.planetBlue.render(this.scene);
     
@@ -1946,7 +1932,8 @@ export class Player implements IPlayer {
       const t1 = this.levelData.tiles[1];
       if (t0 && t1) {
         this.planetRed.position.set(t0.position[0], t0.position[1], 0.1);
-            this.planetBlue.position.set(t1.position[0], t1.position[1], 0.1);      }
+        this.planetBlue.position.set(t1.position[0], t1.position[1], 0.1);
+      }
     }
   }
 
@@ -2056,16 +2043,16 @@ export class Player implements IPlayer {
 
   private cleanupTileCache(): void {
     const tileEntries = Array.from(this.tiles.entries());
-
+    
     tileEntries.sort((a, b) => {
         const distA = a[1].position.distanceToSquared(this.cameraPosition);
         const distB = b[1].position.distanceToSquared(this.cameraPosition);
         return distB - distA;
     });
-
+    
     const toRemoveCount = Math.floor(this.tiles.size * 0.3);
     let removed = 0;
-
+    
     for (let i = 0; i < tileEntries.length && removed < toRemoveCount; i++) {
         const [id, mesh] = tileEntries[i];
         if (!this.visibleTiles.has(id)) {
@@ -2126,133 +2113,22 @@ export class Player implements IPlayer {
     const material = new THREE.ShaderMaterial({
         uniforms: {
             uColor: { value: new THREE.Color(color) },
-            uBgColor: { value: new THREE.Color(bgcolor) },
-            // Icon uniforms
-            uHasTwirl: { value: 0 },
-            uTwirlTexture: { value: null },
-            uTwirlRotation: { value: 0 },
-            uHasSetSpeed: { value: 0 },
-            uSetSpeedTexture: { value: null },
-            uHasPortal: { value: 0 },
-            uPortalTexture: { value: null },
-            uShowOutline: { value: 0 },
-            uOutlineTexture: { value: null },
-            uTileRatio: { value: 1.0 } // Tile width/height ratio, used to scale icons
+            uBgColor: { value: new THREE.Color(bgcolor) }
         },
         vertexShader: `
             varying vec3 vColor;
-            varying vec2 vUv;
-            varying vec3 vPosition;
             void main() {
                 vColor = color;
-                vUv = uv;
-                vPosition = position;
                 gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
             }
         `,
         fragmentShader: `
             uniform vec3 uColor;
             uniform vec3 uBgColor;
-            uniform int uHasTwirl;
-            uniform sampler2D uTwirlTexture;
-            uniform float uTwirlRotation;
-            uniform int uHasSetSpeed;
-            uniform sampler2D uSetSpeedTexture;
-            uniform int uHasPortal;
-            uniform sampler2D uPortalTexture;
-            uniform int uShowOutline;
-            uniform sampler2D uOutlineTexture;
-            uniform float uTileRatio;
             varying vec3 vColor;
-            varying vec2 vUv;
-            varying vec3 vPosition;
-
             void main() {
                 vec3 finalColor = mix(uBgColor, uColor, vColor.r);
-                float alpha = 1.0;
-
-                // Calculate distance from center for circular edge rendering
-                // This avoids transparency issues from overlapping triangles
-                float distFromCenter = length(vPosition.xy);
-                
-                // Smooth circular edge based on distance and color
-                // When vColor.r is low (edge), apply circular shape
-                float edgeFactor = 1.0 - vColor.r; // Higher in black areas
-                float circularEdge = smoothstep(0.4, 0.5, distFromCenter);
-                
-                // Blend linear edge with circular edge
-                if (edgeFactor > 0.5) {
-                    float blend = mix(vColor.r, circularEdge, edgeFactor * 0.5);
-                    finalColor = mix(uBgColor, uColor, blend);
-                }
-
-                // Calculate icon UV with fixed size
-                vec2 centeredUV = vUv - 0.5;
-
-                // Normalize UV to make tiles behave like they're all the same size
-                vec2 normalizedUV = centeredUV;
-                if (uTileRatio > 1.0) {
-                    normalizedUV.x *= uTileRatio;
-                } else if (uTileRatio < 1.0) {
-                    normalizedUV.y /= uTileRatio;
-                }
-
-                // Icon size in normalized UV space
-                vec2 iconSize = vec2(0.6);
-                if (uHasTwirl == 0) {
-                    iconSize = vec2(0.8);
-                }
-
-                // Check if pixel is within icon area
-                bool inIconArea = (abs(normalizedUV.x) <= iconSize.x * 0.5 && abs(normalizedUV.y) <= iconSize.y * 0.5);
-
-                if (inIconArea) {
-                    // Normalize UV to 0-1 range for texture sampling
-                    vec2 textureUV = (normalizedUV / iconSize) + 0.5;
-
-                    vec4 twirlColor = vec4(0.0);
-                    if (uHasTwirl == 1) {
-                        // Apply rotation to UV
-                        float cosR = cos(uTwirlRotation);
-                        float sinR = sin(uTwirlRotation);
-                        vec2 center = vec2(0.5, 0.5);
-                        vec2 uv = textureUV - center;
-                        vec2 rotatedUV = vec2(
-                            uv.x * cosR - uv.y * sinR,
-                            uv.x * sinR + uv.y * cosR
-                        ) + center;
-                        twirlColor = texture2D(uTwirlTexture, rotatedUV);
-                        if (uShowOutline == 1) {
-                            vec4 outlineColor = texture2D(uOutlineTexture, rotatedUV);
-                            twirlColor = mix(outlineColor, twirlColor, step(0.5, twirlColor.a));
-                        }
-                        if (twirlColor.a > 0.01) {
-                            finalColor = mix(finalColor, twirlColor.rgb, twirlColor.a);
-                        }
-                    }
-
-                    vec4 speedColor = vec4(0.0);
-                    if (uHasSetSpeed == 1) {
-                        speedColor = texture2D(uSetSpeedTexture, textureUV);
-                        if (uShowOutline == 1) {
-                            vec4 outlineColor = texture2D(uOutlineTexture, textureUV);
-                            speedColor = mix(outlineColor, speedColor, step(0.5, speedColor.a));
-                        }
-                        if (speedColor.a > 0.01) {
-                            finalColor = mix(finalColor, speedColor.rgb, speedColor.a);
-                        }
-                    }
-
-                    vec4 portalColor = vec4(0.0);
-                    if (uHasPortal == 1) {
-                        portalColor = texture2D(uPortalTexture, textureUV);
-                        if (portalColor.a > 0.01) {
-                            finalColor = mix(finalColor, portalColor.rgb, portalColor.a);
-                        }
-                    }
-                }
-
-                gl_FragColor = vec4(finalColor, alpha);
+                gl_FragColor = vec4(finalColor, 1.0);
             }
         `,
         vertexColors: true,
@@ -2261,30 +2137,6 @@ export class Player implements IPlayer {
     });
 
     const tileMesh = new THREE.Mesh(geometry, material);
-
-    // Generate UV coordinates for icon rendering
-    const uvs = new Float32Array(geometry.attributes.position.count * 2);
-    const positions = geometry.attributes.position.array;
-    const bounds = { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity };
-
-    // Find bounding box
-    for (let i = 0; i < positions.length; i += 3) {
-        bounds.minX = Math.min(bounds.minX, positions[i]);
-        bounds.maxX = Math.max(bounds.maxX, positions[i]);
-        bounds.minY = Math.min(bounds.minY, positions[i + 1]);
-        bounds.maxY = Math.max(bounds.maxY, positions[i + 1]);
-    }
-
-    // Generate UVs
-    for (let i = 0; i < positions.length; i += 3) {
-        const x = positions[i];
-        const y = positions[i + 1];
-        const uvIndex = (i / 3) * 2;
-        uvs[uvIndex] = (x - bounds.minX) / (bounds.maxX - bounds.minX);
-        uvs[uvIndex + 1] = (y - bounds.minY) / (bounds.maxY - bounds.minY);
-    }
-
-    geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
 
     // Calculate transform from PositionTrack
     if (this.positionTrackManager) {
@@ -2307,78 +2159,43 @@ export class Player implements IPlayer {
 
     tileMesh.castShadow = true;
     tileMesh.receiveShadow = true;
+    tileMesh.renderOrder = -index;
     
     // Add decorations
     const decoZ = 0.002;
     let hasTwirl = false;
     let hasSetSpeed = false;
-    let twirlAngle = 0;
-
+    
     if (this.tileEvents.has(index)) {
         const events = this.tileEvents.get(index)!;
         events.forEach(e => {
-            if (e.eventType === 'Twirl') {
-                hasTwirl = true;
-                twirlAngle = tile.angle || 0;
-            }
+            if (e.eventType === 'Twirl') hasTwirl = true;
             if (e.eventType === 'SetSpeed') hasSetSpeed = true;
         });
     }
-
-    // Add event icons via shader
-    const showIconOutlines = this.levelData.settings?.floorIconOutlines === true;
-    const uniforms = tileMesh.material.uniforms;
-    uniforms.uShowOutline.value = showIconOutlines ? 1 : 0;
-
-    // Twirl icon
-    if (hasTwirl) {
-        const twirlIconType = this.eventIconLoader.getTwirlIcon(twirlAngle);
-        const twirlTextures = this.eventIconLoader.getIconTextures(twirlIconType);
-
-        // Calculate direction from current tile to next tile
-        let tileDirection = 0;
-        if (index < this.levelData.tiles.length - 1) {
-            const nextTile = this.levelData.tiles[index + 1];
-            const dx = nextTile.position[0] - tile.position[0];
-            const dy = nextTile.position[1] - tile.position[1];
-            tileDirection = Math.atan2(dy, dx);
-        }
-
-        uniforms.uHasTwirl.value = 1;
-        uniforms.uTwirlTexture.value = twirlTextures.main;
-        uniforms.uTwirlRotation.value = tileDirection;
-        if (showIconOutlines && twirlTextures.outline) {
-            uniforms.uOutlineTexture.value = twirlTextures.outline;
-        }
+    
+    if (hasTwirl && this.sharedDecoGeometry && this.sharedTwirlMaterial) {
+        const twirlMesh = new THREE.Mesh(this.sharedDecoGeometry, this.sharedTwirlMaterial);
+        twirlMesh.position.set(0, 0, decoZ);
+        tileMesh.add(twirlMesh);
     }
-
-    // SetSpeed icon
-    if (hasSetSpeed) {
+    
+    if (hasSetSpeed && this.sharedDecoGeometry) {
         const currentBPM = this.tileBPM[index];
         const prevBPM = index > 0 ? this.tileBPM[index - 1] : (this.levelData.settings.bpm || 100);
         const ratio = currentBPM / prevBPM;
-
-        if (ratio > 1.05 || ratio < 0.95) {
-            const speedIconType = this.eventIconLoader.getSetSpeedIcon(ratio);
-            const speedTextures = this.eventIconLoader.getIconTextures(speedIconType);
-
-            uniforms.uHasSetSpeed.value = 1;
-            uniforms.uSetSpeedTexture.value = speedTextures.main;
-            if (showIconOutlines && speedTextures.outline) {
-                uniforms.uOutlineTexture.value = speedTextures.outline;
-            }
+        
+        if (ratio > 1.05 && this.sharedSpeedUpMaterial) {
+            const speedMesh = new THREE.Mesh(this.sharedDecoGeometry, this.sharedSpeedUpMaterial);
+            speedMesh.position.set(0, 0, decoZ + (hasTwirl ? 0.001 : 0));
+            tileMesh.add(speedMesh);
+        } else if (ratio < 0.95 && this.sharedSpeedDownMaterial) {
+            const speedMesh = new THREE.Mesh(this.sharedDecoGeometry, this.sharedSpeedDownMaterial);
+            speedMesh.position.set(0, 0, decoZ + (hasTwirl ? 0.001 : 0));
+            tileMesh.add(speedMesh);
         }
     }
-
-    // Portal icon (last tile only)
-    if (index === this.levelData.tiles.length - 1) {
-        const portalTextures = this.eventIconLoader.getIconTextures('portal');
-        if (portalTextures.main) {
-            uniforms.uHasPortal.value = 1;
-            uniforms.uPortalTexture.value = portalTextures.main;
-        }
-    }
-
+    
     this.tiles.set(id, tileMesh);
 
     // Register tile initial state with MoveTrack manager
@@ -2482,13 +2299,14 @@ export class Player implements IPlayer {
              const currentAngle = isCW ? (startAngle - totalAngle) : (startAngle + totalAngle);
              
              const dist = 1.0;
-                          movingPlanet.position.set(
-                              pivotPos[0] + Math.cos(currentAngle) * dist,
-                              pivotPos[1] + Math.sin(currentAngle) * dist,
-                              0.1
-                          );
-                          
-                          pivotPlanet.position.z = 0.1;             pivotPlanet.update(0, currentTimeInSeconds);
+             movingPlanet.position.set(
+                 pivotPos[0] + Math.cos(currentAngle) * dist,
+                 pivotPos[1] + Math.sin(currentAngle) * dist,
+                 0.1
+             );
+             
+             pivotPlanet.position.z = 0.1;
+             pivotPlanet.update(0, currentTimeInSeconds);
              movingPlanet.update(0, currentTimeInSeconds);
         }
         return;
@@ -2904,11 +2722,6 @@ export class Player implements IPlayer {
     if (this.sharedSpeedDownMaterial) {
       this.sharedSpeedDownMaterial.dispose();
       this.sharedSpeedDownMaterial = null;
-    }
-
-    // Cleanup event icon loader
-    if (this.eventIconLoader) {
-      this.eventIconLoader.dispose();
     }
 
     this.spatialGrid.clear();
