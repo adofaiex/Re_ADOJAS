@@ -12,11 +12,13 @@ export default defineConfig(({ mode, command }) => {
   const plugins = [
     react(),
   ]
-  plugins.push(legacy({
-    targets: ['defaults', 'not IE 11'],
-    additionalLegacyPolyfills: ['regenerator-runtime/runtime']
-  }))
-  plugins.push(htmlPostBuildPlugin({ base }) as any)
+  if (isBuild) {
+    plugins.push(legacy({
+      targets: ['defaults', 'not IE 11'],
+      additionalLegacyPolyfills: ['regenerator-runtime/runtime']
+    }))
+    plugins.push(htmlPostBuildPlugin({ base }) as any)
+  }
   return {
     plugins: plugins,
     resolve: {
@@ -45,14 +47,14 @@ export default defineConfig(({ mode, command }) => {
         output: {
           manualChunks: (id) => {
             // React ecosystem
-            if (id.includes('node_modules/react/') || 
-                id.includes('node_modules/react-dom/') ||
-                id.includes('node_modules/scheduler/')) {
+            if (id.includes('node_modules/react/') ||
+              id.includes('node_modules/react-dom/') ||
+              id.includes('node_modules/scheduler/')) {
               return 'vendor-react'
             }
             // React Router
-            if (id.includes('node_modules/react-router/') || 
-                id.includes('node_modules/react-router-dom/')) {
+            if (id.includes('node_modules/react-router/') ||
+              id.includes('node_modules/react-router-dom/')) {
               return 'vendor-router'
             }
             // Three.js core
@@ -69,13 +71,13 @@ export default defineConfig(({ mode, command }) => {
             }
             // UI libraries (lucide, etc)
             if (id.includes('node_modules/lucide-react/') ||
-                id.includes('node_modules/@radix-ui/')) {
+              id.includes('node_modules/@radix-ui/')) {
               return 'vendor-ui'
             }
             // Utility libraries
             if (id.includes('node_modules/clsx/') ||
-                id.includes('node_modules/tailwind-merge/') ||
-                id.includes('node_modules/class-variance-authority/')) {
+              id.includes('node_modules/tailwind-merge/') ||
+              id.includes('node_modules/class-variance-authority/')) {
               return 'vendor-utils'
             }
           },
