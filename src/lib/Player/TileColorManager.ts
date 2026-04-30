@@ -273,10 +273,10 @@ export class TileColorManager {
         let intValue = { color: trackColorX, bgcolor: trackbgColorX };
 
         // Process colors based on track style (matches ADOFAI original logic)
-        if (Type === "Standard" || Type === "Gems") {
+        if (Type === "Standard" || Type === "Gems" || Type === "Basic" || Type === "Minimal") {
             // Standard/Gems: Darker version of main color for border
-            intValue.color = trackColorX;
             intValue.bgcolor = this.processHexColor(trackColorX)[1];
+            intValue.color = trackColorX;
         } else if (Type === "Neon") {
             // Neon: Black fill, colored border (glow effect)
             intValue.color = "#000000";
@@ -284,14 +284,6 @@ export class TileColorManager {
         } else if (Type === "NeonLight") {
             // NeonLight: Lighter border, colored fill
             intValue.color = this.processHexColor(trackColorX)[0];
-            intValue.bgcolor = trackColorX;
-        } else if (Type === "Basic") {
-            // Basic: Black border
-            intValue.color = trackColorX;
-            intValue.bgcolor = "#000000";
-        } else if (Type === "Minimal") {
-            // Minimal: No border (fill = border)
-            intValue.color = trackColorX;
             intValue.bgcolor = trackColorX;
         }
 
@@ -346,22 +338,18 @@ export class TileColorManager {
 
         // A. Single - Solid color
         if (trackColorType === "Single") {
+            // Ensure colors are properly formatted (strip alpha if present)
             const formattedColor = this.formatHexColor(trackColor);
             renderer_tileClientColor.color = formattedColor;
-
-            if (trackStyle === "Basic") {
-                renderer_tileClientColor.bgcolor = "#000000";
-            } else if (trackStyle === "Minimal") {
-                renderer_tileClientColor.bgcolor = formattedColor;
-            } else if (isNeonLight) {
-                // Use secondaryTrackColor (raw trackColor from parseColorTrackType)
-                // formattedColor is already lightened, so using it again would double-lighten
-                renderer_tileClientColor.bgcolor = this.formatHexColor(secondaryTrackColor);
-            } else if (!isNeon) {
-                // Standard, Gems: darker border
+            
+            if (!isNeon && !isNeonLight) {
+                // Standard style: darker border
                 renderer_tileClientColor.bgcolor = this.processHexColor(formattedColor)[1];
+            } else if (isNeonLight) {
+                // NeonLight: lighter border
+                renderer_tileClientColor.bgcolor = this.processHexColor(formattedColor)[0];
             }
-            // Neon: bgcolor stays as secondaryTrackColor (trackColor border)
+            // Neon: already has correct colors from parseColorTrackType
             shouldDraw = 1;
         }
 
@@ -370,20 +358,13 @@ export class TileColorManager {
             const useColor1 = (id % 2 === 0);
             const primaryColor = useColor1 ? trackColor : secondaryTrackColor;
 
-            if (trackStyle === "Basic") {
-                renderer_tileClientColor.color = primaryColor;
-                renderer_tileClientColor.bgcolor = "#000000";
-            } else if (trackStyle === "Minimal") {
-                renderer_tileClientColor.color = primaryColor;
-                renderer_tileClientColor.bgcolor = primaryColor;
-            } else if (isNeon) {
+            if (isNeon) {
                 renderer_tileClientColor.color = "#000000";
                 renderer_tileClientColor.bgcolor = primaryColor;
             } else if (isNeonLight) {
                 renderer_tileClientColor.color = this.processHexColor(primaryColor)[0];
                 renderer_tileClientColor.bgcolor = primaryColor;
             } else {
-                // Standard, Gems
                 renderer_tileClientColor.color = primaryColor;
                 renderer_tileClientColor.bgcolor = this.processHexColor(primaryColor)[1];
             }
@@ -395,22 +376,16 @@ export class TileColorManager {
             // ColorType.js formula: p = 1 - Math.abs(1 - 2 * percent)
             // Creates a smooth pulsing effect from 0 to 1 back to 0
             const p = 1 - Math.abs(1 - 2 * pulsePercent);
-
+            
             // Glow blends between trackColor and secondaryTrackColor
             // The intensity modulation makes the glow more dynamic
             const glowIntensity = 0.5 + p * 0.5;  // Range: 0.5 to 1.0
             const glowColor = this.genColor(trackColor, secondaryTrackColor, p);
-
+            
             // Apply intensity modulation to the glow color
             const modulated = this.modulateColorIntensity(glowColor, glowIntensity);
 
-            if (trackStyle === "Basic") {
-                renderer_tileClientColor.color = modulated;
-                renderer_tileClientColor.bgcolor = "#000000";
-            } else if (trackStyle === "Minimal") {
-                renderer_tileClientColor.color = modulated;
-                renderer_tileClientColor.bgcolor = modulated;
-            } else if (isNeon) {
+            if (isNeon) {
                 // Neon: black fill, glowing border
                 renderer_tileClientColor.color = "#000000";
                 renderer_tileClientColor.bgcolor = modulated;
@@ -419,7 +394,7 @@ export class TileColorManager {
                 renderer_tileClientColor.color = modulated;
                 renderer_tileClientColor.bgcolor = modulated;
             } else {
-                // Standard, Gems: colored fill with glow
+                // Standard: colored fill with glow
                 renderer_tileClientColor.color = modulated;
                 renderer_tileClientColor.bgcolor = this.processHexColor(modulated)[1];
             }
@@ -432,13 +407,7 @@ export class TileColorManager {
             // pulsePercent ranges 0-1, we use it to smoothly transition
             const blinkColor = this.genColor(trackColor, secondaryTrackColor, pulsePercent);
 
-            if (trackStyle === "Basic") {
-                renderer_tileClientColor.color = blinkColor;
-                renderer_tileClientColor.bgcolor = "#000000";
-            } else if (trackStyle === "Minimal") {
-                renderer_tileClientColor.color = blinkColor;
-                renderer_tileClientColor.bgcolor = blinkColor;
-            } else if (isNeon) {
+            if (isNeon) {
                 renderer_tileClientColor.color = "#000000";
                 renderer_tileClientColor.bgcolor = blinkColor;
             } else if (isNeonLight) {
@@ -456,13 +425,7 @@ export class TileColorManager {
             // ColorType.js uses genColor for smooth transitions
             const switchColor = this.genColor(trackColor, secondaryTrackColor, pulsePercent);
 
-            if (trackStyle === "Basic") {
-                renderer_tileClientColor.color = switchColor;
-                renderer_tileClientColor.bgcolor = "#000000";
-            } else if (trackStyle === "Minimal") {
-                renderer_tileClientColor.color = switchColor;
-                renderer_tileClientColor.bgcolor = switchColor;
-            } else if (isNeon) {
+            if (isNeon) {
                 renderer_tileClientColor.color = "#000000";
                 renderer_tileClientColor.bgcolor = switchColor;
             } else if (isNeonLight) {
@@ -481,13 +444,7 @@ export class TileColorManager {
             // Cycles through full hue spectrum with preserved saturation and value
             const rainbowColor = this.rainbowColorFromHSV(trackColor, secondaryTrackColor, pulsePercent);
 
-            if (trackStyle === "Basic") {
-                renderer_tileClientColor.color = rainbowColor;
-                renderer_tileClientColor.bgcolor = "#000000";
-            } else if (trackStyle === "Minimal") {
-                renderer_tileClientColor.color = rainbowColor;
-                renderer_tileClientColor.bgcolor = rainbowColor;
-            } else if (isNeon) {
+            if (isNeon) {
                 renderer_tileClientColor.color = "#000000";
                 renderer_tileClientColor.bgcolor = rainbowColor;
             } else if (isNeonLight) {
@@ -512,7 +469,7 @@ export class TileColorManager {
                 // This allows volume to be baked per-tile for pulse effects
                 amp = this.getVolumePulseAmplitude(id);
             }
-
+            
             // Volume modulates lightness
             const baseColor = isNeon ? secondaryTrackColor : trackColor;
             const color = new THREE.Color(baseColor);
@@ -522,13 +479,7 @@ export class TileColorManager {
             color.setHSL(hsl.h, hsl.s, 0.2 + amp * 0.6);
             const volumeHex = '#' + color.getHexString();
 
-            if (trackStyle === "Basic") {
-                renderer_tileClientColor.color = volumeHex;
-                renderer_tileClientColor.bgcolor = "#000000";
-            } else if (trackStyle === "Minimal") {
-                renderer_tileClientColor.color = volumeHex;
-                renderer_tileClientColor.bgcolor = volumeHex;
-            } else if (isNeon) {
+            if (isNeon) {
                 renderer_tileClientColor.color = "#000000";
                 renderer_tileClientColor.bgcolor = volumeHex;
             } else {
