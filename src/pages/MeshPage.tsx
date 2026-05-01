@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
-import createTrackMesh,{expandToPerFace} from '@/lib/Geo/mesh_reserve'
+import createTrackMesh, { expandToPerFace } from '@/lib/Geo/mesh_reserve'
 import { ArrowLeft } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 
