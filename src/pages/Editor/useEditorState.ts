@@ -108,7 +108,6 @@ export function useEditorState() {
       player.setRenderMethod(settings.renderMethod)
       player.setShowTrail(settings.showTrail)
       player.setHitsoundEnabled(settings.hitsoundEnabled)
-      player.setUseWorker(settings.useWorker)
       player.setTargetFramerate(settings.targetFramerate)
       player.setOGGCompression(settings.useOGGCompression)
       player.setStatsPanel(settings.showStats)
@@ -253,7 +252,6 @@ export function useEditorState() {
       player.setRenderMethod(settings.renderMethod)
       player.setShowTrail(settings.showTrail)
       player.setHitsoundEnabled(settings.hitsoundEnabled)
-      player.setUseWorker(settings.useWorker)
       player.setTargetFramerate(settings.targetFramerate)
       player.setOGGCompression(settings.useOGGCompression)
       player.setStatsPanel(settings.showStats)
@@ -287,7 +285,6 @@ export function useEditorState() {
     settings.renderMethod,
     settings.showTrail,
     settings.hitsoundEnabled,
-    settings.useWorker,
     settings.targetFramerate,
     settings.showStats,
     updateMetrics,
@@ -321,12 +318,6 @@ export function useEditorState() {
     }
   }, [settings.hitsoundEnabled])
 
-  // 监听多线程渲染设置变化
-  useEffect(() => {
-    if (previewerRef.current) {
-      previewerRef.current.setUseWorker(settings.useWorker)
-    }
-  }, [settings.useWorker])
 
   // 监听帧率设置变化
   useEffect(() => {
@@ -388,7 +379,6 @@ export function useEditorState() {
             player.setRenderMethod(settings.renderMethod)
             player.setShowTrail(settings.showTrail)
             player.setHitsoundEnabled(settings.hitsoundEnabled)
-            player.setUseWorker(settings.useWorker)
             player.setTargetFramerate(settings.targetFramerate)
             player.setStatsPanel(settings.showStats)
             

@@ -19,7 +19,7 @@ import { getSharedAudioContext } from './HTMLAudioMusic';
  */
 async function compressAudioBufferToOGG(
   buffer: AudioBuffer,
-  mimeType: string = 'audio/ogg; codecs=opus'
+  mimeType: string = 'audio/ogg;codecs=opus'
 ): Promise<Blob> {
   return new Promise((resolve, reject) => {
     const ctx = getSharedAudioContext();
@@ -104,7 +104,7 @@ const softClip = (x: number): number => {
 };
 
 // Available hitsound types
-export type HitsoundType = 
+export type HitsoundType =
   | 'Kick'
   | 'KickHouse'
   | 'KickChroma'
@@ -177,21 +177,21 @@ async function loadAudioBuffer(key: string): Promise<AudioBuffer | null> {
   if (audioBufferCache.has(key)) {
     return audioBufferCache.get(key)!;
   }
-  
+
   try {
     const dataURL = (audioData as Record<string, string>)[key];
     if (!dataURL) {
       console.warn(`[HitsoundManager] Sound "${key}" not found in audio_data.json`);
       return null;
     }
-    
+
     // Extract base64 data from dataURL
     const base64Match = dataURL.match(/^data:audio\/\w+;base64,(.+)$/);
     if (!base64Match) {
       console.warn(`[HitsoundManager] Invalid dataURL format for "${key}"`);
       return null;
     }
-    
+
     const base64 = base64Match[1];
     const binary = atob(base64);
     const arrayBuffer = new ArrayBuffer(binary.length);
@@ -199,7 +199,7 @@ async function loadAudioBuffer(key: string): Promise<AudioBuffer | null> {
     for (let i = 0; i < binary.length; i++) {
       uint8Array[i] = binary.charCodeAt(i);
     }
-    
+
     const audioBuffer = await getSharedAudioContext().decodeAudioData(arrayBuffer);
     audioBufferCache.set(key, audioBuffer);
     console.log(`[HitsoundManager] Loaded "${key}" from JSON dataURL`);
@@ -221,13 +221,13 @@ export class HitsoundManager {
   private enabled: boolean = true;
   private currentBuffer: AudioBuffer | null = null;
   private gainNode: GainNode | null = null;
-  
+
   // Pre-synthesized hitsound track
   private synthesizedBuffer: AudioBuffer | null = null;
   private synthesizedSource: AudioBufferSourceNode | null = null;
   private scheduledTimestamps: number[] = [];
   private totalDuration: number = 0;
-  
+
   // OGG compression
   private useOGGCompression: boolean = false;
   private compressedOGGBlob: Blob | null = null;
@@ -253,7 +253,7 @@ export class HitsoundManager {
   isOGGCompressionEnabled(): boolean {
     return this.useOGGCompression;
   }
-  
+
   private getGainNode(): GainNode {
     if (!this.gainNode) {
       const ctx = getSharedAudioContext();
@@ -263,20 +263,20 @@ export class HitsoundManager {
     this.gainNode.gain.value = this.volume / 100;
     return this.gainNode;
   }
-  
+
   /**
    * Preload a hitsound
    */
   private async preloadHitsound(type: HitsoundType): Promise<void> {
     if (type === 'None') return;
-    
+
     const key = hitsoundKeyMap[type];
     if (key) {
       this.currentBuffer = await loadAudioBuffer(key);
       console.log(`[HitsoundManager] Preloaded hitsound type "${type}", buffer:`, !!this.currentBuffer);
     }
   }
-  
+
   /**
    * Set the hitsound type
    */
@@ -285,7 +285,7 @@ export class HitsoundManager {
     this.hitsoundType = type;
     this.preloadHitsound(type);
   }
-  
+
   /**
    * Set volume (0-100)
    */
@@ -295,7 +295,7 @@ export class HitsoundManager {
       this.gainNode.gain.value = this.volume / 100;
     }
   }
-  
+
   /**
    * Enable or disable hitsounds
    */
@@ -305,14 +305,14 @@ export class HitsoundManager {
       this.stop();
     }
   }
-  
+
   /**
    * Check if hitsounds are enabled
    */
   isEnabled(): boolean {
     return this.enabled;
   }
-  
+
   /**
    * Get the current hitsound type
    */
@@ -328,14 +328,14 @@ export class HitsoundManager {
    */
   async preSynthesize(timestamps: number[], totalDuration: number, onProgress?: (percent: number) => void): Promise<void> {
     console.log('[HitsoundManager] preSynthesize called, timestamps:', timestamps.length, 'duration:', totalDuration);
-    
+
     // Skip if disabled or hitsound type is None
     if (!this.enabled || this.hitsoundType === 'None') {
       console.log('[HitsoundManager] Skipping - enabled:', this.enabled, 'type:', this.hitsoundType);
       if (onProgress) onProgress(100);
       return;
     }
-    
+
     // Store timestamps
     this.scheduledTimestamps = [...timestamps].sort((a, b) => a - b);
     this.totalDuration = totalDuration;
@@ -349,24 +349,24 @@ export class HitsoundManager {
         this.currentBuffer = await loadAudioBuffer(key);
       }
     }
-    
+
     if (!this.currentBuffer) {
       console.warn('[HitsoundManager] No currentBuffer');
       this.synthesizedBuffer = null;
       return;
     }
-    
+
     const ctx = getSharedAudioContext();
     const sampleRate = ctx.sampleRate;
     const hitBuffer = this.currentBuffer;
     const hitDuration = hitBuffer.duration;
     const numChannels = hitBuffer.numberOfChannels;
-    
+
     console.log('[HitsoundManager] Synthesizing - sampleRate:', sampleRate, 'hitDuration:', hitDuration, 'numChannels:', numChannels, 'hits:', this.scheduledTimestamps.length);
-    
+
     // Calculate total buffer length (add some padding at the end for last hitsound)
     const bufferLength = Math.ceil((totalDuration + hitDuration + 1) * sampleRate);
-    
+
     // Check if buffer is too large (Chrome limit is around 2^31 samples ~ 13 hours at 44.1kHz)
     const maxBufferSize = 2147483647; // 2^31 - 1
     if (bufferLength > maxBufferSize) {
@@ -375,54 +375,54 @@ export class HitsoundManager {
       if (onProgress) onProgress(100);
       return;
     }
-    
+
     console.log('[HitsoundManager] Buffer length:', bufferLength, 'samples, ~', (bufferLength / sampleRate / 60).toFixed(2), 'minutes');
-    
+
     if (onProgress) onProgress(5);
-    
+
     const startTime = performance.now();
-    
+
     // Create the output buffer
     this.synthesizedBuffer = ctx.createBuffer(numChannels, bufferLength, sampleRate);
-    
+
     // Get source channel data
     const hitChannelData: Float32Array[] = [];
     for (let ch = 0; ch < numChannels; ch++) {
       hitChannelData.push(hitBuffer.getChannelData(ch));
     }
-    
+
     // Get output channel data
     const outputChannelData: Float32Array[] = [];
     for (let ch = 0; ch < numChannels; ch++) {
       outputChannelData.push(this.synthesizedBuffer.getChannelData(ch));
     }
-    
+
     const hitLengthSamples = Math.floor(hitDuration * sampleRate);
     const totalHits = this.scheduledTimestamps.length;
-    
+
     // For very large hit counts, use chunked processing with yield
     const CHUNK_SIZE = 100000; // Process 100k hits per chunk
     const isLargeHitCount = totalHits > CHUNK_SIZE;
-    
+
     if (isLargeHitCount) {
       // Chunked processing for large hit counts
       console.log('[HitsoundManager] Using chunked processing for', totalHits, 'hits');
-      
+
       const processChunk = (startIdx: number, endIdx: number): number => {
         let localPeak = 0;
-        
+
         for (let idx = startIdx; idx < endIdx; idx++) {
           const t = this.scheduledTimestamps[idx];
           if (t < 0) continue;
-          
+
           const startSample = Math.floor(t * sampleRate);
           const hitLen = Math.min(hitLengthSamples, bufferLength - startSample);
-          
+
           // Use TypedArray operations for each channel
           for (let ch = 0; ch < numChannels; ch++) {
             const hitData = hitChannelData[ch];
             const outputData = outputChannelData[ch];
-            
+
             // Inline mixing loop with peak tracking
             for (let i = 0; i < hitLen; i++) {
               const newVal = outputData[startSample + i] + hitData[i];
@@ -432,49 +432,49 @@ export class HitsoundManager {
             }
           }
         }
-        
+
         return localPeak;
       };
-      
+
       let peakAmplitude = 0;
       let processedHits = 0;
-      
+
       // Process in chunks with async yields
       for (let chunkStart = 0; chunkStart < totalHits; chunkStart += CHUNK_SIZE) {
         const chunkEnd = Math.min(chunkStart + CHUNK_SIZE, totalHits);
-        
+
         // Process this chunk
         const chunkPeak = processChunk(chunkStart, chunkEnd);
         if (chunkPeak > peakAmplitude) peakAmplitude = chunkPeak;
-        
+
         processedHits += (chunkEnd - chunkStart);
-        
+
         // Yield to main thread and update progress
         if (onProgress) {
           const progress = 5 + (processedHits / totalHits) * 85;
           onProgress(Math.min(90, Math.round(progress)));
         }
-        
+
         // Yield to main thread every chunk to prevent UI freeze
         await new Promise(resolve => setTimeout(resolve, 0));
       }
-      
+
       console.log('[HitsoundManager] Processed', processedHits, 'hits in', ((performance.now() - startTime) / 1000).toFixed(2), 's, peak:', peakAmplitude.toFixed(2));
-      
+
       // Apply normalization and soft clipping (using shared softClip function)
       if (onProgress) onProgress(95);
-      
+
       const TARGET_HEADROOM = 0.9;
       const gainReduction = peakAmplitude > TARGET_HEADROOM ? TARGET_HEADROOM / peakAmplitude : 1.0;
-      
+
       // Apply to all channels in chunks to yield
       for (let ch = 0; ch < numChannels; ch++) {
         const outputData = outputChannelData[ch];
         const APPLY_CHUNK = 500000; // Process 500k samples per chunk
-        
+
         for (let i = 0; i < outputData.length; i += APPLY_CHUNK) {
           const end = Math.min(i + APPLY_CHUNK, outputData.length);
-          
+
           if (gainReduction < 1.0) {
             for (let j = i; j < end; j++) {
               outputData[j] = softClip(outputData[j] * gainReduction);
@@ -488,33 +488,33 @@ export class HitsoundManager {
               }
             }
           }
-          
+
           // Yield periodically
           if (i % (APPLY_CHUNK * 4) === 0) {
             await new Promise(resolve => setTimeout(resolve, 0));
           }
         }
       }
-      
+
       if (onProgress) onProgress(100);
       console.log(`[HitsoundManager] Pre-synthesized ${processedHits} hitsounds in ${((performance.now() - startTime) / 1000).toFixed(2)}s, duration: ${totalDuration.toFixed(2)}s, gain: ${gainReduction.toFixed(3)}`);
-      
+
     } else {
       // Original processing for smaller hit counts
       const progressUpdateInterval = Math.max(100, Math.floor(totalHits / 30));
       let placedCount = 0;
       let peakAmplitude = 0;
-      
+
       for (const t of this.scheduledTimestamps) {
         if (t < 0) continue;
-        
+
         const startSample = Math.floor(t * sampleRate);
         const hitLen = Math.min(hitLengthSamples, bufferLength - startSample);
-        
+
         for (let ch = 0; ch < numChannels; ch++) {
           const hitData = hitChannelData[ch];
           const outputData = outputChannelData[ch];
-          
+
           for (let i = 0; i < hitLen; i++) {
             const newVal = outputData[startSample + i] + hitData[i];
             outputData[startSample + i] = newVal;
@@ -522,23 +522,23 @@ export class HitsoundManager {
             if (absVal > peakAmplitude) peakAmplitude = absVal;
           }
         }
-        
+
         placedCount++;
-        
+
         if (onProgress && placedCount % progressUpdateInterval === 0) {
           const copyPercent = 10 + (placedCount / totalHits) * 80;
           onProgress(Math.min(90, copyPercent));
         }
       }
-      
+
       console.log('[HitsoundManager] Copied', placedCount, 'hitsounds in', (performance.now() - startTime).toFixed(2), 'ms, peak:', peakAmplitude.toFixed(2));
-      
+
       // Apply normalization and soft clipping (using shared softClip function)
       if (onProgress) onProgress(95);
-      
+
       const TARGET_HEADROOM = 0.9;
       const gainReduction = peakAmplitude > TARGET_HEADROOM ? TARGET_HEADROOM / peakAmplitude : 1.0;
-      
+
       for (let ch = 0; ch < numChannels; ch++) {
         const outputData = outputChannelData[ch];
         if (gainReduction < 1.0) {
@@ -555,7 +555,7 @@ export class HitsoundManager {
           }
         }
       }
-      
+
       if (onProgress) onProgress(100);
       console.log(`[HitsoundManager] Pre-synthesized ${placedCount} hitsounds in ${((performance.now() - startTime) / 1000).toFixed(2)}s, duration: ${totalDuration.toFixed(2)}s, gain: ${gainReduction.toFixed(3)}`);
     }
@@ -620,7 +620,7 @@ export class HitsoundManager {
         if (this.synthesizedSource) {
           try {
             this.synthesizedSource.disconnect();
-          } catch (e) {}
+          } catch (e) { }
           this.synthesizedSource = null;
         }
       };
@@ -633,16 +633,16 @@ export class HitsoundManager {
       this.synthesizedSource = ctx.createBufferSource();
       this.synthesizedSource.buffer = this.synthesizedBuffer;
       this.synthesizedSource.connect(this.getGainNode());
-      
+
       this.synthesizedSource.onended = () => {
         if (this.synthesizedSource) {
           try {
             this.synthesizedSource.disconnect();
-          } catch (e) {}
+          } catch (e) { }
           this.synthesizedSource = null;
         }
       };
-      
+
       const startTime = ctx.currentTime + delay;
       console.log('[HitsoundManager] Starting pre-synthesized playback at', startTime);
       this.synthesizedSource.start(startTime);
@@ -657,12 +657,12 @@ export class HitsoundManager {
    */
   startAtOffset(offset: number): void {
     if (!this.enabled) return;
-    
+
     this.stop();
-    
+
     const ctx = getSharedAudioContext();
     if (ctx.state === 'suspended') ctx.resume();
-    
+
     if (this.compressedBuffer) {
       // Compressed OGG mode
       this.synthesizedSource = ctx.createBufferSource();
@@ -673,7 +673,7 @@ export class HitsoundManager {
         if (this.synthesizedSource) {
           try {
             this.synthesizedSource.disconnect();
-          } catch (e) {}
+          } catch (e) { }
           this.synthesizedSource = null;
         }
       };
@@ -686,16 +686,16 @@ export class HitsoundManager {
       this.synthesizedSource = ctx.createBufferSource();
       this.synthesizedSource.buffer = this.synthesizedBuffer;
       this.synthesizedSource.connect(this.getGainNode());
-      
+
       this.synthesizedSource.onended = () => {
         if (this.synthesizedSource) {
           try {
             this.synthesizedSource.disconnect();
-          } catch (e) {}
+          } catch (e) { }
           this.synthesizedSource = null;
         }
       };
-      
+
       const remainingDuration = this.synthesizedBuffer.duration - offset;
       if (remainingDuration > 0) {
         this.synthesizedSource.start(0, offset, remainingDuration);
@@ -712,7 +712,7 @@ export class HitsoundManager {
       try {
         this.synthesizedSource.stop();
         this.synthesizedSource.disconnect();
-      } catch (e) {}
+      } catch (e) { }
       this.synthesizedSource = null;
     }
   }
@@ -723,7 +723,7 @@ export class HitsoundManager {
   isSynthesized(): boolean {
     return this.synthesizedBuffer !== null || this.compressedBuffer !== null;
   }
-  
+
   /**
    * Dispose and clear
    */

@@ -63,6 +63,7 @@
   * {
     @apply border-border;
   }
+
   body {
     @apply bg-background text-foreground;
   }
@@ -74,7 +75,7 @@
 }*/
 
 :root {
-  font-family: 'Chillax-Regular',Lexend,Consolas;
+  font-family: 'Chillax-Regular', Lexend, Consolas;
 }
 
 /* Notyf custom styles - smaller notifications */

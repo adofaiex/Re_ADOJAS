@@ -5,6 +5,8 @@ import type { ILevelData } from "@/lib/Player/types"
 import { Player } from "@/lib/Player/Player"
 import { LargeFileParser } from "@/lib/LargeFileParser"
 import JSZip from "jszip"
+// @ts-ignore
+import LevelLoaderWorker from '../../lib/Player/levelLoaderWorker?worker&inline'
 
 // 类型导入
 type ParseProgressEvent = Structure.ParseProgressEvent;
@@ -73,18 +75,18 @@ export function useFileHandlers({
   infoRef,
   previewerRef
 }: UseFileHandlersProps) {
-  
+
   // 辅助函数：初始化玩家并合成打拍音
   const initializePlayerWithHitsounds = async (loadedLevel: any, isVeryLargeFile: boolean = false): Promise<void> => {
     initializePlayer(loadedLevel)
-    
+
     // Synthesize hitsounds with progress display
     if (previewerRef.current) {
       if (isVeryLargeFile) {
         // 对于超大文件，显示详细的合成进度
         setLoadingProgress(85)
         setLoadingStatus(t("loading.synthesizingHitsounds"))
-        
+
         await previewerRef.current.preSynthesizeHitsoundsWithProgress((percent) => {
           // Map 0-100 to 85-99
           const mappedPercent = 85 + (percent / 100) * 14
@@ -93,7 +95,7 @@ export function useFileHandlers({
       } else {
         setLoadingProgress(96)
         setLoadingStatus(t("loading.synthesizingHitsounds"))
-        
+
         await previewerRef.current.preSynthesizeHitsoundsWithProgress((percent) => {
           // Map 0-100 to 96-100
           const mappedPercent = 96 + (percent / 100) * 4
@@ -168,13 +170,13 @@ export function useFileHandlers({
   // Synchronous loading (blocks UI) - for small files
   const loadSync = (content: string): void => {
     const level = new ADOFAI.Level(content, parser)
-    
+
     // 监听进度事件
     level.on("parse:progress", (progressEvent: ParseProgressEvent): void => {
       setLoadingProgress(progressEvent.percent)
       setLoadingStatus(getStageText(progressEvent.stage, t))
     })
-    
+
     level.on("load", async (loadedLevel: any): Promise<void> => {
       // 计算瓦片位置时也会触发进度事件
       loadedLevel.on("parse:progress", (progressEvent: ParseProgressEvent): void => {
@@ -182,33 +184,33 @@ export function useFileHandlers({
         setLoadingStatus(getStageText(progressEvent.stage, t))
       })
       // loadedLevel.calculateTilePosition() // Skip - using our own position calculation in PositionTrackManager
-      
+
       setLoadingProgress(95)
       setLoadingStatus(t("loading.buildingScene"))
-      
+
       // Initialize player and synthesize hitsounds
       await initializePlayerWithHitsounds(loadedLevel)
-      
+
       setLoadingProgress(100)
       window.showNotification?.("success", t("editor.notifications.loadSuccess"))
       setIsLoading(false)
       setLoadingProgress(0)
       setLoadingStatus("")
     })
-    
+
     level.load()
   }
 
   // Asynchronous loading (non-blocking)
   const loadAsync = async (content: string): Promise<void> => {
     const level = new ADOFAI.Level(content, parser)
-    
+
     // 监听进度事件
     level.on("parse:progress", (progressEvent: ParseProgressEvent): void => {
       setLoadingProgress(progressEvent.percent)
       setLoadingStatus(getStageText(progressEvent.stage, t))
     })
-    
+
     level.on("load", async (loadedLevel: any): Promise<void> => {
       // 计算瓦片位置时也会触发进度事件
       loadedLevel.on("parse:progress", (progressEvent: ParseProgressEvent): void => {
@@ -216,65 +218,54 @@ export function useFileHandlers({
         setLoadingStatus(getStageText(progressEvent.stage, t))
       })
       // loadedLevel.calculateTilePosition() // Skip - using our own position calculation in PositionTrackManager
-      
+
       setLoadingProgress(95)
       setLoadingStatus(t("loading.buildingScene"))
-      
+
       // Initialize player and synthesize hitsounds
       await initializePlayerWithHitsounds(loadedLevel)
-      
+
       setLoadingProgress(100)
       window.showNotification?.("success", t("editor.notifications.loadSuccess"))
       setIsLoading(false)
       setLoadingProgress(0)
       setLoadingStatus("")
     })
-    
+
     await level.load()
   }
 
   // Worker loading (background thread)
   const loadWithWorker = async (content: string): Promise<void> => {
-    // Check if running on file:// protocol - workers don't work there
-    if (window.location.protocol === 'file:') {
-      console.log('file:// protocol detected, falling back to async loading')
-      window.showNotification?.("warning", "Worker mode not supported on file:// protocol, using async mode")
-      await loadAsync(content)
-      return
-    }
-
     setLoadingProgress(0)
     setLoadingStatus(t("loading.stage.start"))
-    
+
     try {
-      // Create worker - correct path to src/lib/Player/levelLoaderWorker.ts
-      const worker = new Worker(
-        new URL('../../lib/Player/levelLoaderWorker', import.meta.url),
-        { type: 'module' }
-      )
-      
-      worker.onmessage = async (e) => {
+      // Create worker - Use Vite's inline worker syntax
+      const worker = new LevelLoaderWorker()
+
+      worker.onmessage = async (e: MessageEvent) => {
         const { type, progress, status, stage, current, total, data, error } = e.data
-        
+
         if (type === 'progress') {
           setLoadingProgress(progress)
           // Use translated stage text
           setLoadingStatus(getStageText(stage, t))
         } else if (type === 'result') {
           const { levelData } = data
-          
+
           setLoadingProgress(95)
           setLoadingStatus(t("loading.buildingScene"))
-          
+
           // Create player and synthesize hitsounds
           await initializePlayerWithHitsounds(levelData)
-          
+
           setLoadingProgress(100)
           window.showNotification?.("success", t("editor.notifications.loadSuccess"))
           setIsLoading(false)
           setLoadingProgress(0)
           setLoadingStatus("")
-          
+
           worker.terminate()
         } else if (type === 'error') {
           console.error('Worker error:', error)
@@ -285,8 +276,8 @@ export function useFileHandlers({
           worker.terminate()
         }
       }
-      
-      worker.onerror = (error) => {
+
+      worker.onerror = (error: ErrorEvent) => {
         console.error('Worker onerror:', error.message, error.filename, error.lineno)
         window.showNotification?.("error", `Worker failed: ${error.message}`)
         setIsLoading(false)
@@ -294,10 +285,10 @@ export function useFileHandlers({
         setLoadingStatus("")
         worker.terminate()
       }
-      
+
       // Start loading
       worker.postMessage({ type: 'load', content })
-      
+
     } catch (error) {
       console.error('Failed to create worker:', error)
       // Fallback to async loading
@@ -309,12 +300,12 @@ export function useFileHandlers({
   const loadFromZip = async (arrayBuffer: ArrayBuffer): Promise<void> => {
     setLoadingStatus(t("loading.extractingZip"))
     setLoadingProgress(5)
-    
+
     try {
       const zip = await JSZip.loadAsync(arrayBuffer)
       const files = Object.keys(zip.files)
       console.log('[ZIP] Found files:', files)
-      
+
       // Find adofai file with priority
       const adofaiPriority = [
         // Custom names first (any non-standard name)
@@ -326,7 +317,7 @@ export function useFileHandlers({
         // sub*.adofai pattern
         (f: string) => /^sub\d*\.adofai$/i.test(f.split('/').pop() || ''),
       ]
-      
+
       let adofaiFile: string | null = null
       for (const matcher of adofaiPriority) {
         const found = files.find(f => matcher(f))
@@ -335,44 +326,44 @@ export function useFileHandlers({
           break
         }
       }
-      
+
       if (!adofaiFile) {
         throw new Error('No .adofai file found in ZIP')
       }
-      
+
       console.log('[ZIP] Using adofai file:', adofaiFile)
       setLoadingProgress(10)
       setLoadingStatus(t("loading.parsingLevel"))
-      
+
       // Extract and parse the adofai file
       const adofaiContent = await zip.file(adofaiFile)?.async('string')
       if (!adofaiContent) {
         throw new Error('Failed to extract adofai file')
       }
-      
+
       // Parse the level
       const level = new ADOFAI.Level(adofaiContent, parser)
-      
+
       level.on("parse:progress", (progressEvent: ParseProgressEvent): void => {
         setLoadingProgress(10 + Math.round(progressEvent.percent * 0.5))
         setLoadingStatus(getStageText(progressEvent.stage, t))
       })
-      
+
       level.on("load", async (loadedLevel: any): Promise<void> => {
         loadedLevel.on("parse:progress", (progressEvent: ParseProgressEvent): void => {
           setLoadingProgress(10 + Math.round(progressEvent.percent * 0.5))
           setLoadingStatus(getStageText(progressEvent.stage, t))
         })
         // loadedLevel.calculateTilePosition() // Skip - using our own position calculation in PositionTrackManager
-        
+
         setLoadingProgress(60)
         setLoadingStatus(t("loading.buildingScene"))
-        
+
         // Initialize player and synthesize hitsounds
         await initializePlayerWithHitsounds(loadedLevel)
-        
+
         setLoadingProgress(70)
-        
+
         // Auto-load audio if specified in settings
         const settings = loadedLevel.settings || {}
         const songFilename = settings.songFilename
@@ -384,14 +375,14 @@ export function useFileHandlers({
               const name = f.toLowerCase()
               const songName = songFilename.toLowerCase()
               // Match exact filename or with extension
-              return name === songName || 
-                     name === songName + ext ||
-                     name.endsWith('/' + songName) ||
-                     name.endsWith('/' + songName + ext) ||
-                     // Match just the filename part if songFilename has path
-                     name.endsWith(songName.split('/').pop()?.toLowerCase() + ext)
+              return name === songName ||
+                name === songName + ext ||
+                name.endsWith('/' + songName) ||
+                name.endsWith('/' + songName + ext) ||
+                // Match just the filename part if songFilename has path
+                name.endsWith(songName.split('/').pop()?.toLowerCase() + ext)
             })
-            
+
             if (audioFile) {
               console.log('[ZIP] Found audio file:', audioFile)
               const audioBlob = await zip.file(audioFile)?.async('blob')
@@ -404,13 +395,13 @@ export function useFileHandlers({
             }
           }
         }
-        
+
         setLoadingProgress(80)
-        
+
         // Auto-load decoration images
         // Collect all decoration image filenames from the level
         const decorationImages = new Set<string>()
-        
+
         // Check root decorations
         const rootDecorations = loadedLevel.decorations || loadedLevel.__decorations || []
         rootDecorations.forEach((dec: any) => {
@@ -418,7 +409,7 @@ export function useFileHandlers({
             decorationImages.add(dec.decorationImage)
           }
         })
-        
+
         // Check tile decorations
         const tiles = loadedLevel.tiles || []
         tiles.forEach((tile: any) => {
@@ -430,13 +421,13 @@ export function useFileHandlers({
             })
           }
         })
-        
+
         console.log('[ZIP] Decoration images needed:', Array.from(decorationImages))
-        
+
         // Load decoration images from ZIP
         const imageExtensions = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg']
         let loadedImages = 0
-        
+
         for (const imageName of decorationImages) {
           // Find matching image file in ZIP
           for (const ext of imageExtensions) {
@@ -445,14 +436,14 @@ export function useFileHandlers({
               const targetName = imageName.toLowerCase()
               // Flexible matching
               return name === targetName ||
-                     name === targetName + ext ||
-                     name.endsWith('/' + targetName) ||
-                     name.endsWith('/' + targetName + ext) ||
-                     // Match just filename
-                     name.endsWith('/' + imageName.split('/').pop()?.toLowerCase() + ext) ||
-                     name.endsWith(imageName.split('/').pop()?.toLowerCase() + ext)
+                name === targetName + ext ||
+                name.endsWith('/' + targetName) ||
+                name.endsWith('/' + targetName + ext) ||
+                // Match just filename
+                name.endsWith('/' + imageName.split('/').pop()?.toLowerCase() + ext) ||
+                name.endsWith(imageName.split('/').pop()?.toLowerCase() + ext)
             })
-            
+
             if (imageFile) {
               console.log('[ZIP] Found decoration image:', imageFile)
               const imageBlob = await zip.file(imageFile)?.async('blob')
@@ -466,23 +457,23 @@ export function useFileHandlers({
             }
           }
         }
-        
+
         // Preload decoration textures
         if (loadedImages > 0 && previewerRef.current?.preloadDecorationTextures) {
           setLoadingStatus(t("loading.preloadingTextures"))
           await previewerRef.current.preloadDecorationTextures()
           window.showNotification?.("info", `${t("editor.notifications.decorationsAutoLoaded").replace("{count}", String(loadedImages))}`)
         }
-        
+
         // Auto-load custom background images from settings and SetCustomBG events
         const bgImages = new Set<string>()
-        
+
         // Check level settings for bgImage
         const bgImage = settings.bgImage
         if (bgImage) {
           bgImages.add(bgImage)
         }
-        
+
         // Check SetCustomBG events
         const actions = loadedLevel.actions || []
         actions.forEach((action: any) => {
@@ -490,9 +481,9 @@ export function useFileHandlers({
             bgImages.add(action.image)
           }
         })
-        
+
         console.log('[ZIP] Custom BG images needed:', Array.from(bgImages))
-        
+
         // Load custom background images from ZIP
         for (const bgImageName of bgImages) {
           for (const ext of imageExtensions) {
@@ -500,13 +491,13 @@ export function useFileHandlers({
               const name = f.toLowerCase()
               const targetName = bgImageName.toLowerCase()
               return name === targetName ||
-                     name === targetName + ext ||
-                     name.endsWith('/' + targetName) ||
-                     name.endsWith('/' + targetName + ext) ||
-                     name.endsWith('/' + bgImageName.split('/').pop()?.toLowerCase() + ext) ||
-                     name.endsWith(bgImageName.split('/').pop()?.toLowerCase() + ext)
+                name === targetName + ext ||
+                name.endsWith('/' + targetName) ||
+                name.endsWith('/' + targetName + ext) ||
+                name.endsWith('/' + bgImageName.split('/').pop()?.toLowerCase() + ext) ||
+                name.endsWith(bgImageName.split('/').pop()?.toLowerCase() + ext)
             })
-            
+
             if (imageFile) {
               console.log('[ZIP] Found custom BG image:', imageFile)
               const imageBlob = await zip.file(imageFile)?.async('blob')
@@ -519,16 +510,16 @@ export function useFileHandlers({
             }
           }
         }
-        
+
         setLoadingProgress(100)
         window.showNotification?.("success", t("editor.notifications.zipLoadSuccess"))
         setIsLoading(false)
         setLoadingProgress(0)
         setLoadingStatus("")
       })
-      
+
       await level.load()
-      
+
     } catch (error) {
       console.error('[ZIP] Loading error:', error)
       window.showNotification?.("error", `${t("editor.notifications.zipLoadError")}: ${error}`)
@@ -553,25 +544,25 @@ export function useFileHandlers({
       reader.onload = async (e): Promise<void> => {
         try {
           console.log('[DEBUG] File loaded, starting parse...')
-          
+
           // Get ArrayBuffer directly
           const arrayBuffer = e.target?.result as ArrayBuffer
           const fileSize = arrayBuffer?.byteLength || 0
           console.log('[DEBUG] ArrayBuffer size:', fileSize)
-          
+
           // Check if file is a ZIP archive
           const fileName = file.name.toLowerCase()
-          const isZip = fileName.endsWith('.zip') || 
-                        file.type === 'application/zip' || 
-                        file.type === 'application/x-zip-compressed' ||
-                        file.type === 'application/x-zip'
-          
+          const isZip = fileName.endsWith('.zip') ||
+            file.type === 'application/zip' ||
+            file.type === 'application/x-zip-compressed' ||
+            file.type === 'application/x-zip'
+
           if (isZip) {
             console.log('[DEBUG] Detected ZIP file')
             await loadFromZip(arrayBuffer)
             return
           }
-          
+
           // 判断是否为超大文件 (>90MB) 或大文件 (>400MB)
           const isVeryLargeFile = fileSize > VERY_LARGE_FILE_THRESHOLD
           const isLargeFile = fileSize > LARGE_FILE_THRESHOLD
@@ -591,7 +582,7 @@ export function useFileHandlers({
             const decoder = new TextDecoder('utf-8')
             const content = decoder.decode(arrayBuffer)
             console.log('[DEBUG] Content length:', content?.length)
-            
+
             // Choose loading method based on settings
             if (settings.loadMethod === 'worker') {
               console.log('[DEBUG] Using worker loading')
@@ -634,12 +625,12 @@ export function useFileHandlers({
       if (!file) return
 
       const url = URL.createObjectURL(file)
-      
+
       if (previewerRef.current) {
-          previewerRef.current.loadMusic(url)
-          window.showNotification?.("success", "Audio loaded successfully")
+        previewerRef.current.loadMusic(url)
+        window.showNotification?.("success", "Audio loaded successfully")
       } else {
-          window.showNotification?.("warning", "Please load a level first")
+        window.showNotification?.("warning", "Please load a level first")
       }
     },
     [previewerRef]
@@ -652,12 +643,12 @@ export function useFileHandlers({
       if (!file) return
 
       const url = URL.createObjectURL(file)
-      
+
       if (previewerRef.current) {
-          previewerRef.current.loadVideo(url)
-          window.showNotification?.("success", "Video loaded successfully")
+        previewerRef.current.loadVideo(url)
+        window.showNotification?.("success", "Video loaded successfully")
       } else {
-          window.showNotification?.("warning", "Please load a level first")
+        window.showNotification?.("warning", "Please load a level first")
       }
     },
     [previewerRef]
@@ -680,7 +671,7 @@ export function useFileHandlers({
         const file = files[i]
         const url = URL.createObjectURL(file)
         const filename = file.name
-        
+
         // Register with decoration manager
         if (previewerRef.current.registerDecorationImage) {
           previewerRef.current.registerDecorationImage(filename, url)
@@ -719,7 +710,7 @@ export function useFileHandlers({
         const file = files[i]
         const url = URL.createObjectURL(file)
         const filename = file.name
-        
+
         // Register with player for SetCustomBG events
         if (previewerRef.current.registerCustomBGImage) {
           previewerRef.current.registerCustomBGImage(filename, url)

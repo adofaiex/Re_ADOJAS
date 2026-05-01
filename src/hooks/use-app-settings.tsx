@@ -11,7 +11,6 @@ interface AppSettings {
   renderer: RendererType
   renderMethod: RenderMethodType
   showTrail: boolean
-  useWorker: boolean
   targetFramerate: TargetFramerateType
   loadMethod: LoadMethodType
   hitsoundEnabled: boolean
@@ -23,7 +22,6 @@ const DEFAULT_SETTINGS: AppSettings = {
   renderer: "webgl", // Default to WebGL for compatibility
   renderMethod: "sync", // Default to synchronous rendering
   showTrail: false, // Default to disabled
-  useWorker: true, // Default to enabled for better performance
   targetFramerate: "auto", // Default to auto (monitor refresh rate)
   loadMethod: "async", // Default to async loading
   hitsoundEnabled: true, // Default to enabled

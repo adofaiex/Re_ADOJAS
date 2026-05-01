@@ -38,14 +38,14 @@ export const translations = {
     },
     // 主页
     home: {
-      title: "Re_ADOJAS",
+      title: "ADOJAS",
       subtitle: "一个ADOFAI播放器",
       openEditor: "打开播放编辑器",
       version: "版本：",
     },
     // 编辑器
     editor: {
-      title: "Re_ADOJAS",
+      title: "ADOJAS",
       loadFile: "加载文件",
       export: "导出",
       save: "保存",
@@ -149,21 +149,15 @@ export const translations = {
       },
       showStats: {
         title: "性能面板",
-        description: "使用 stats.js 面板替代默认 FPS 显示。",
+        description: "使用 stats.js 面板代替默认 FPS 显示。",
         statsjs: "Stats.js",
         default: "默认",
-      },
-      useWorker: {
-        title: "多线程渲染",
-        description: "使用Web Worker进行多线程网格生成（推荐）。",
-        enabled: "已启用",
-        disabled: "已禁用",
       },
       targetFramerate: {
         title: "目标帧率",
         description: "限制渲染帧率以节省资源",
-        auto: "自动（显示器刷新率）",
-        unlimited: "无限制",
+        auto: "自动 (显示器刷新率)",
+        unlimited: "不限制",
       },
       loadMethod: {
         title: "关卡加载方式",
@@ -222,14 +216,14 @@ export const translations = {
     },
     // Home
     home: {
-      title: "Re_ADOJAS",
+      title: "ADOJAS",
       subtitle: "A modern 3D editor",
       openEditor: "Open Editor",
       version: "Version:",
     },
     // Editor
     editor: {
-      title: "Re_ADOJAS",
+      title: "ADOJAS",
       loadFile: "Load File",
       export: "Export",
       save: "Save",
@@ -337,12 +331,6 @@ export const translations = {
         statsjs: "Stats.js",
         default: "Default",
       },
-      useWorker: {
-        title: "Multi-threaded Rendering",
-        description: "Use Web Worker for multi-threaded mesh generation (recommended).",
-        enabled: "Enabled",
-        disabled: "Disabled",
-      },
       targetFramerate: {
         title: "Target Framerate",
         description: "Limit rendering framerate to save resources",
@@ -400,14 +388,14 @@ export const translations = {
     },
     // ホーム
     home: {
-      title: "Re_ADOJAS",
+      title: "ADOJAS",
       subtitle: "モダンな3Dエディター",
       openEditor: "エディターを開く",
       version: "バージョン：",
     },
     // エディター
     editor: {
-      title: "Re_ADOJAS",
+      title: "ADOJAS",
       loadFile: "ファイル読み込み",
       export: "エクスポート",
       save: "保存",
@@ -515,16 +503,10 @@ export const translations = {
         statsjs: "Stats.js",
         default: "デフォルト",
       },
-      useWorker: {
-        title: "マルチスレッドレンダリング",
-        description: "Web Workerを使用したマルチスレッドメッシュ生成（推奨）。",
-        enabled: "有効",
-        disabled: "無効",
-      },
       targetFramerate: {
         title: "ターゲットフレームレート",
-        description: "レンダリングフレームレートを制限してリソースを節約",
-        auto: "自動（モニターのリフレッシュレート）",
+        description: "リソースを節約するためにレンダリングフレームレートを制限します",
+        auto: "自動 (モニターのリフレッシュレート)",
         unlimited: "無制限",
       },
       loadMethod: {

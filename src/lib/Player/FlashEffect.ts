@@ -94,11 +94,13 @@ export class FlashEffect {
         // BG quad renders first (added first to scene)
         this.bgQuad = new THREE.Mesh(geometry, this.bgMaterial);
         this.bgQuad.position.z = -1;
+        this.bgQuad.renderOrder = 1000; // Render on top of everything
         this.scene.add(this.bgQuad);
         
         // FG quad renders on top (added second to scene)
         this.fgQuad = new THREE.Mesh(geometry, this.fgMaterial);
         this.fgQuad.position.z = -0.5;
+        this.fgQuad.renderOrder = 1001; // Render on top of everything
         this.scene.add(this.fgQuad);
     }
     

@@ -6,12 +6,23 @@ interface MoveTrackTween {
     tween: any; // TWEEN.Tween or similar
 }
 
+interface AnimationProperty {
+    property: string;
+    startValue: number;
+    endValue: number;
+    startTime: number;
+    duration: number;
+    easingFunc: (t: number) => number;
+    extra?: any;
+}
+
 interface TileAnimationState {
     startPos: THREE.Vector3;
     startRot: THREE.Euler;
     startScale: THREE.Vector3;
     startOpacity: number;
     tweens: Map<string, MoveTrackTween>;
+    animations: Map<string, AnimationProperty>;
 }
 
 /**
@@ -35,6 +46,7 @@ export class MoveTrackManager {
         position: THREE.Vector3;
         rotation: THREE.Euler;
         scale: THREE.Vector3;
+        opacity: number;
     }> = new Map();
 
     // Reference to tiles map (will be set by Player)
@@ -70,7 +82,8 @@ export class MoveTrackManager {
                 this.tileInitialStates.set(index, {
                     position: tileMesh.position.clone(),
                     rotation: tileMesh.rotation.clone() as THREE.Euler,
-                    scale: tileMesh.scale.clone()
+                    scale: tileMesh.scale.clone(),
+                    opacity: tileMesh.userData.opacity !== undefined ? tileMesh.userData.opacity : 1
                 });
             }
         });
@@ -85,7 +98,8 @@ export class MoveTrackManager {
             this.tileInitialStates.set(index, {
                 position: tileMesh.position.clone(),
                 rotation: tileMesh.rotation.clone() as THREE.Euler,
-                scale: tileMesh.scale.clone()
+                scale: tileMesh.scale.clone(),
+                opacity: tileMesh.userData.opacity !== undefined ? tileMesh.userData.opacity : 1
             });
         }
     }
@@ -160,8 +174,78 @@ export class MoveTrackManager {
         const timeInSeconds = elapsedTimeMs / 1000;
         this.processMoveTrackEvents(timeInSeconds);
 
+        // Update all active animations with current game time (synchronized)
+        this.updateActiveAnimations(timeInSeconds);
+
         // Clean up completed MoveTrack animations
         this.cleanupCompletedAnimations(timeInSeconds);
+    }
+
+    /**
+     * Update all active animations based on current game time (synchronized with game clock)
+     * This is called every frame with the actual game time, allowing pause/resume functionality
+     */
+    private updateActiveAnimations(currentTime: number): void {
+        if (!this.tiles) return;
+
+        for (const [tileIndex, state] of this.tileAnimationStates.entries()) {
+            const mesh = this.tiles.get(tileIndex.toString());
+            if (!mesh) continue;
+
+            for (const [propertyName, animation] of state.animations.entries()) {
+                // Calculate progress based on game time (not wall clock time)
+                const elapsed = currentTime - animation.startTime;
+                const progress = Math.min(elapsed / animation.duration, 1);
+                const easedProgress = animation.easingFunc(progress);
+                const value = animation.startValue + (animation.endValue - animation.startValue) * easedProgress;
+
+                // Apply the animated value to the mesh
+                switch (propertyName) {
+                    case 'positionX':
+                        mesh.position.x = value;
+                        break;
+                    case 'positionY':
+                        mesh.position.y = value;
+                        break;
+                    case 'rotation':
+                        mesh.rotation.z = value;
+                        break;
+                    case 'scaleX':
+                        mesh.scale.x = value;
+                        break;
+                    case 'scaleY':
+                        mesh.scale.y = value;
+                        break;
+                    case 'opacity':
+                        if (mesh.material) {
+                            if (mesh.material instanceof THREE.ShaderMaterial && mesh.material.uniforms.opacity) {
+                                mesh.material.uniforms.opacity.value = value;
+                            } else {
+                                (mesh.material as any).opacity = value;
+                            }
+                            (mesh.material as any).transparent = value < 0.999;
+                            mesh.userData.opacity = value;
+
+                            // Update children (decorations/icons) opacity
+                            mesh.traverse((child) => {
+                                if (child !== mesh && (child as any).material) {
+                                    const childMat = (child as any).material;
+                                    if (childMat.opacity !== undefined) {
+                                        childMat.opacity = value;
+                                        childMat.transparent = value < 0.999;
+                                    }
+                                }
+                            });
+                        }
+                        break;
+                }
+                
+                // Remove animation when complete
+                if (progress >= 1) {
+                    state.animations.delete(propertyName);
+                }
+            }
+        }
     }
 
     /**
@@ -178,9 +262,10 @@ export class MoveTrackManager {
     /**
      * Get the offset that the planet should follow based on active MoveTrack animations
      * @param tileIndex The current tile index where the planet is
+     * @param currentTime Current game time in seconds (to enable pause/resume)
      * @returns The offset { x, y, rotation } to apply to the planet
      */
-    public getPlanetFollowOffset(tileIndex: number): { x: number; y: number; rotation: number } {
+    public getPlanetFollowOffset(tileIndex: number, currentTime: number): { x: number; y: number; rotation: number } {
         const result = { x: 0, y: 0, rotation: 0 };
 
         for (const moveTrack of this.activeMoveTracks.values()) {
@@ -208,8 +293,7 @@ export class MoveTrackManager {
             // Check if follow is enabled for this MoveTrack
             if (event.follow === false) continue;
 
-            // Calculate current progress
-            const currentTime = performance.now() / 1000;
+            // Calculate current progress using synchronized game time
             const elapsed = currentTime - moveTrack.startTime;
             const progress = Math.min(elapsed / moveTrack.duration, 1);
 
@@ -286,10 +370,11 @@ export class MoveTrackManager {
         const opacity = event.opacity !== undefined ? event.opacity / 100 : 1;
 
         // Check which properties are actually used (not disabled)
-        const positionUsed = positionOffset[0] !== 0 || positionOffset[1] !== 0;
-        const rotationUsed = rotationOffset !== 0;
-        const scaleUsed = scale[0] !== 100 || scale[1] !== 100;
-        const opacityUsed = opacity !== 1;
+        // In ADOFAI, properties are used if they are present in the event
+        const positionUsed = event.positionOffset !== undefined;
+        const rotationUsed = event.rotationOffset !== undefined;
+        const scaleUsed = event.scale !== undefined;
+        const opacityUsed = event.opacity !== undefined;
 
         // Store active MoveTrack for planet following
         const moveTrackId = this.activeMoveTracks.size;
@@ -321,7 +406,8 @@ export class MoveTrackManager {
                     startRot: tileMesh.rotation.clone() as THREE.Euler,
                     startScale: tileMesh.scale.clone(),
                     startOpacity: 1,
-                    tweens: new Map()
+                    tweens: new Map(),
+                    animations: new Map()
                 };
                 this.tileAnimationStates.set(i, state);
             }
@@ -337,14 +423,6 @@ export class MoveTrackManager {
                 const targetX = tileBasePos.x + positionOffset[0];
                 const targetY = tileBasePos.y + positionOffset[1];
 
-                // Kill old positionX tween if exists
-                if (state.tweens.has('positionX')) {
-                    const oldTween = state.tweens.get('positionX');
-                    if (oldTween?.tween?.frameId) {
-                        cancelAnimationFrame(oldTween.tween.frameId);
-                    }
-                }
-
                 // Only create new tween if target differs from current (approximate check)
                 if (!this.approximatelyEqual(tileMesh.position.x, targetX)) {
                     this.animateProperty(
@@ -354,16 +432,10 @@ export class MoveTrackManager {
                         targetX,
                         duration,
                         easingFunc,
-                        state
+                        state,
+                        undefined,
+                        currentTime
                     );
-                }
-
-                // Kill old positionY tween if exists
-                if (state.tweens.has('positionY')) {
-                    const oldTween = state.tweens.get('positionY');
-                    if (oldTween?.tween?.frameId) {
-                        cancelAnimationFrame(oldTween.tween.frameId);
-                    }
                 }
 
                 // Only create new tween if target differs from current
@@ -375,7 +447,9 @@ export class MoveTrackManager {
                         targetY,
                         duration,
                         easingFunc,
-                        state
+                        state,
+                        undefined,
+                        currentTime
                     );
                 }
             }
@@ -387,15 +461,6 @@ export class MoveTrackManager {
                 const targetRot = tileBaseRot + rotationOffsetRad;
 
                 console.log(`[MoveTrackManager] Tile ${i} rotation: base=${(tileBaseRot * 180 / Math.PI).toFixed(1)}°, offset=${rotationOffset}°, target=${(targetRot * 180 / Math.PI).toFixed(1)}°, current=${(tileMesh.rotation.z * 180 / Math.PI).toFixed(1)}°`);
-
-                // Kill old rotation tween if exists
-                if (state.tweens.has('rotation')) {
-                    const oldTween = state.tweens.get('rotation');
-                    if (oldTween?.tween?.frameId) {
-                        cancelAnimationFrame(oldTween.tween.frameId);
-                    }
-                    state.tweens.delete('rotation');
-                }
 
                 // For rotation comparison, normalize angles to -π to π range
                 // This prevents issues with angle wraparound (e.g., -π ≈ π)
@@ -413,7 +478,9 @@ export class MoveTrackManager {
                         targetRot,
                         duration,
                         easingFunc,
-                        state
+                        state,
+                        undefined,
+                        currentTime
                     );
                 } else {
                     console.log(`[MoveTrackManager] Tile ${i} rotation already at target, skipping animation`);
@@ -427,13 +494,6 @@ export class MoveTrackManager {
 
                 // Handle scaleX
                 if (scale[0] !== 100) {
-                    if (state.tweens.has('scaleX')) {
-                        const oldTween = state.tweens.get('scaleX');
-                        if (oldTween?.tween?.frameId) {
-                            cancelAnimationFrame(oldTween.tween.frameId);
-                        }
-                    }
-
                     if (!this.approximatelyEqual(tileMesh.scale.x, targetScaleX)) {
                         this.animateProperty(
                             tileMesh,
@@ -442,20 +502,15 @@ export class MoveTrackManager {
                             targetScaleX,
                             duration,
                             easingFunc,
-                            state
+                            state,
+                            undefined,
+                            currentTime
                         );
                     }
                 }
 
                 // Handle scaleY
                 if (scale[1] !== 100) {
-                    if (state.tweens.has('scaleY')) {
-                        const oldTween = state.tweens.get('scaleY');
-                        if (oldTween?.tween?.frameId) {
-                            cancelAnimationFrame(oldTween.tween.frameId);
-                        }
-                    }
-
                     if (!this.approximatelyEqual(tileMesh.scale.y, targetScaleY)) {
                         this.animateProperty(
                             tileMesh,
@@ -464,30 +519,28 @@ export class MoveTrackManager {
                             targetScaleY,
                             duration,
                             easingFunc,
-                            state
+                            state,
+                            undefined,
+                            currentTime
                         );
                     }
                 }
             }
 
             // Opacity animation
-            if (opacityUsed) {
-                if (state.tweens.has('opacity')) {
-                    const oldTween = state.tweens.get('opacity');
-                    if (oldTween?.tween?.frameId) {
-                        cancelAnimationFrame(oldTween.tween.frameId);
-                    }
-                }
-
-                if (!this.approximatelyEqual(tileMesh.userData.opacity || 1, opacity)) {
+            if (event.opacity !== undefined) {
+                const currentOpacity = tileMesh.userData.opacity !== undefined ? tileMesh.userData.opacity : 1;
+                if (!this.approximatelyEqual(currentOpacity, opacity)) {
                     this.animateProperty(
                         tileMesh,
                         'opacity',
-                        tileMesh.userData.opacity || 1,
+                        currentOpacity,
                         opacity,
                         duration,
                         easingFunc,
-                        state
+                        state,
+                        undefined,
+                        currentTime
                     );
                 }
             }
@@ -537,7 +590,19 @@ export class MoveTrackManager {
     }
 
     /**
-     * Animate a property using requestAnimationFrame
+     * Register a property animation to be updated via game clock in update()
+     * Instead of using requestAnimationFrame, we store the animation params
+     * and update them synchronously via update() with game time
+     * 
+     * @param mesh The mesh to animate (currently unused since we track by tileIndex)
+     * @param property Property name to animate
+     * @param startValue Starting value
+     * @param endValue Target value
+     * @param duration Duration in seconds
+     * @param easingFunc Easing function
+     * @param state Animation state to store parameters in
+     * @param extra Extra parameters
+     * @param startTime Current game time when animation starts
      */
     private animateProperty(
         mesh: THREE.Mesh,
@@ -547,52 +612,54 @@ export class MoveTrackManager {
         duration: number,
         easingFunc: (t: number) => number,
         state: TileAnimationState,
-        extra?: any
+        extra?: any,
+        startTime: number = 0
     ): void {
-        const startTime = performance.now();
-
-        const animate = (currentTime: number) => {
-            const elapsed = (currentTime - startTime) / 1000;
-            const progress = Math.min(elapsed / duration, 1);
-            const easedProgress = easingFunc(progress);
-            const value = startValue + (endValue - startValue) * easedProgress;
-
+        // Guard against zero duration - apply target value immediately
+        if (duration <= 0) {
             switch (property) {
-                case 'positionX':
-                    mesh.position.x = value;
-                    break;
-                case 'positionY':
-                    mesh.position.y = value;
-                    break;
-                case 'rotation':
-                    mesh.rotation.z = value;
-                    break;
-                case 'scale':
-                    mesh.scale.x = value;
-                    if (extra?.scaleY !== undefined) {
-                        mesh.scale.y = startValue + (extra.scaleY - startValue) * easedProgress;
-                    } else {
-                        mesh.scale.y = value;
-                    }
-                    break;
+                case 'positionX': mesh.position.x = endValue; break;
+                case 'positionY': mesh.position.y = endValue; break;
+                case 'rotation': mesh.rotation.z = endValue; break;
+                case 'scaleX': mesh.scale.x = endValue; break;
+                case 'scaleY': mesh.scale.y = endValue; break;
                 case 'opacity':
-                    if (mesh.material && 'opacity' in mesh.material) {
-                        (mesh.material as any).opacity = value;
+                    if (mesh.material) {
+                        if (mesh.material instanceof THREE.ShaderMaterial && mesh.material.uniforms.opacity) {
+                            mesh.material.uniforms.opacity.value = endValue;
+                        } else {
+                            (mesh.material as any).opacity = endValue;
+                        }
+                        (mesh.material as any).transparent = endValue < 0.999;
+                        mesh.userData.opacity = endValue;
+
+                        // Update children (decorations/icons) opacity
+                        mesh.traverse((child) => {
+                            if (child !== mesh && (child as any).material) {
+                                const childMat = (child as any).material;
+                                if (childMat.opacity !== undefined) {
+                                    childMat.opacity = endValue;
+                                    childMat.transparent = endValue < 0.999;
+                                }
+                            }
+                        });
                     }
                     break;
             }
+            state.animations.delete(property);
+            return;
+        }
 
-            if (progress < 1) {
-                const frameId = requestAnimationFrame(animate);
-                state.tweens.set(property, { type: property as any, tween: { frameId } });
-            } else {
-                // Animation complete
-                state.tweens.delete(property);
-            }
-        };
-
-        const frameId = requestAnimationFrame(animate);
-        state.tweens.set(property, { type: property as any, tween: { frameId } });
+        // Store animation data for updateActiveAnimations() to process
+        state.animations.set(property, {
+            property,
+            startValue,
+            endValue,
+            startTime, // Current game time when animation starts
+            duration,
+            easingFunc,
+            extra
+        });
     }
 
     /**
@@ -665,102 +732,41 @@ export class MoveTrackManager {
     }
 
     /**
-     * Reset all tiles to their initial state
-     */
-    private resetTiles(): void {
-        if (!this.tiles) {
-            console.log('[MoveTrackManager] resetTiles: tiles is null');
-            return;
-        }
-
-        console.log('[MoveTrackManager] resetTiles: resetting', this.tiles.size, 'tiles');
-        console.log('[MoveTrackManager] resetTiles: tileInitialStates has', this.tileInitialStates.size, 'entries');
-
-        let resetCount = 0;
-        this.tiles.forEach((tileMesh, tileId) => {
-            const index = parseInt(tileId);
-            const initialState = this.tileInitialStates.get(index);
-
-            if (initialState) {
-                // Reset to stored initial state
-                tileMesh.position.copy(initialState.position);
-                tileMesh.rotation.copy(initialState.rotation);
-                tileMesh.scale.copy(initialState.scale);
-                resetCount++;
-            } else {
-                console.log(`[MoveTrackManager] resetTiles: No initial state for tile ${index}`);
-                // If no stored initial state, reset to original level data position
-                const tile = this.levelData.tiles[index];
-                if (tile) {
-                    const [x, y] = tile.position;
-                    const zLevel = 12 - index;
-                    tileMesh.position.set(x, y, zLevel * 0.1);
-                    tileMesh.rotation.set(0, 0, 0);
-                    tileMesh.scale.set(1, 1, 1);
-                }
-            }
-
-            // Reset opacity (if material supports it)
-            if ((tileMesh.material as any).opacity !== undefined) {
-                (tileMesh.material as any).opacity = 1;
-                (tileMesh.material as any).transparent = false;
-            }
-        });
-
-        console.log('[MoveTrackManager] resetTiles: successfully reset', resetCount, 'tiles');
-    }
-
-    /**
-     * Reset MoveTrack (restore tiles to initial positions without clearing resources)
+     * Reset all animations and tiles to initial state
      */
     public reset(): void {
-        console.log('[MoveTrackManager] reset: resetting tiles to initial state');
-
-        // Stop all running tweens first
-        this.tileAnimationStates.forEach(state => {
-            state.tweens.forEach(tween => {
-                if (tween.tween?.frameId) {
-                    cancelAnimationFrame(tween.tween.frameId);
-                }
-            });
-            state.tweens.clear();
-        });
-
-        // Reset all tiles to initial state
-        this.resetTiles();
-
-        // Clear active MoveTrack animations
+        console.log('[MoveTrackManager] Resetting animations and tiles');
+        
+        // Clear active animations
+        this.tileAnimationStates.clear();
         this.activeMoveTracks.clear();
-
-        // Reset timeline index
         this.lastMoveTrackEventIndex = -1;
 
-        console.log('[MoveTrackManager] reset: complete');
+        // Reset tiles to their captured initial states
+        if (this.tiles) {
+            this.tileInitialStates.forEach((initial, index) => {
+                const mesh = this.tiles!.get(index.toString());
+                if (mesh) {
+                    mesh.position.copy(initial.position);
+                    mesh.rotation.copy(initial.rotation);
+                    mesh.scale.copy(initial.scale);
+                    mesh.userData.opacity = initial.opacity;
+                    
+                    if (mesh.material) {
+                        (mesh.material as any).opacity = initial.opacity;
+                        (mesh.material as any).transparent = initial.opacity < 0.999;
+                    }
+                }
+            });
+        }
     }
 
     /**
-     * Dispose resources
+     * Dispose
      */
     public dispose(): void {
-        console.log('[MoveTrackManager] dispose: starting cleanup');
-
-        // Reset all tiles to initial state
-        this.resetTiles();
-
-        // Stop all tweens
-        this.tileAnimationStates.forEach(state => {
-            state.tweens.forEach(tween => {
-                if (tween.tween?.frameId) {
-                    cancelAnimationFrame(tween.tween.frameId);
-                }
-            });
-        });
-        this.tileAnimationStates.clear();
+        this.reset();
+        this.tileInitialStates.clear();
         this.moveTrackEventsTimeline = [];
-
-        // Clear active MoveTrack animations
-        this.activeMoveTracks.clear();
-
-        console.log('[MoveTrackManager] dispose: cleanup complete');
     }
 }

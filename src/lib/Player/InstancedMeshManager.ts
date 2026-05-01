@@ -5,6 +5,7 @@ import * as THREE from 'three';
  */
 interface TileInstance {
     index: number;
+    shapeKey: string;
     position: THREE.Vector3;
     rotation: THREE.Euler;
     scale: THREE.Vector3;
@@ -63,36 +64,37 @@ export class InstancedMeshManager {
         const material = new THREE.ShaderMaterial({
             uniforms: {},
             vertexShader: `
-                attribute vec3 instanceColor;
-                attribute vec3 instanceBgColor;
-                attribute float instanceOpacity;
+                attribute vec3 iColor;
+                attribute vec3 iBgColor;
+                attribute float iOpacity;
                 
                 varying vec3 vColor;
-                varying vec3 vBgColor;
-                varying float vOpacity;
                 varying vec3 vInstanceColor;
+                varying vec3 vInstanceBgColor;
+                varying float vOpacity;
                 
                 void main() {
                     vColor = color;
-                    vBgColor = color2;
-                    vOpacity = instanceOpacity;
-                    vInstanceColor = instanceColor;
+                    vInstanceColor = iColor;
+                    vInstanceBgColor = iBgColor;
+                    vOpacity = iOpacity;
                     
-                    vec4 worldPosition = instanceMatrix * vec4(position, 1.0);
-                    gl_Position = projectionMatrix * viewMatrix * worldPosition;
+                    gl_Position = projectionMatrix * modelViewMatrix * instanceMatrix * vec4(position, 1.0);
                 }
             `,
             fragmentShader: `
                 varying vec3 vColor;
-                varying vec3 vBgColor;
-                varying float vOpacity;
                 varying vec3 vInstanceColor;
+                varying vec3 vInstanceBgColor;
+                varying float vOpacity;
                 
                 void main() {
-                    vec3 finalColor = mix(vBgColor, vInstanceColor, vColor.r);
+                    // Mix instance colors based on vertex color red channel
+                    vec3 finalColor = mix(vInstanceBgColor, vInstanceColor, vColor.r);
                     gl_FragColor = vec4(finalColor, vOpacity);
                 }
             `,
+            vertexColors: true,
             side: THREE.DoubleSide,
             transparent: true,
             depthTest: true,
@@ -101,26 +103,28 @@ export class InstancedMeshManager {
 
         const instancedMesh = new THREE.InstancedMesh(geometry, material, maxInstances);
         instancedMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+        instancedMesh.renderOrder = 0; // Standard tile level
+        instancedMesh.frustumCulled = false; // Prevent tiles from disappearing when camera moves
+        instancedMesh.count = 0; // Start with 0 visible instances
 
         // Create instance color attributes
-        const instanceColor = new THREE.InstancedBufferAttribute(
+        const iColor = new THREE.InstancedBufferAttribute(
             new Float32Array(maxInstances * 3),
             3
         );
-        const instanceBgColor = new THREE.InstancedBufferAttribute(
+        const iBgColor = new THREE.InstancedBufferAttribute(
             new Float32Array(maxInstances * 3),
             3
         );
-        const instanceOpacity = new THREE.InstancedBufferAttribute(
+        const iOpacity = new THREE.InstancedBufferAttribute(
             new Float32Array(maxInstances),
             1
         );
 
-        instancedMesh.geometry.setAttribute('instanceColor', instanceColor);
-        instancedMesh.geometry.setAttribute('instanceBgColor', instanceBgColor);
-        instancedMesh.geometry.setAttribute('instanceOpacity', instanceOpacity);
+        instancedMesh.geometry.setAttribute('iColor', iColor);
+        instancedMesh.geometry.setAttribute('iBgColor', iBgColor);
+        instancedMesh.geometry.setAttribute('iOpacity', iOpacity);
 
-        instancedMesh.instanceColor = instanceColor;
         instancedMesh.instanceMatrix.needsUpdate = true;
 
         const dummy = new THREE.Object3D();
@@ -156,9 +160,26 @@ export class InstancedMeshManager {
     ): void {
         if (!this.useInstancedMesh) return;
 
+        // Check if tile already exists and if its shape has changed
+        const existingInstance = this.tileInstances.get(tileIndex);
+        if (existingInstance && existingInstance.shapeKey !== shapeKey) {
+            // Remove from old shape instanced mesh
+            const oldShapeData = this.instancedMeshes.get(existingInstance.shapeKey);
+            if (oldShapeData) {
+                const oldInstanceIndex = oldShapeData.instances.get(tileIndex);
+                if (oldInstanceIndex !== undefined) {
+                    // Hide in old mesh
+                    oldShapeData.instancedMesh.geometry.attributes.iOpacity!.setX(oldInstanceIndex, 0);
+                    oldShapeData.instancedMesh.geometry.attributes.iOpacity!.needsUpdate = true;
+                    oldShapeData.instances.delete(tileIndex);
+                }
+            }
+        }
+
         // Store instance data
         const instance: TileInstance = {
             index: tileIndex,
+            shapeKey,
             position: position.clone(),
             rotation: rotation.clone() as THREE.Euler,
             scale: scale.clone(),
@@ -189,6 +210,7 @@ export class InstancedMeshManager {
             instanceIndex = shapeData.instanceCount;
             shapeData.instances.set(tileIndex, instanceIndex);
             shapeData.instanceCount++;
+            shapeData.instancedMesh.count = shapeData.instanceCount;
         }
 
         // Update instance transform and color
@@ -196,7 +218,13 @@ export class InstancedMeshManager {
 
         dummy.position.copy(position);
         dummy.rotation.copy(rotation);
-        dummy.scale.copy(scale);
+        
+        if (visible) {
+            dummy.scale.copy(scale);
+        } else {
+            dummy.scale.set(0, 0, 0);
+        }
+        
         dummy.updateMatrix();
 
         instancedMesh.setMatrixAt(instanceIndex, dummy.matrix);
@@ -205,24 +233,109 @@ export class InstancedMeshManager {
         const color3 = new THREE.Color(color);
         const bgColor3 = new THREE.Color(bgColor);
 
-        instancedMesh.geometry.attributes.instanceColor!.setXYZ(
+        instancedMesh.geometry.attributes.iColor!.setXYZ(
             instanceIndex,
             color3.r,
             color3.g,
             color3.b
         );
-        instancedMesh.geometry.attributes.instanceBgColor!.setXYZ(
+        instancedMesh.geometry.attributes.iBgColor!.setXYZ(
             instanceIndex,
             bgColor3.r,
             bgColor3.g,
             bgColor3.b
         );
-        instancedMesh.geometry.attributes.instanceOpacity!.setX(instanceIndex, opacity);
+        instancedMesh.geometry.attributes.iOpacity!.setX(instanceIndex, opacity);
 
         instancedMesh.instanceMatrix.needsUpdate = true;
-        instancedMesh.geometry.attributes.instanceColor!.needsUpdate = true;
-        instancedMesh.geometry.attributes.instanceBgColor!.needsUpdate = true;
-        instancedMesh.geometry.attributes.instanceOpacity!.needsUpdate = true;
+        instancedMesh.geometry.attributes.iColor!.needsUpdate = true;
+        instancedMesh.geometry.attributes.iBgColor!.needsUpdate = true;
+        instancedMesh.geometry.attributes.iOpacity!.needsUpdate = true;
+    }
+
+    /**
+     * Update only transform for an existing tile
+     */
+    public updateTileTransform(
+        tileIndex: number,
+        position: THREE.Vector3,
+        rotation: THREE.Euler,
+        scale: THREE.Vector3,
+        opacity?: number
+    ): void {
+        const instance = this.tileInstances.get(tileIndex);
+        if (!instance) return;
+
+        instance.position.copy(position);
+        instance.rotation.copy(rotation);
+        instance.scale.copy(scale);
+        if (opacity !== undefined) instance.opacity = opacity;
+
+        // Find in instanced meshes
+        for (const shapeData of this.instancedMeshes.values()) {
+            const instanceIndex = shapeData.instances.get(tileIndex);
+            if (instanceIndex !== undefined) {
+                const { instancedMesh, dummy } = shapeData;
+                
+                dummy.position.copy(position);
+                dummy.rotation.copy(rotation);
+                if (instance.visible) {
+                    dummy.scale.copy(scale);
+                } else {
+                    dummy.scale.set(0, 0, 0);
+                }
+                dummy.updateMatrix();
+                
+                instancedMesh.setMatrixAt(instanceIndex, dummy.matrix);
+                instancedMesh.instanceMatrix.needsUpdate = true;
+                
+                if (opacity !== undefined) {
+                    instancedMesh.geometry.attributes.iOpacity!.setX(instanceIndex, opacity);
+                    instancedMesh.geometry.attributes.iOpacity!.needsUpdate = true;
+                }
+                break;
+            }
+        }
+    }
+
+    /**
+     * Update only color for an existing tile
+     */
+    public updateTileColor(
+        tileIndex: number,
+        color: string,
+        bgColor: string
+    ): void {
+        const instance = this.tileInstances.get(tileIndex);
+        if (!instance) return;
+
+        instance.color.set(color);
+        instance.bgColor.set(bgColor);
+
+        // Find in instanced meshes
+        for (const shapeData of this.instancedMeshes.values()) {
+            const instanceIndex = shapeData.instances.get(tileIndex);
+            if (instanceIndex !== undefined) {
+                const { instancedMesh } = shapeData;
+                
+                instancedMesh.geometry.attributes.iColor!.setXYZ(
+                    instanceIndex,
+                    instance.color.r,
+                    instance.color.g,
+                    instance.color.b
+                );
+                instancedMesh.geometry.attributes.iBgColor!.setXYZ(
+                    instanceIndex,
+                    instance.bgColor.r,
+                    instance.bgColor.g,
+                    instance.bgColor.b
+                );
+                
+                instancedMesh.geometry.attributes.iColor!.needsUpdate = true;
+                instancedMesh.geometry.attributes.iBgColor!.needsUpdate = true;
+                break;
+            }
+        }
     }
 
     /**
@@ -243,17 +356,20 @@ export class InstancedMeshManager {
 
         const newMesh = new THREE.InstancedMesh(geometry, material, newMax);
         newMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+        newMesh.frustumCulled = false;
+        newMesh.count = shapeData.instanceCount;
+        newMesh.renderOrder = oldMesh.renderOrder;
 
         // Copy instance attributes
-        const instanceColor = new THREE.InstancedBufferAttribute(
+        const iColor = new THREE.InstancedBufferAttribute(
             new Float32Array(newMax * 3),
             3
         );
-        const instanceBgColor = new THREE.InstancedBufferAttribute(
+        const iBgColor = new THREE.InstancedBufferAttribute(
             new Float32Array(newMax * 3),
             3
         );
-        const instanceOpacity = new THREE.InstancedBufferAttribute(
+        const iOpacity = new THREE.InstancedBufferAttribute(
             new Float32Array(newMax),
             1
         );
@@ -264,24 +380,24 @@ export class InstancedMeshManager {
             oldMesh.getMatrixAt(i, matrix);
             newMesh.setMatrixAt(i, matrix);
 
-            instanceColor.setXYZ(i,
-                oldMesh.geometry.attributes.instanceColor!.getX(i),
-                oldMesh.geometry.attributes.instanceColor!.getY(i),
-                oldMesh.geometry.attributes.instanceColor!.getZ(i)
+            iColor.setXYZ(i,
+                oldMesh.geometry.attributes.iColor!.getX(i),
+                oldMesh.geometry.attributes.iColor!.getY(i),
+                oldMesh.geometry.attributes.iColor!.getZ(i)
             );
-            instanceBgColor.setXYZ(i,
-                oldMesh.geometry.attributes.instanceBgColor!.getX(i),
-                oldMesh.geometry.attributes.instanceBgColor!.getY(i),
-                oldMesh.geometry.attributes.instanceBgColor!.getZ(i)
+            iBgColor.setXYZ(i,
+                oldMesh.geometry.attributes.iBgColor!.getX(i),
+                oldMesh.geometry.attributes.iBgColor!.getY(i),
+                oldMesh.geometry.attributes.iBgColor!.getZ(i)
             );
-            instanceOpacity.setX(i,
-                oldMesh.geometry.attributes.instanceOpacity!.getX(i)
+            iOpacity.setX(i,
+                oldMesh.geometry.attributes.iOpacity!.getX(i)
             );
         }
 
-        newMesh.geometry.setAttribute('instanceColor', instanceColor);
-        newMesh.geometry.setAttribute('instanceBgColor', instanceBgColor);
-        newMesh.geometry.setAttribute('instanceOpacity', instanceOpacity);
+        newMesh.geometry.setAttribute('iColor', iColor);
+        newMesh.geometry.setAttribute('iBgColor', iBgColor);
+        newMesh.geometry.setAttribute('iOpacity', iOpacity);
 
         // Replace old mesh
         this.scene.remove(oldMesh);
@@ -305,10 +421,70 @@ export class InstancedMeshManager {
             const instanceIndex = shapeData.instances.get(tileIndex);
             if (instanceIndex !== undefined) {
                 // Mark instance as invisible (we'll handle compaction later)
-                const opacityAttr = shapeData.instancedMesh.geometry.attributes.instanceOpacity;
+                const opacityAttr = shapeData.instancedMesh.geometry.attributes.iOpacity;
                 opacityAttr.setX(instanceIndex, 0);
                 opacityAttr.needsUpdate = true;
                 shapeData.instances.delete(tileIndex);
+                break;
+            }
+        }
+    }
+
+    /**
+     * Set visibility for a tile instance
+     */
+    public setTileVisibility(tileIndex: number, visible: boolean): void {
+        const instance = this.tileInstances.get(tileIndex);
+        if (!instance) return;
+
+        if (instance.visible === visible) return;
+        instance.visible = visible;
+
+        // Find in instanced meshes
+        for (const shapeData of this.instancedMeshes.values()) {
+            const instanceIndex = shapeData.instances.get(tileIndex);
+            if (instanceIndex !== undefined) {
+                const { instancedMesh, dummy } = shapeData;
+                
+                // We need to update the matrix for this instance
+                dummy.position.copy(instance.position);
+                dummy.rotation.copy(instance.rotation);
+                
+                if (visible) {
+                    dummy.scale.copy(instance.scale);
+                } else {
+                    dummy.scale.set(0, 0, 0);
+                }
+                
+                dummy.updateMatrix();
+                instancedMesh.setMatrixAt(instanceIndex, dummy.matrix);
+                instancedMesh.instanceMatrix.needsUpdate = true;
+                
+                // Also sync opacity and colors when becoming visible
+                // to prevent stale state from off-screen animations
+                if (visible) {
+                    instancedMesh.geometry.attributes.iOpacity!.setX(instanceIndex, instance.opacity);
+                    instancedMesh.geometry.attributes.iOpacity!.needsUpdate = true;
+                    
+                    instancedMesh.geometry.attributes.iColor!.setXYZ(
+                        instanceIndex,
+                        instance.color.r,
+                        instance.color.g,
+                        instance.color.b
+                    );
+                    instancedMesh.geometry.attributes.iBgColor!.setXYZ(
+                        instanceIndex,
+                        instance.bgColor.r,
+                        instance.bgColor.g,
+                        instance.bgColor.b
+                    );
+                    instancedMesh.geometry.attributes.iColor!.needsUpdate = true;
+                    instancedMesh.geometry.attributes.iBgColor!.needsUpdate = true;
+                } else {
+                    // When hiding, also set opacity to 0 for extra safety
+                    instancedMesh.geometry.attributes.iOpacity!.setX(instanceIndex, 0);
+                    instancedMesh.geometry.attributes.iOpacity!.needsUpdate = true;
+                }
                 break;
             }
         }

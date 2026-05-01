@@ -14,38 +14,38 @@ const BOM = new Uint8Array([0xef, 0xbb, 0xbf]);
  */
 function findAllPropertiesAtRoot(buffer: Uint8Array): Map<string, number> {
   const result = new Map<string, number>();
-  
+
   // Track JSON state
   let depth = 0;
   let inString = false;
   let escapeNext = false;
   let lastQuoteEnd = -1;
-  
+
   // Property name tracking
   let propertyNameStart = -1;
   let propertyName = '';
-  
+
   for (let i = 0; i < buffer.length; i++) {
     const byte = buffer[i];
-    
+
     // Handle escape sequences
     if (escapeNext) {
       escapeNext = false;
       continue;
     }
-    
+
     if (byte === 92) { // backslash
       escapeNext = true;
       continue;
     }
-    
+
     // Track string boundaries
     if (byte === 34) { // quote
       if (inString) {
         // End of string
         inString = false;
         lastQuoteEnd = i;
-        
+
         // If we're at depth 1 and this was a property name (next non-whitespace is colon)
         if (depth === 1 && propertyNameStart !== -1) {
           // Extract property name
@@ -60,7 +60,7 @@ function findAllPropertiesAtRoot(buffer: Uint8Array): Map<string, number> {
       }
       continue;
     }
-    
+
     // Track object depth (not array depth for property finding)
     if (!inString) {
       if (byte === 123) { // {
@@ -80,7 +80,7 @@ function findAllPropertiesAtRoot(buffer: Uint8Array): Map<string, number> {
       }
     }
   }
-  
+
   return result;
 }
 
@@ -160,7 +160,7 @@ function findValueEnd(buffer: Uint8Array, startPos: number): number {
   while (i < buffer.length) {
     const byte = buffer[i];
     if (byte === 44 || byte === 125 || byte === 93 ||
-        byte === 32 || byte === 9 || byte === 10 || byte === 13) {
+      byte === 32 || byte === 9 || byte === 10 || byte === 13) {
       return i;
     }
     i++;
@@ -406,9 +406,9 @@ export class LargeFileParser {
 
     // Find ALL properties at root level in one pass
     const properties = findAllPropertiesAtRoot(view);
-    
+
     // Found properties (silent)
-    
+
     const angleDataPos = properties.get('angleData') ?? -1;
     const pathDataPos = properties.get('pathData') ?? -1;
     const settingsPos = properties.get('settings') ?? -1;

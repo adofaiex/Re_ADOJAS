@@ -8,14 +8,14 @@ import "./index.css"
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <>
-  <React.StrictMode>
-    <Router>
-      <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange={false}>
-        <I18nProvider>
-          <App />
-        </I18nProvider>
-      </ThemeProvider>
-    </Router>
-  </React.StrictMode>
+    <React.StrictMode>
+      <Router>
+        <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange={false}>
+          <I18nProvider>
+            <App />
+          </I18nProvider>
+        </ThemeProvider>
+      </Router>
+    </React.StrictMode>
   </>,
 )

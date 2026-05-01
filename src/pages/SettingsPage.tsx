@@ -70,12 +70,6 @@ export default function SettingsPage() {
           type: "showTrail",
         },
         {
-          id: "useWorker",
-          title: t("settings.useWorker.title"),
-          description: t("settings.useWorker.description"),
-          type: "useWorker",
-        },
-        {
           id: "hitsoundEnabled",
           title: t("settings.hitsoundEnabled.title"),
           description: t("settings.hitsoundEnabled.description"),
@@ -300,26 +294,6 @@ export default function SettingsPage() {
                       </button>
                       <span className="text-sm text-slate-600 dark:text-slate-400">
                         {settings.showTrail ? t("settings.showTrail.enabled") : t("settings.showTrail.disabled")}
-                      </span>
-                    </div>
-                  )}
-
-                  {setting.type === "useWorker" && (
-                    <div className="flex items-center gap-3">
-                      <button
-                        onClick={() => updateSettings({ useWorker: !settings.useWorker })}
-                        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                          settings.useWorker ? "bg-purple-500" : "bg-slate-300 dark:bg-slate-600"
-                        }`}
-                      >
-                        <span
-                          className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                            settings.useWorker ? "translate-x-6" : "translate-x-1"
-                          }`}
-                        />
-                      </button>
-                      <span className="text-sm text-slate-600 dark:text-slate-400">
-                        {settings.useWorker ? t("settings.useWorker.enabled") : t("settings.useWorker.disabled")}
                       </span>
                     </div>
                   )}

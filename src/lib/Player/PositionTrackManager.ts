@@ -51,8 +51,7 @@ export class PositionTrackManager {
      * @returns Absolute tile ID
      */
     private IDFromTile(relativeTo: [number, string], thisTileId: number): number {
-        const offset = relativeTo[0];
-        const relativeToType = relativeTo[1];
+        const [offset, relativeToType] = relativeTo;
         const totalTiles = this.levelData.tiles.length;
 
         let result: number;
@@ -247,10 +246,14 @@ export class PositionTrackManager {
                 // Calculate final position
                 const finalX = currentPos.x + tileOffset.x;
                 const finalY = currentPos.y + tileOffset.y;
-                const zLevel = 12 - i;
+                
+                // Use a stable Z calculation that doesn't clip with millions of tiles
+                // We use renderOrder for fine-grained sorting, so Z only needs to handle broad layers
+                // Bricks are around Z=0, we use a very small offset to help with depth sorting if needed
+                const zLevel = (1000 - (i % 1000)) * 0.0001; 
 
                 transforms.set(i, {
-                    position: new THREE.Vector3(finalX, finalY, zLevel * 0.1),
+                    position: new THREE.Vector3(finalX, finalY, zLevel),
                     rotation: tileRotation,
                     scale: new THREE.Vector3(tileScale, tileScale, tileScale),
                     opacity: tileOpacity,

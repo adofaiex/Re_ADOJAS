@@ -6,7 +6,6 @@ import { HitsoundManager, HitsoundType } from './HitsoundManager';
 import { BloomEffect } from './BloomEffect';
 import { FlashEffect } from './FlashEffect';
 import createTrackMesh from '../Geo/mesh_reserve';
-import { getWorkerManager, disposeWorkerManager } from '../Geo/tileWorkerManager';
 import { EasingFunctions } from './Easing';
 import { HTMLAudioMusic, getSharedAudioContext } from './HTMLAudioMusic';
 import { TileColorManager, isEventActive, TileColorConfig } from './TileColorManager';
@@ -14,6 +13,7 @@ import { CameraController, CameraTimelineEntry } from './CameraController';
 import { DecorationManager } from './DecorationManager';
 import { MoveTrackManager } from './MoveTrackManager';
 import { PositionTrackManager } from './PositionTrackManager';
+import { InstancedMeshManager } from './InstancedMeshManager';
 import Stats from 'three/examples/jsm/libs/stats.module.js';
 
 export class Player implements IPlayer {
@@ -24,7 +24,6 @@ export class Player implements IPlayer {
   private rendererType: 'webgl' | 'webgpu' = 'webgpu';
   private renderMethod: 'sync' | 'async' = 'sync';
   private showTrail: boolean = false;
-  private useWorker: boolean = true;
   private targetFramerate: TargetFramerateType = 'auto';
   private animationId: number | null = null;
   private lastFrameTime: number = 0;
@@ -115,6 +114,7 @@ export class Player implements IPlayer {
 
   // PositionTrack Manager
   private positionTrackManager: PositionTrackManager | null = null;
+  private instancedMeshManager: InstancedMeshManager | null = null;
   private isEditorMode: boolean = false; // Whether we're in editor preview mode
 
   // Bloom Effect
@@ -214,6 +214,13 @@ export class Player implements IPlayer {
 
     // Initialize Three.js components
     this.scene = new THREE.Scene();
+
+    // Initialize InstancedMeshManager
+    this.instancedMeshManager = new InstancedMeshManager(
+      this.scene,
+      (shapeKey: string) => this.generateGeometryFromShapeKey(shapeKey),
+      true // Enable instancing
+    );
     
     // Set background color from level settings
     const bgColor = this.levelData.settings?.backgroundColor || '000000';
@@ -304,6 +311,29 @@ export class Player implements IPlayer {
 
   private formatHexColor(hex: string): string {
     return this.tileColorManager.formatHexColor(hex);
+  }
+  
+  /**
+   * Helper for InstancedMeshManager to generate geometry
+   */
+  private generateGeometryFromShapeKey(shapeKey: string): THREE.BufferGeometry | null {
+    const parts = shapeKey.split('_');
+    if (parts.length < 4) return null;
+
+    const pred = parseFloat(parts[0]);
+    const currentDirection = parseFloat(parts[1]);
+    const is999 = parts[2] === 'true';
+    const trackStyle = parts[3];
+
+    const meshData = createTrackMesh(pred, currentDirection, is999, undefined, undefined, undefined, trackStyle);
+    if (!meshData || !meshData.faces) return null;
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setIndex(meshData.faces);
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(meshData.vertices, 3));
+    geometry.setAttribute('color', new THREE.Float32BufferAttribute(meshData.colors, 3));
+    geometry.computeVertexNormals();
+    return geometry;
   }
   
   /**
@@ -772,12 +802,6 @@ export class Player implements IPlayer {
     this.hitsoundManager.setEnabled(enabled);
   }
 
-  public setUseWorker(use: boolean): void {
-    this.useWorker = use;
-    const workerManager = getWorkerManager();
-    workerManager.setEnabled(use);
-  }
-
   public setTargetFramerate(framerate: TargetFramerateType): void {
     this.targetFramerate = framerate;
     this.updateFrameInterval();
@@ -1167,6 +1191,28 @@ export class Player implements IPlayer {
 
     // Update MoveTrack animations
     this.updateMoveTrack();
+
+    // Sync instanced meshes for visible tiles
+    this.syncInstancedTiles();
+  }
+
+  private syncInstancedTiles(): void {
+    if (!this.instancedMeshManager) return;
+
+    this.visibleTiles.forEach(id => {
+        const index = parseInt(id);
+        const mesh = this.tiles.get(id);
+        if (mesh) {
+            const opacity = mesh.userData.opacity !== undefined ? mesh.userData.opacity : 1.0;
+            this.instancedMeshManager!.updateTileTransform(
+                index,
+                mesh.position,
+                mesh.rotation as THREE.Euler,
+                mesh.scale,
+                opacity
+            );
+        }
+    });
   }
   
   private updateDecorations(): void {
@@ -1284,6 +1330,11 @@ export class Player implements IPlayer {
     this.useAudioContextTime = false;
     
     this.createPlanets();
+    
+    // Reset MoveTrack animations
+    if (this.moveTrackManager) {
+        this.moveTrackManager.reset();
+    }
     
     // Reset camera state
     this.cameraController.setLastCameraTimelineIndex(-1);
@@ -1622,10 +1673,11 @@ export class Player implements IPlayer {
         // Re-apply PositionTrack transforms (PositionTrack is global and applies at all times)
         this.reapplyPositionTrackTransforms();
 
-        this.tileColorManager.initTileColors();    this.lastRecolorTimelineIndex = -1;
-    this.tiles.forEach((_, id) => {
-        this.updateTileMeshColor(parseInt(id));
-    });
+        this.tileColorManager.initTileColors();
+        this.lastRecolorTimelineIndex = -1;
+        this.tiles.forEach((_, id) => {
+            this.updateTileMeshColor(parseInt(id));
+        });
   }
 
   public pausePlay(): void {
@@ -1683,6 +1735,8 @@ export class Player implements IPlayer {
           if ((mesh.material as any).opacity !== undefined) {
             const opacity = transform.opacity < 1 ? transform.opacity : 1;
             (mesh.material as any).opacity = opacity;
+            (mesh.material as any).transparent = opacity < 0.999;
+            mesh.userData.opacity = opacity;
           }
         }
       });
@@ -1692,6 +1746,9 @@ export class Player implements IPlayer {
         const transform = allTransforms.get(i);
         this.tileStickToFloors[i] = transform?.stickToFloors ?? (this.levelData.settings?.stickToFloors !== false);
       }
+
+      // Sync instanced meshes after re-applying PositionTrack in editor mode
+      this.syncInstancedTiles();
     }
   }
 
@@ -1717,6 +1774,19 @@ export class Player implements IPlayer {
         if ((mesh.material as any).opacity !== undefined) {
           const opacity = transform.opacity < 1 ? transform.opacity : 1;
           (mesh.material as any).opacity = opacity;
+          (mesh.material as any).transparent = opacity < 0.999;
+          mesh.userData.opacity = opacity;
+          
+          // Update children (decorations/icons) opacity
+          mesh.traverse((child) => {
+            if (child !== mesh && (child as any).material) {
+              const childMat = (child as any).material;
+              if (childMat.opacity !== undefined) {
+                childMat.opacity = opacity;
+                childMat.transparent = opacity < 0.999;
+              }
+            }
+          });
         }
       }
     });
@@ -1726,6 +1796,9 @@ export class Player implements IPlayer {
       const transform = allTransforms.get(i);
       this.tileStickToFloors[i] = transform?.stickToFloors ?? (this.levelData.settings?.stickToFloors !== false);
     }
+
+    // Sync instanced meshes after re-applying PositionTrack
+    this.syncInstancedTiles();
   }
 
   private buildRecolorTimeline(): void {
@@ -1796,11 +1869,20 @@ export class Player implements IPlayer {
   private updateTileMeshColor(index: number): void {
     const id = index.toString();
     const mesh = this.tiles.get(id);
-    if (mesh && mesh.material instanceof THREE.ShaderMaterial) {
-        const colors = this.tileColorManager.getTileColor(index);
-        if (colors) {
+    const colors = this.tileColorManager.getTileColor(index);
+    
+    if (colors) {
+        if (mesh && mesh.material instanceof THREE.ShaderMaterial) {
             mesh.material.uniforms.uColor.value.set(colors.color);
             mesh.material.uniforms.uBgColor.value.set(colors.secondaryColor || colors.color);
+        }
+        
+        if (this.instancedMeshManager) {
+            this.instancedMeshManager.updateTileColor(
+                index,
+                colors.color,
+                colors.secondaryColor || colors.color
+            );
         }
     }
   }
@@ -1931,8 +2013,8 @@ export class Player implements IPlayer {
       const t0 = this.levelData.tiles[0];
       const t1 = this.levelData.tiles[1];
       if (t0 && t1) {
-        this.planetRed.position.set(t0.position[0], t0.position[1], 0.1);
-        this.planetBlue.position.set(t1.position[0], t1.position[1], 0.1);
+        this.planetRed.position.set(t0.position[0], t0.position[1], 1.0);
+        this.planetBlue.position.set(t1.position[0], t1.position[1], 1.0);
       }
     }
   }
@@ -2020,6 +2102,9 @@ export class Player implements IPlayer {
             if (mesh) {
                 this.scene.remove(mesh);
             }
+            if (this.instancedMeshManager) {
+                this.instancedMeshManager.setTileVisibility(idx, false);
+            }
             this.visibleTiles.delete(id);
         }
     }
@@ -2030,7 +2115,16 @@ export class Player implements IPlayer {
       if (!this.visibleTiles.has(id)) {
         const tileMesh = this.getOrCreateTileMesh(idx);
         if (tileMesh) {
-          this.scene.add(tileMesh);
+          // If not using instancing, add to scene
+          if (!this.instancedMeshManager) {
+            this.scene.add(tileMesh);
+          } else {
+            // Even when using instancing, we need the tileMesh in the scene 
+            // so its children (decorations/icons) can be rendered.
+            // The tileMesh's own geometry is hidden via material.visible = false
+            this.scene.add(tileMesh);
+            this.instancedMeshManager.setTileVisibility(idx, true);
+          }
           this.visibleTiles.add(id);
         }
       }
@@ -2056,6 +2150,9 @@ export class Player implements IPlayer {
     for (let i = 0; i < tileEntries.length && removed < toRemoveCount; i++) {
         const [id, mesh] = tileEntries[i];
         if (!this.visibleTiles.has(id)) {
+            if (this.instancedMeshManager) {
+                this.instancedMeshManager.removeTile(parseInt(id));
+            }
             if (mesh.material instanceof THREE.Material) {
                 mesh.material.dispose();
             }
@@ -2113,7 +2210,8 @@ export class Player implements IPlayer {
     const material = new THREE.ShaderMaterial({
         uniforms: {
             uColor: { value: new THREE.Color(color) },
-            uBgColor: { value: new THREE.Color(bgcolor) }
+            uBgColor: { value: new THREE.Color(bgcolor) },
+            opacity: { value: 1.0 }
         },
         vertexShader: `
             varying vec3 vColor;
@@ -2125,20 +2223,26 @@ export class Player implements IPlayer {
         fragmentShader: `
             uniform vec3 uColor;
             uniform vec3 uBgColor;
+            uniform float opacity;
             varying vec3 vColor;
             void main() {
                 vec3 finalColor = mix(uBgColor, uColor, vColor.r);
-                gl_FragColor = vec4(finalColor, 1.0);
+                gl_FragColor = vec4(finalColor, opacity);
             }
         `,
         vertexColors: true,
         side: THREE.DoubleSide,
-        transparent: false
+        transparent: true
     });
 
     const tileMesh = new THREE.Mesh(geometry, material);
 
     // Calculate transform from PositionTrack
+    let finalPos = new THREE.Vector3(x, y, 0);
+    let finalRot = new THREE.Euler(0, 0, 0);
+    let finalScale = new THREE.Vector3(1, 1, 1);
+    let finalOpacity = 1;
+
     if (this.positionTrackManager) {
       const transform = this.positionTrackManager.getTileTransform(index);
       if (transform) {
@@ -2146,20 +2250,50 @@ export class Player implements IPlayer {
         tileMesh.rotation.z = transform.rotation * (Math.PI / 180); // Convert degrees to radians
         tileMesh.scale.copy(transform.scale);
         
+        finalPos.copy(transform.position);
+        finalRot.z = transform.rotation * (Math.PI / 180);
+        finalScale.copy(transform.scale);
+        finalOpacity = transform.opacity;
+
         // Apply opacity if supported by material
         if (transform.opacity < 1 && (material as any).transparent !== undefined) {
           (material as any).transparent = true;
           (material as any).opacity = transform.opacity;
+          tileMesh.userData.opacity = transform.opacity;
+        } else {
+          tileMesh.userData.opacity = 1;
         }
       }
     } else {
-      // Fallback to original position calculation
-      tileMesh.position.set(x, y, zLevel * 0.1);
+      // Fallback to original position calculation - use stable Z
+      const stableZ = (1000 - (index % 1000)) * 0.0001;
+      tileMesh.position.set(x, y, stableZ);
+      finalPos.set(x, y, stableZ);
+      tileMesh.userData.opacity = 1;
     }
 
     tileMesh.castShadow = true;
     tileMesh.receiveShadow = true;
     tileMesh.renderOrder = -index;
+
+    // If using instancing, update the manager
+    if (this.instancedMeshManager) {
+        this.instancedMeshManager.updateTile(
+            index,
+            shapeKey,
+            finalPos,
+            finalRot,
+            finalScale,
+            color,
+            bgcolor,
+            finalOpacity,
+            true // visible
+        );
+        // Hide individual mesh's own geometry but allow its children (decorations) to be visible
+        // We'll use a material with visible: false instead of mesh.visible = false
+        // so that children (decorations) are still rendered
+        tileMesh.material.visible = false;
+    }
     
     // Add decorations
     const decoZ = 0.002;
@@ -2175,8 +2309,14 @@ export class Player implements IPlayer {
     }
     
     if (hasTwirl && this.sharedDecoGeometry && this.sharedTwirlMaterial) {
-        const twirlMesh = new THREE.Mesh(this.sharedDecoGeometry, this.sharedTwirlMaterial);
+        // Use a unique material for each decoration so opacity can be changed independently
+        const decoMaterial = this.sharedTwirlMaterial.clone();
+        const twirlMesh = new THREE.Mesh(this.sharedDecoGeometry, decoMaterial);
         twirlMesh.position.set(0, 0, decoZ);
+        // Copy parent mesh opacity to the decoration mesh
+        const initialOpacity = tileMesh.userData.opacity !== undefined ? tileMesh.userData.opacity : 1.0;
+        decoMaterial.transparent = initialOpacity < 0.999;
+        decoMaterial.opacity = initialOpacity;
         tileMesh.add(twirlMesh);
     }
     
@@ -2184,14 +2324,21 @@ export class Player implements IPlayer {
         const currentBPM = this.tileBPM[index];
         const prevBPM = index > 0 ? this.tileBPM[index - 1] : (this.levelData.settings.bpm || 100);
         const ratio = currentBPM / prevBPM;
+        const initialOpacity = tileMesh.userData.opacity !== undefined ? tileMesh.userData.opacity : 1.0;
         
         if (ratio > 1.05 && this.sharedSpeedUpMaterial) {
-            const speedMesh = new THREE.Mesh(this.sharedDecoGeometry, this.sharedSpeedUpMaterial);
+            const decoMaterial = this.sharedSpeedUpMaterial.clone();
+            const speedMesh = new THREE.Mesh(this.sharedDecoGeometry, decoMaterial);
             speedMesh.position.set(0, 0, decoZ + (hasTwirl ? 0.001 : 0));
+            decoMaterial.transparent = initialOpacity < 0.999;
+            decoMaterial.opacity = initialOpacity;
             tileMesh.add(speedMesh);
         } else if (ratio < 0.95 && this.sharedSpeedDownMaterial) {
-            const speedMesh = new THREE.Mesh(this.sharedDecoGeometry, this.sharedSpeedDownMaterial);
+            const decoMaterial = this.sharedSpeedDownMaterial.clone();
+            const speedMesh = new THREE.Mesh(this.sharedDecoGeometry, decoMaterial);
             speedMesh.position.set(0, 0, decoZ + (hasTwirl ? 0.001 : 0));
+            decoMaterial.transparent = initialOpacity < 0.999;
+            decoMaterial.opacity = initialOpacity;
             tileMesh.add(speedMesh);
         }
     }
@@ -2279,7 +2426,7 @@ export class Player implements IPlayer {
              const pivotPos = lastTile.position;
              this.currentPivotPosition.x = pivotPos[0];
              this.currentPivotPosition.y = pivotPos[1];
-             pivotPlanet.position.set(pivotPos[0], pivotPos[1], 0.1);
+             pivotPlanet.position.set(pivotPos[0], pivotPos[1], 1.0);
              
              let startAngle = 0;
              if (lastIndex > 0) {
@@ -2302,10 +2449,10 @@ export class Player implements IPlayer {
              movingPlanet.position.set(
                  pivotPos[0] + Math.cos(currentAngle) * dist,
                  pivotPos[1] + Math.sin(currentAngle) * dist,
-                 0.1
+                 1.0
              );
              
-             pivotPlanet.position.z = 0.1;
+             pivotPlanet.position.z = 1.0;
              pivotPlanet.update(0, currentTimeInSeconds);
              movingPlanet.update(0, currentTimeInSeconds);
         }
@@ -2341,7 +2488,7 @@ export class Player implements IPlayer {
         this.currentPivotPosition.y = pivotPos.y;
 
         // Pivot planet uses the selected position
-        pivotPlanet.position.set(pivotPos.x, pivotPos.y, 0.1);
+        pivotPlanet.position.set(pivotPos.x, pivotPos.y, 1.0);
 
         const startTime = this.tileStartTimes[tileIndex];
         const duration = this.tileDurations[tileIndex];
@@ -2360,7 +2507,7 @@ export class Player implements IPlayer {
         const planetX = pivotPos.x + Math.cos(currentAngle) * currentDist;
         const planetY = pivotPos.y + Math.sin(currentAngle) * currentDist;
 
-        movingPlanet.position.set(planetX, planetY, 0.1);
+        movingPlanet.position.set(planetX, planetY, 1.0);
     }
     
     this.planetRed.update(0, currentTimeInSeconds);
@@ -2686,6 +2833,12 @@ export class Player implements IPlayer {
     if (this.moveTrackManager) {
       this.moveTrackManager.dispose();
       this.moveTrackManager = null;
+    }
+
+    // Cleanup InstancedMeshManager
+    if (this.instancedMeshManager) {
+      this.instancedMeshManager.dispose();
+      this.instancedMeshManager = null;
     }
 
     // Cleanup Three.js resources

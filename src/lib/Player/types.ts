@@ -16,7 +16,6 @@ export interface IPlayer {
   setRenderMethod(method: 'sync' | 'async'): void;
   setShowTrail(show: boolean): void;
   setHitsoundEnabled(enabled: boolean): void;
-  setUseWorker(use: boolean): void;
   setTargetFramerate(framerate: TargetFramerateType): void;
   setOGGCompression(enabled: boolean): void;
   setZoom(zoom: number): void;

@@ -19,6 +19,7 @@ export class Planet implements IPlanet {
     const geometry = new THREE.SphereGeometry(this.radius, 32, 32);
     const material = new THREE.MeshBasicMaterial({ color: this.color });
     this.mesh = new THREE.Mesh(geometry, material);
+    this.mesh.renderOrder = 110; // Set higher than tiles (0) and trail (100)
     
     if (initialPosition) {
       this.position.copy(initialPosition);

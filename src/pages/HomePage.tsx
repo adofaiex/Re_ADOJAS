@@ -29,7 +29,7 @@ export default function HomePage() {
       <header className="flex justify-between items-center p-4 sm:p-6 w-full">
         <div className="flex items-center gap-2">
           <Cube className="w-6 h-6 sm:w-8 sm:h-8 text-purple-400 dark:text-purple-400" />
-          <span className="text-lg sm:text-xl font-bold text-slate-900 dark:text-white">Re_ADOJAS</span>
+          <span className="text-lg sm:text-xl font-bold text-slate-900 dark:text-white">ADOJAS</span>
         </div>
         <div className="flex items-center gap-2">
           <Link to="/mesh">
@@ -39,10 +39,9 @@ export default function HomePage() {
               className="text-slate-700 dark:text-white hover:bg-slate-100 dark:hover:bg-white/10 hover:text-slate-900 dark:hover:text-white"
             >
               <Code className="w-4 h-4 text-slate-700 dark:text-white" />
-              Mesh 测试
             </Button>
           </Link>
-          <a href="https://github.com/flutas-web/Re_ADOJAS" target="_blank" rel="noopener noreferrer">
+          <a href="https://github.com/flutas-web/ADOJAS" target="_blank" rel="noopener noreferrer">
             <Button
               variant="ghost"
               size="sm"

@@ -52,19 +52,19 @@ export class CameraController {
     private cameraTransition: CameraTransition;
     private cameraTimeline: CameraTimelineEntry[] = [];
     private lastCameraTimelineIndex: number = -1;
-    
+
     // Track active transitions by property to handle parallel non-conflicting transitions
     private activeTransitions: Map<string, CameraTransition> = new Map();
-    
+
     private levelData: any;
     private tileStartTimes: number[];
     private tileBPM: number[];
-    
+
     constructor(levelData: any, tileStartTimes: number[], tileBPM: number[]) {
         this.levelData = levelData;
         this.tileStartTimes = tileStartTimes;
         this.tileBPM = tileBPM;
-        
+
         this.cameraMode = {
             relativeTo: 'Player',
             anchorTileIndex: 0,
@@ -74,7 +74,7 @@ export class CameraController {
             angleOffset: 0,
             lastEventRelativePosition: { x: 0, y: 0 }
         };
-        
+
         this.cameraTransition = {
             active: false,
             startTime: 0,
@@ -95,27 +95,27 @@ export class CameraController {
             ease: 'Linear'
         };
     }
-    
+
     public getCameraMode(): CameraMode {
         return this.cameraMode;
     }
-    
+
     public getCameraTransition(): CameraTransition {
         return this.cameraTransition;
     }
-    
+
     public getCameraTimeline(): CameraTimelineEntry[] {
         return this.cameraTimeline;
     }
-    
+
     public getLastCameraTimelineIndex(): number {
         return this.lastCameraTimelineIndex;
     }
-    
+
     public setLastCameraTimelineIndex(index: number): void {
         this.lastCameraTimelineIndex = index;
     }
-    
+
     /**
      * Reset camera state from level settings
      */
@@ -124,15 +124,15 @@ export class CameraController {
         if (settings) {
             this.cameraMode.relativeTo = settings.relativeTo || 'Player';
             this.cameraMode.anchorTileIndex = 0;
-            this.cameraMode.position = settings.position ? { x: settings.position[0], y: settings.position[1] } : { x: 0, y: 0 };
+            this.cameraMode.position = (settings.position && Array.isArray(settings.position)) ? { x: settings.position[0], y: settings.position[1] } : { x: 0, y: 0 };
             this.cameraMode.rotation = settings.rotation !== undefined ? settings.rotation : 0;
             this.cameraMode.zoom = settings.zoom !== undefined ? settings.zoom : 100;
             this.cameraMode.angleOffset = settings.angleOffset !== undefined ? settings.angleOffset : 0;
-            
+
             // Initialize lastEventRelativePosition based on relativeTo
             if (this.cameraMode.relativeTo === 'Tile') {
                 const tile = this.levelData.tiles[0];
-                this.cameraMode.lastEventRelativePosition = tile ? { x: tile.position[0], y: tile.position[1] } : { x: 0, y: 0 };
+                this.cameraMode.lastEventRelativePosition = (tile && tile.position) ? { x: tile.position[0], y: tile.position[1] } : { x: 0, y: 0 };
             } else if (this.cameraMode.relativeTo === 'Global') {
                 this.cameraMode.lastEventRelativePosition = { x: 0, y: 0 };
             } else {
@@ -150,7 +150,7 @@ export class CameraController {
             };
         }
     }
-    
+
     /**
      * Build camera event timeline
      * 处理特殊情况：如果多个运镜事件在同一floor上，angleOffset都为0，
@@ -159,35 +159,35 @@ export class CameraController {
     public buildCameraTimeline(tileCameraEvents: Map<number, any[]>): void {
         this.cameraTimeline = [];
         const entries: CameraTimelineEntry[] = [];
-        
+
         tileCameraEvents.forEach((events, floor) => {
             const startTime = this.tileStartTimes[floor] || 0; // seconds
             const bpm = this.tileBPM[floor] || 100;
             const secPerBeat = 60 / bpm;
-            
+
             // 按id排序，处理同一floor且angleOffset都为0的情况
             const sortedEvents = [...events].sort((a, b) => {
                 const aId = a.id !== undefined ? a.id : Infinity;
                 const bId = b.id !== undefined ? b.id : Infinity;
                 return aId - bId;
             });
-            
+
             sortedEvents.forEach((event, index) => {
                 // Skip disabled events
                 if (!isEventActive(event)) return;
-                
+
                 // Ensure floor is attached to the event for relativeTo: Tile
                 const eventWithFloor = { ...event, floor };
-                
+
                 // angleOffset is in degrees. 180 degrees = 1 beat.
                 const angleOffset = event.angleOffset || 0;
                 let timeOffset = (angleOffset / 180) * secPerBeat;
-                
+
                 // 特殊处理：同一floor上的多个事件，如果angleOffset都为0
                 // 则按id顺序微调时间，确保不同的事件按顺序执行
                 if (angleOffset === 0) {
                     // 检查是否有其他同floor的angleOffset为0的事件
-                    const sameFloorZeroOffsetEvents = sortedEvents.filter(e => 
+                    const sameFloorZeroOffsetEvents = sortedEvents.filter(e =>
                         isEventActive(e) && (e.angleOffset || 0) === 0
                     );
                     if (sameFloorZeroOffsetEvents.length > 1) {
@@ -196,13 +196,13 @@ export class CameraController {
                         timeOffset += eventIndex * 0.0001; // 100微秒的差异
                     }
                 }
-                
+
                 const eventTime = startTime + timeOffset;
-                
+
                 entries.push({ time: eventTime, event: eventWithFloor });
             });
         });
-        
+
         // Sort by time, then by id for same-time events
         entries.sort((a, b) => {
             if (Math.abs(a.time - b.time) < 0.0001) {
@@ -215,7 +215,7 @@ export class CameraController {
         });
         this.cameraTimeline = entries;
     }
-    
+
     /**
      * Process a camera event
      * @param event The camera event
@@ -224,30 +224,30 @@ export class CameraController {
      * @param cameraSnapshot Current camera state snapshot { position, zoom, rotation }
      */
     public processCameraEvent(
-        event: any, 
-        floorIndex: number, 
+        event: any,
+        floorIndex: number,
         elapsedTime: number,
         cameraSnapshot?: { position: { x: number; y: number }; zoom: number; rotation: number }
     ): void {
         // Skip disabled events
         if (!isEventActive(event)) return;
-        
+
         const duration = (event.duration !== undefined) ? event.duration : 0;
         const relativeTo = event.relativeTo; // Can be undefined - treat as offset from current position
-        
+
         // Determine which properties this event will modify
         const modifiesPosition = event.position !== undefined && event.position !== null;
         const modifiesRotation = event.rotation !== undefined && event.rotation !== null;
         const modifiesZoom = event.zoom !== undefined && event.zoom !== null;
         const modifiesRelativeTo = relativeTo !== undefined && relativeTo !== null;
-        
+
         // Check for conflicting active transitions
         const conflictingKeys: string[] = [];
         if (modifiesPosition) conflictingKeys.push('position');
         if (modifiesRotation) conflictingKeys.push('rotation');
         if (modifiesZoom) conflictingKeys.push('zoom');
         if (modifiesRelativeTo) conflictingKeys.push('relativeTo');
-        
+
         // If there are conflicting transitions, complete them instantly
         for (const key of conflictingKeys) {
             if (this.activeTransitions.has(key)) {
@@ -259,14 +259,14 @@ export class CameraController {
                 this.activeTransitions.delete(key);
             }
         }
-        
+
         // Capture ACTUAL current camera position (from camera snapshot) as transition start point
         // This ensures parallel events start from the same actual camera position
         // NOT from cameraMode.position which may have been modified by previous events
         let currentLogicalPos = { ...this.cameraMode.position };
         let currentLogicalZoom = this.cameraMode.zoom;
         let currentLogicalRotation = this.cameraMode.rotation;
-        
+
         const startLogicalPos = currentLogicalPos;
         const startLogicalZoom = currentLogicalZoom;
         const startLogicalRotation = currentLogicalRotation;
@@ -275,7 +275,7 @@ export class CameraController {
         // If relativeTo is undefined, keep current relativeTo (position will be treated as offset)
         let nextRelativeTo = this.cameraMode.relativeTo;
         let relativeToSpecified = false;
-        
+
         if (relativeTo !== undefined && relativeTo !== null) {
             relativeToSpecified = true;
             if (typeof relativeTo === 'string') {
@@ -284,13 +284,13 @@ export class CameraController {
                 nextRelativeTo = ['Player', 'Tile', 'Global', 'LastPosition', 'LastPositionNoRotation'][relativeTo] || 'Player';
             }
         }
-        
+
         // 处理LastPosition系列的参考系查找
         // 如果当前event的relativeTo是LastPosition系列，需要回溯找到真实的参考系
         let realRelativeTo = nextRelativeTo;
         let accumulatedPosition = { x: 0, y: 0 };
         let accumulatedRotation = 0;
-        
+
         if (relativeToSpecified && (nextRelativeTo === 'LastPosition' || nextRelativeTo === 'LastPositionNoRotation')) {
             // 向前查找，直到找到非LastPosition的参考系
             realRelativeTo = this.findRealRelativeTo(floorIndex, accumulatedPosition, nextRelativeTo === 'LastPositionNoRotation');
@@ -313,8 +313,10 @@ export class CameraController {
                     this.cameraMode.anchorTileIndex = floorIndex;
                     // ADOFAI: this.cam.lastEventRelativePosition = this.floorPos;
                     const tile = this.levelData.tiles[floorIndex];
-                    if (tile) {
+                    if (tile && tile.position) {
                         this.cameraMode.lastEventRelativePosition = { x: tile.position[0], y: tile.position[1] };
+                    } else {
+                        this.cameraMode.lastEventRelativePosition = { x: 0, y: 0 };
                     }
                 } else if (nextRelativeTo === 'Global') {
                     this.cameraMode.anchorTileIndex = 0; // Default or ignored
@@ -335,7 +337,7 @@ export class CameraController {
         // 2. Update Position
         // Position values are multiplied by tileSize
         const TILE_SIZE = 1.0; // Tile size in world units (matches Re_ADOJAS system)
-        
+
         // Determine if position is explicitly specified in the event
         // 关键修复：[null, null]应该被视为position未指定（即保持当前位置）
         let positionSpecified = event.position !== undefined && event.position !== null;
@@ -345,11 +347,11 @@ export class CameraController {
                 positionSpecified = false; // 视为position未指定
             }
         }
-        
+
         if (positionSpecified) {
             const px = (event.position[0] !== null && event.position[0] !== undefined) ? event.position[0] * TILE_SIZE : null;
             const py = (event.position[1] !== null && event.position[1] !== undefined) ? event.position[1] * TILE_SIZE : null;
-            
+
             // 关键修复：当relativeTo未指定时，position应该作为偏移应用到当前位置
             if (!relativeToSpecified) {
                 // relativeTo未指定：position作为相对偏移
@@ -367,7 +369,7 @@ export class CameraController {
         } else {
             // Position未指定时的处理逻辑
             // 关键：position未指定时应该重置为[0, 0]（除了LastPosition系列）
-            
+
             if (nextRelativeTo === 'LastPosition' || nextRelativeTo === 'LastPositionNoRotation') {
                 // LastPosition模式：保持累积位置，position未指定不改变
                 // No change needed, cameraMode.position is already cumulative
@@ -403,9 +405,9 @@ export class CameraController {
         if (eventBPM > 20000) {
             // 检查relativeTo是否为Player
             const isPlayerMode = relativeTo === undefined ||
-                                relativeTo === 'Player' ||
-                                (typeof relativeTo === 'number' && relativeTo === 0) ||
-                                nextRelativeTo === 'Player';
+                relativeTo === 'Player' ||
+                (typeof relativeTo === 'number' && relativeTo === 0) ||
+                nextRelativeTo === 'Player';
             if (isPlayerMode) {
                 effectiveDuration = 0;
                 console.log(`[CameraController] High BPM detected (${eventBPM}), forcing instant camera move for Player mode`);
@@ -421,10 +423,10 @@ export class CameraController {
             this.cameraTransition.startTime = elapsedTime / 1000;
             this.cameraTransition.duration = durationSeconds;
             this.cameraTransition.ease = event.ease || 'Linear';
-            
+
             // Use provided camera snapshot or defaults
             const snapshot = cameraSnapshot || { position: { x: 0, y: 0 }, zoom: 1, rotation: 0 };
-            
+
             this.cameraTransition.startSnapshot = {
                 position: { x: snapshot.position.x, y: snapshot.position.y },
                 zoom: snapshot.zoom,
@@ -435,7 +437,7 @@ export class CameraController {
             };
         }
     }
-    
+
     /**
      * Calculate target camera position based on camera mode and interpolated logical position
      * Matches ADOFAI ffxCameraPlus.cs logic
@@ -445,15 +447,15 @@ export class CameraController {
     public calculateTargetPosition(currentPivotPosition: { x: number; y: number }, interpolatedLogicalPos?: { x: number; y: number }): { x: number; y: number } {
         let targetX = 0;
         let targetY = 0;
-        
+
         // Use interpolated logical position if provided (for animation), otherwise use target logical position
         const logicalPos = interpolatedLogicalPos || { ...this.cameraMode.position };
-        
+
         // Handle transition interpolation
         if (this.cameraTransition.active && !interpolatedLogicalPos) {
             // This will be handled separately in the main update loop
         }
-        
+
         if (this.cameraMode.relativeTo === 'Player') {
             // Player mode: position is offset from planet position
             // ADOFAI: finalPos = vector2 (where vector2 is the offset from planet)
@@ -463,19 +465,19 @@ export class CameraController {
             // Global mode: position is from world origin
             // ADOFAI uses the first tile's position as origin reference
             const tile0 = this.levelData.tiles[0];
-            const originX = tile0 ? tile0.position[0] : 0;
-            const originY = tile0 ? tile0.position[1] : 0;
+            const originX = (tile0 && tile0.position) ? tile0.position[0] : 0;
+            const originY = (tile0 && tile0.position) ? tile0.position[1] : 0;
             targetX = originX + logicalPos.x;
             targetY = originY + logicalPos.y;
         } else if (this.cameraMode.relativeTo === 'Tile') {
             // Tile mode: position is offset from anchor tile
             // ADOFAI: finalPos = vector2 + floorPos
             const tile = this.levelData.tiles[this.cameraMode.anchorTileIndex];
-            if (tile) {
+            if (tile && tile.position) {
                 targetX = tile.position[0] + logicalPos.x;
                 targetY = tile.position[1] + logicalPos.y;
             } else {
-                // Fallback to Player mode if tile doesn't exist
+                // Fallback to Player mode if tile doesn't exist or position not yet calculated
                 targetX = currentPivotPosition.x + logicalPos.x;
                 targetY = currentPivotPosition.y + logicalPos.y;
             }
@@ -490,10 +492,10 @@ export class CameraController {
             targetX = currentPivotPosition.x + logicalPos.x;
             targetY = currentPivotPosition.y + logicalPos.y;
         }
-        
+
         return { x: targetX, y: targetY };
     }
-    
+
     /**
      * Find the real relativeTo by backtracking through LastPosition events
      * 处理LastPosition系列的参考系查找
@@ -501,7 +503,7 @@ export class CameraController {
      * 中途遇到的所有LastPosition的position和rotation都应该叠加
      */
     private findRealRelativeTo(
-        currentFloorIndex: number, 
+        currentFloorIndex: number,
         accumulatedPosition: { x: number; y: number },
         isNoRotation: boolean
     ): string {
@@ -509,13 +511,13 @@ export class CameraController {
         for (let i = this.lastCameraTimelineIndex; i >= 0; i--) {
             const entry = this.cameraTimeline[i];
             if (!entry) continue;
-            
+
             const event = entry.event;
             if (!isEventActive(event)) continue;
-            
+
             const eventRelativeTo = event.relativeTo;
             let eventMode = this.cameraMode.relativeTo;
-            
+
             if (eventRelativeTo !== undefined && eventRelativeTo !== null) {
                 if (typeof eventRelativeTo === 'string') {
                     eventMode = eventRelativeTo;
@@ -523,12 +525,12 @@ export class CameraController {
                     eventMode = ['Player', 'Tile', 'Global', 'LastPosition', 'LastPositionNoRotation'][eventRelativeTo] || 'Player';
                 }
             }
-            
+
             // 如果找到��LastPosition的参考系，就是我们要找的
             if (eventMode !== 'LastPosition' && eventMode !== 'LastPositionNoRotation') {
                 return eventMode;
             }
-            
+
             // 累加position和rotation
             if (event.position !== undefined && event.position !== null) {
                 const TILE_SIZE = 1.0;
@@ -539,17 +541,17 @@ export class CameraController {
                     accumulatedPosition.y += event.position[1] * TILE_SIZE;
                 }
             }
-            
+
             // 如果不是NoRotation模式，累加rotation
             if (!isNoRotation && event.rotation !== undefined && event.rotation !== null) {
                 // 累加逻辑已在processCameraEvent中处理
             }
         }
-        
+
         // 默认回退到Player模式
         return 'Player';
     }
-    
+
     /**
      * Update camera events based on current elapsed time
      * 应该在游戏更新循环中每帧调用
@@ -568,7 +570,7 @@ export class CameraController {
             }
         }
     }
-    
+
     /**
      * Get interpolated logical values during transition
      * 用于平滑过渡动画
@@ -585,22 +587,22 @@ export class CameraController {
         if (this.cameraTransition.active) {
             let t = (elapsedTime / 1000) - this.cameraTransition.startTime;
             t = t / this.cameraTransition.duration;
-            
+
             if (t >= 1) {
                 this.cameraTransition.active = false;
             } else {
                 const easeFunc = EasingFunctions[this.cameraTransition.ease] || EasingFunctions.Linear;
                 const progress = easeFunc(t);
-                
+
                 const start = this.cameraTransition.startSnapshot;
-                
+
                 logicalPos.x = start.logicalPosition.x + (this.cameraMode.position.x - start.logicalPosition.x) * progress;
                 logicalPos.y = start.logicalPosition.y + (this.cameraMode.position.y - start.logicalPosition.y) * progress;
                 logicalZoom = start.logicalZoom + (this.cameraMode.zoom - start.logicalZoom) * progress;
                 logicalRotation = start.logicalRotation + (this.cameraMode.rotation - start.logicalRotation) * progress;
             }
         }
-        
+
         return { position: logicalPos, zoom: logicalZoom, rotation: logicalRotation };
     }
 }
