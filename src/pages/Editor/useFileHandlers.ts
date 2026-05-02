@@ -4,6 +4,7 @@ import { Parsers, Structure } from "adofai"
 import type { ILevelData } from "@/lib/Player/types"
 import { Player } from "@/lib/Player/Player"
 import { LargeFileParser } from "@/lib/LargeFileParser"
+import { WasmParser } from "@/lib/WasmParser"
 import JSZip from "jszip"
 // @ts-ignore
 import LevelLoaderWorker from '../../lib/Player/levelLoaderWorker?worker&inline'
@@ -16,7 +17,7 @@ const StringParser = Parsers.StringParser
 const parser = new StringParser()
 
 // 大文件阈值 - V8 字符串限制约为 512MB，我们设置安全阈值
-const LARGE_FILE_THRESHOLD = 400 * 1024 * 1024 // 400MB
+const LARGE_FILE_THRESHOLD = 100 * 1024 * 1024 // 100MB
 
 // 超大文件阈值 - 需要提前预合成 hitsound
 const VERY_LARGE_FILE_THRESHOLD = 90 * 1024 * 1024 // 90MB
@@ -164,6 +165,67 @@ export function useFileHandlers({
     } catch (error) {
       console.error('[DEBUG] LargeFileParser error:', error)
       throw error
+    }
+  }
+
+  // Wasm 大文件加载 - 使用 WebAssembly 解析 >100MB 文件
+  const loadWithWasmParser = async (arrayBuffer: ArrayBuffer, isVeryLargeFile: boolean = false): Promise<void> => {
+    console.log('[DEBUG] Using WasmParser for large file > 100MB')
+    setLoadingStatus(t("loading.preparingLargeFile"))
+    setLoadingProgress(0)
+
+    try {
+      // 创建 Wasm 解析器（带进度回调）
+      const wasmParser = new WasmParser((stage: string, percent: number) => {
+        setLoadingStatus(getStageText(stage, t))
+        // Wasm 解析阶段占用 0-80% 进度
+        setLoadingProgress(Math.round(percent * 0.8))
+      })
+
+      await wasmParser.init()
+      console.log('[DEBUG] WasmParser initialized')
+
+      const parsedData = wasmParser.parse(arrayBuffer)
+      if (!parsedData) {
+        throw new Error('WasmParser returned null - falling back')
+      }
+
+      console.log('[DEBUG] WasmParser parse complete')
+
+      // 使用解析后的数据创建 Level
+      const level = new ADOFAI.Level(parsedData, undefined)
+
+      level.on("parse:progress", (progressEvent: ParseProgressEvent): void => {
+        setLoadingProgress(80 + Math.round(progressEvent.percent * 0.05))
+        setLoadingStatus(getStageText(progressEvent.stage, t))
+      })
+
+      level.on("load", async (loadedLevel: any): Promise<void> => {
+        loadedLevel.on("parse:progress", (progressEvent: ParseProgressEvent): void => {
+          setLoadingProgress(80 + Math.round(progressEvent.percent * 0.05))
+          setLoadingStatus(getStageText(progressEvent.stage, t))
+        })
+
+        setLoadingProgress(85)
+        setLoadingStatus(t("loading.buildingScene"))
+
+        // Initialize player and synthesize hitsounds
+        await initializePlayerWithHitsounds(loadedLevel, isVeryLargeFile)
+
+        setLoadingProgress(100)
+        window.showNotification?.("success", t("editor.notifications.loadSuccess"))
+        setIsLoading(false)
+        setLoadingProgress(0)
+        setLoadingStatus("")
+      })
+
+      await level.load()
+
+    } catch (error) {
+      console.error('[DEBUG] WasmParser error:', error)
+      // 如果 Wasm 解析失败，回退到 LargeFileParser
+      console.log('[DEBUG] Falling back to LargeFileParser')
+      await loadLargeFile(arrayBuffer, isVeryLargeFile)
     }
   }
 
@@ -563,18 +625,18 @@ export function useFileHandlers({
             return
           }
 
-          // 判断是否为超大文件 (>90MB) 或大文件 (>400MB)
+          // 判断是否为超大文件 (>90MB) 或大文件 (>100MB)
           const isVeryLargeFile = fileSize > VERY_LARGE_FILE_THRESHOLD
           const isLargeFile = fileSize > LARGE_FILE_THRESHOLD
           console.log('[DEBUG] Is very large file:', isVeryLargeFile, '(threshold:', VERY_LARGE_FILE_THRESHOLD, ')')
           console.log('[DEBUG] Is large file:', isLargeFile, '(threshold:', LARGE_FILE_THRESHOLD, ')')
 
           if (isLargeFile) {
-            // 大文件：直接使用 ArrayBuffer 解析，不转换为字符串
-            console.log('[DEBUG] Using large file parser')
-            await loadLargeFile(arrayBuffer, isVeryLargeFile)
+            // > 100MB：使用 WebAssembly 解析器，不转换为字符串
+            console.log('[DEBUG] Using Wasm parser')
+            await loadWithWasmParser(arrayBuffer, isVeryLargeFile)
           } else if (isVeryLargeFile) {
-            // 超大文件但不是极大文件：也使用 LargeFileParser
+            // 90MB-100MB：使用 LargeFileParser
             console.log('[DEBUG] Using large file parser for very large file')
             await loadLargeFile(arrayBuffer, true)
           } else {

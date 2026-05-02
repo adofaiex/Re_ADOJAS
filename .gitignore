@@ -28,3 +28,9 @@ package-lock.json
 pnpm-lock.yaml
 yarn.lock
 bun.lock
+
+# Rust build artifacts
+**/target/
+
+# Conversation logs
+conversation-*.txt
