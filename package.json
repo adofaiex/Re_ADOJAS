@@ -30,6 +30,7 @@
         "three": "^0.178.0"
     },
     "devDependencies": {
+        "@types/node": "^25.6.0",
         "@types/react": "^18.3.23",
         "@types/react-dom": "^18.3.7",
         "@types/stats.js": "^0.17.4",

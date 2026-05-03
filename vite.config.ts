@@ -15,6 +15,7 @@ export default defineConfig(({ mode, command }) => {
   if (isBuild) {
     plugins.push(legacy({
       targets: ['defaults', 'not IE 11'],
+      modernTargets: 'chrome 100, firefox 100, safari 15',
       additionalLegacyPolyfills: ['regenerator-runtime/runtime']
     }))
     plugins.push(htmlPostBuildPlugin({ base }) as any)
@@ -30,13 +31,6 @@ export default defineConfig(({ mode, command }) => {
     worker: {
       format: 'es',
       inline: 'no-fallback', // 将 worker 代码内联到主 bundle 中，支持静态页面部署
-      rollupOptions: {
-        output: {
-          manualChunks: {
-            'worker-adofai': ['adofai'],
-          },
-        },
-      },
     },
     build: {
       outDir: "dist",

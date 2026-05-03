@@ -235,30 +235,58 @@ export function useFileHandlers({
     await level.load()
   }
 
-  // Worker loading (background thread)
+  // Worker loading (background thread for precomputation)
+  // Parsing is done on the main thread to avoid esbuild destructuring issues with the adofai library
   const loadWithWorker = async (content: string): Promise<void> => {
     setLoadingProgress(0)
     setLoadingStatus(t("loading.stage.start"))
 
     try {
-      // Create worker - Use Vite's inline worker syntax
+      // Step 1: Parse the level on the main thread using adofai
+      const level = new ADOFAI.Level(content, parser)
+
+      level.on("parse:progress", (progressEvent: ParseProgressEvent): void => {
+        setLoadingProgress(progressEvent.percent * 0.9)
+        setLoadingStatus(getStageText(progressEvent.stage, t))
+      })
+
+      const parsedLevel = await new Promise<any>((resolve) => {
+        level.on("load", (lvl: any) => {
+          lvl.on("parse:progress", (progressEvent: ParseProgressEvent): void => {
+            setLoadingProgress(progressEvent.percent * 0.9)
+            setLoadingStatus(getStageText(progressEvent.stage, t))
+          })
+          resolve(lvl)
+        })
+        level.load()
+      })
+
+      // Calculate tile positions (needed by precomputeLevelData in the worker)
+      parsedLevel.calculateTilePosition()
+
+      // Extract necessary data
+      const levelData = {
+        settings: parsedLevel.settings || {},
+        tiles: parsedLevel.tiles || [],
+        actions: parsedLevel.actions || [],
+        angleData: parsedLevel.angleData || [],
+      }
+
+      setLoadingProgress(90)
+      setLoadingStatus(t("loading.precomputing"))
+
+      // Step 2: Send parsed data to worker for precomputation
       const worker = new LevelLoaderWorker()
 
       worker.onmessage = async (e: MessageEvent) => {
-        const { type, progress, status, stage, current, total, data, error } = e.data
+        const { type, data, error } = e.data
 
-        if (type === 'progress') {
-          setLoadingProgress(progress)
-          // Use translated stage text
-          setLoadingStatus(getStageText(stage, t))
-        } else if (type === 'result') {
-          const { levelData } = data
-
+        if (type === 'result') {
           setLoadingProgress(95)
           setLoadingStatus(t("loading.buildingScene"))
 
           // Create player and synthesize hitsounds
-          await initializePlayerWithHitsounds(levelData)
+          await initializePlayerWithHitsounds(parsedLevel)
 
           setLoadingProgress(100)
           window.showNotification?.("success", t("editor.notifications.loadSuccess"))
@@ -286,8 +314,8 @@ export function useFileHandlers({
         worker.terminate()
       }
 
-      // Start loading
-      worker.postMessage({ type: 'load', content })
+      // Start precomputation in worker
+      worker.postMessage({ type: 'load', levelData })
 
     } catch (error) {
       console.error('Failed to create worker:', error)
