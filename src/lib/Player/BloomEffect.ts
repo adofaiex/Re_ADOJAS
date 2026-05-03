@@ -43,12 +43,13 @@ const BrightnessShader = {
     `
 };
 
-// Shader for Gaussian blur
+// Shader for Gaussian blur (quality: 0=low/5-tap, 1=high/9-tap)
 const BlurShader = {
     uniforms: {
         tDiffuse: { value: null },
         direction: { value: new THREE.Vector2(1, 0) },
         resolution: { value: new THREE.Vector2(1, 1) },
+        quality: { value: 1 },
     },
     vertexShader: /* glsl */ `
         varying vec2 vUv;
@@ -61,13 +62,14 @@ const BlurShader = {
         uniform sampler2D tDiffuse;
         uniform vec2 direction;
         uniform vec2 resolution;
+        uniform int quality;
         varying vec2 vUv;
-        
+
         void main() {
             vec4 color = vec4(0.0);
             vec2 texelSize = direction / resolution;
-            
-            // Gaussian blur weights (9-tap)
+
+            // Gaussian blur weights
             float weights[5];
             weights[0] = 0.227027;
             weights[1] = 0.1945946;
@@ -75,14 +77,24 @@ const BlurShader = {
             weights[3] = 0.054054;
             weights[4] = 0.016216;
             
-            color += texture2D(tDiffuse, vUv) * weights[0];
-            
-            for (int i = 1; i < 5; i++) {
-                vec2 offset = texelSize * float(i);
-                color += texture2D(tDiffuse, vUv + offset) * weights[i];
-                color += texture2D(tDiffuse, vUv - offset) * weights[i];
+            if (quality == 0) {
+                // 5-tap (low quality): center + 2 taps
+                color += texture2D(tDiffuse, vUv) * weights[0];
+                for (int i = 1; i < 3; i++) {
+                    vec2 offset = texelSize * float(i);
+                    color += texture2D(tDiffuse, vUv + offset) * weights[i];
+                    color += texture2D(tDiffuse, vUv - offset) * weights[i];
+                }
+            } else {
+                // 9-tap (high quality): center + 4 taps
+                color += texture2D(tDiffuse, vUv) * weights[0];
+                for (int i = 1; i < 5; i++) {
+                    vec2 offset = texelSize * float(i);
+                    color += texture2D(tDiffuse, vUv + offset) * weights[i];
+                    color += texture2D(tDiffuse, vUv - offset) * weights[i];
+                }
             }
-            
+
             gl_FragColor = color;
         }
     `
@@ -121,12 +133,6 @@ const CombineShader = {
             // Additive blending with intensity
             vec3 result = original.rgb + tintedBloom * intensity;
             
-            // Convert Linear to Output space (sRGB) for screen output
-            #include <colorspace_fragment>
-            
-            // Note: colorspace_fragment usually sets gl_FragColor using outgoingLight
-            // But we don't have outgoingLight here. Let's do it manually if chunk not suitable.
-            // In Three.js r178, the chunk expects gl_FragColor to be Linear.
             gl_FragColor = vec4(result, 1.0);
             #include <colorspace_fragment>
         }
@@ -141,6 +147,7 @@ export class BloomEffect {
     private threshold: number = 0.5;
     private intensity: number = 0.7;  // Reduced to 70% of original strength
     private bloomColor: THREE.Color = new THREE.Color(1, 1, 1);
+    private quality: number = 1;
 
     private resolution: THREE.Vector2;
 
@@ -230,6 +237,20 @@ export class BloomEffect {
         this.combineMaterial.uniforms.intensity.value = this.intensity;
     }
 
+    setQuality(quality: number): void {
+        this.quality = quality === 0 ? 0 : 1;
+        this.blurMaterial.uniforms.quality.value = this.quality;
+
+        // Adjust render target size based on quality
+        // Low quality: quarter-res blur targets; High quality: half-res
+        const w = Math.floor(this.resolution.x / (this.quality > 0 ? 2 : 4));
+        const h = Math.floor(this.resolution.y / (this.quality > 0 ? 2 : 4));
+
+        this.rtBlurH.setSize(w, h);
+        this.rtBlurV.setSize(w, h);
+        this.blurMaterial.uniforms.resolution.value.set(w, h);
+    }
+
     setColor(colorHex: string): void {
         // Strip # prefix if present
         let hex = colorHex.startsWith('#') ? colorHex.slice(1) : colorHex;
@@ -259,9 +280,10 @@ export class BloomEffect {
         // Pass 1 (Brightness) should be high-res to capture thin lines
         this.rtBrightness.setSize(width, height);
 
-        // Blur passes can be half-res for performance
-        const w = Math.floor(width / 2);
-        const h = Math.floor(height / 2);
+        // Blur passes can be half-res (high quality) or quarter-res (low quality)
+        const div = this.quality > 0 ? 2 : 4;
+        const w = Math.floor(width / div);
+        const h = Math.floor(height / div);
 
         this.rtBlurH.setSize(w, h);
         this.rtBlurV.setSize(w, h);

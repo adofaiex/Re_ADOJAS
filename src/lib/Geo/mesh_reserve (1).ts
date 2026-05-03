@@ -591,7 +591,69 @@ const createTileMesh = (
 };
 
 
+// Expand to per-face vertices for proper transparency handling
+// This function creates independent vertices for each face to avoid shared vertices causing transparency issues
+const expandToPerFace = (mesh: MeshData): MeshData => {
+    const newVertices: number[] = [];
+    const newColors: number[] = [];
+    const newFaces: number[] = [];
+
+    // Process each triangle face
+    for (let i = 0; i < mesh.faces.length; i += 3) {
+        const a = mesh.faces[i];
+        const b = mesh.faces[i + 1];
+        const c = mesh.faces[i + 2];
+
+        // Create independent vertices for this face
+        // Vertex A
+        newVertices.push(
+            mesh.vertices[a * 3],
+            mesh.vertices[a * 3 + 1],
+            mesh.vertices[a * 3 + 2]
+        );
+        newColors.push(
+            mesh.colors[a * 3],
+            mesh.colors[a * 3 + 1],
+            mesh.colors[a * 3 + 2]
+        );
+
+        // Vertex B
+        newVertices.push(
+            mesh.vertices[b * 3],
+            mesh.vertices[b * 3 + 1],
+            mesh.vertices[b * 3 + 2]
+        );
+        newColors.push(
+            mesh.colors[b * 3],
+            mesh.colors[b * 3 + 1],
+            mesh.colors[b * 3 + 2]
+        );
+
+        // Vertex C
+        newVertices.push(
+            mesh.vertices[c * 3],
+            mesh.vertices[c * 3 + 1],
+            mesh.vertices[c * 3 + 2]
+        );
+        newColors.push(
+            mesh.colors[c * 3],
+            mesh.colors[c * 3 + 1],
+            mesh.colors[c * 3 + 2]
+        );
+
+        // Create new face indices pointing to the new vertices
+        const baseIndex = newVertices.length / 3 - 3;
+        newFaces.push(baseIndex, baseIndex + 1, baseIndex + 2);
+    }
+
+    return {
+        vertices: newVertices,
+        faces: newFaces,
+        colors: newColors
+    };
+};
+
 // Export interface and functions
-export { fmod, lerp, createCircle, createMidSpinMesh, createTileMesh, createGemsMesh };
+export { fmod, lerp, createCircle, createMidSpinMesh, createTileMesh, createGemsMesh, expandToPerFace };
 export type { MeshData };
 export default createTrackMesh;

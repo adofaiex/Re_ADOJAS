@@ -8,7 +8,7 @@ import { FlashEffect } from './FlashEffect';
 import createTrackMesh from '../Geo/mesh_reserve';
 import { EasingFunctions } from './Easing';
 import { HTMLAudioMusic, getSharedAudioContext } from './HTMLAudioMusic';
-import { TileColorManager, isEventActive, TileColorConfig } from './TileColorManager';
+import { TileColorManager, isEventActive, TileColorConfig, parseHexAlpha } from './TileColorManager';
 import { CameraController, CameraTimelineEntry } from './CameraController';
 import { DecorationManager } from './DecorationManager';
 import { MoveTrackManager } from './MoveTrackManager';
@@ -61,6 +61,7 @@ export class Player implements IPlayer {
   private elapsedTime: number = 0;
   private musicStartDelay: number = 0; // Music start delay in seconds
   private hitsoundStartDelay: number = 0; // Hitsound start delay in seconds
+  private audioDriftSynced: boolean = false; // whether one-shot audio sync has been applied
   
   private currentTileIndex: number = 0;
   
@@ -143,7 +144,6 @@ export class Player implements IPlayer {
   private customBGImages: Map<string, string> = new Map(); // filename -> URL
   
   // Shared Renderer Resources
-  private sharedTileMaterial: THREE.ShaderMaterial | null = null;
   private geometryCache: Map<string, THREE.BufferGeometry> = new Map();
   private maxCachedTiles: number = 2000; // Only keep this many meshes in memory
 
@@ -283,6 +283,14 @@ export class Player implements IPlayer {
     );
     this.moveTrackManager.initializeMoveTrackEvents(this.tileMoveTrackEvents);
     this.moveTrackManager.setTilesReference(this.tiles);
+
+    // Sync MoveTrack animations to InstancedMeshManager (when instanced rendering is active,
+    // individual tile meshes are hidden and only the InstancedMesh is visible)
+    this.moveTrackManager.tileTransformChanged = (tileIndex, position, rotation, scale, opacity) => {
+      if (this.instancedMeshManager) {
+        this.instancedMeshManager.updateTileTransform(tileIndex, position, rotation, scale, opacity);
+      }
+    };
 
     // Add lights
     const ambientLight = new THREE.AmbientLight(0x404040, 1.0);
@@ -1180,6 +1188,36 @@ export class Player implements IPlayer {
       }
     }
     
+    // --- One-time audio sync ---
+    // After music starts, verify the actual audio position matches expected.
+    // If they differ (due to async timing of play()), adjust the timing base once.
+    // Audio playback can drift over time from HTMLAudioElement stutters, but a one-shot
+    // sync at start handles the most common case (imprecise playback start timing).
+    if (this.music.hasAudio && this.music.isPlaying && this.music.audio &&
+        !this.audioDriftSynced &&
+        typeof this.music.audio.currentTime === 'number' && !isNaN(this.music.audio.currentTime) &&
+        this.elapsedTime > (this.musicStartDelay + 0.1) * 1000) {
+      const settings = this.levelData.settings;
+      const offsetSec = (settings.offset || 0) / 1000;
+      const expectedMusicPos = offsetSec + (this.elapsedTime / 1000 - this.musicStartDelay);
+      const actualMusicPos = this.music.audio.currentTime;
+      const drift = expectedMusicPos - actualMusicPos;
+      if (Math.abs(drift) > 0.025) {
+        console.log('[Player] One-shot audio sync:', (drift * 1000).toFixed(1), 'ms');
+        if (this.useAudioContextTime) {
+          const audioCtx = getSharedAudioContext();
+          if (audioCtx) {
+            this.audioContextStartOffset -= drift;
+            this.elapsedTime = (audioCtx.currentTime - this.audioContextStartOffset) * 1000;
+          }
+        } else {
+          this.startTime += drift * 1000;
+          this.elapsedTime = performance.now() - this.startTime;
+        }
+      }
+      this.audioDriftSynced = true;
+    }
+
     this.updatePlanetsPosition();
 
     this.updateCameraFollow(delta);
@@ -1203,14 +1241,18 @@ export class Player implements IPlayer {
         const index = parseInt(id);
         const mesh = this.tiles.get(id);
         if (mesh) {
-            const opacity = mesh.userData.opacity !== undefined ? mesh.userData.opacity : 1.0;
+            const moveTrackOpacity = mesh.userData.opacity !== undefined ? mesh.userData.opacity : 1.0;
+            const colorOpacity = mesh.userData.trackColorOpacity ?? 1;
+            const effectiveOpacity = moveTrackOpacity * colorOpacity;
             this.instancedMeshManager!.updateTileTransform(
                 index,
                 mesh.position,
                 mesh.rotation as THREE.Euler,
                 mesh.scale,
-                opacity
+                effectiveOpacity
             );
+            // When fully transparent, hide the instanced instance to prevent depth occlusion
+            this.instancedMeshManager!.setTileVisibility(index, effectiveOpacity > 0.001);
         }
     });
   }
@@ -1244,14 +1286,17 @@ export class Player implements IPlayer {
 
   private updateAnimatedTiles(): void {
     const time = this.elapsedTime / 1000;
-    
+
     this.visibleTiles.forEach(id => {
         const index = parseInt(id);
         const config = this.tileColorManager.getTileRecolorConfig(index);
-        
+
         if (config && ['Glow', 'Blink', 'Rainbow', 'Volume'].includes(config.trackColorType)) {
             const rendered = this.tileColorManager.getTileRenderer(index, time, config, this.music.amplitude);
-            this.applyTileColor(index, rendered.color, rendered.bgcolor);
+            // Skip if color hasn't changed (avoids unnecessary GPU uploads, especially for slow animations)
+            const current = this.tileColorManager.getTileColor(index);
+            if (current && current.color === rendered.color && current.secondaryColor === rendered.bgcolor) return;
+            this.applyTileColor(index, rendered.color, rendered.bgcolor, rendered.opacity);
         }
     });
   }
@@ -1328,6 +1373,7 @@ export class Player implements IPlayer {
     this.elapsedTime = 0;
     this.currentTileIndex = 0;
     this.useAudioContextTime = false;
+    this.audioDriftSynced = false;
     
     this.createPlanets();
     
@@ -1734,9 +1780,11 @@ export class Player implements IPlayer {
           
           if ((mesh.material as any).opacity !== undefined) {
             const opacity = transform.opacity < 1 ? transform.opacity : 1;
-            (mesh.material as any).opacity = opacity;
-            (mesh.material as any).transparent = opacity < 0.999;
             mesh.userData.opacity = opacity;
+            const trackColorOpacity = mesh.userData.trackColorOpacity ?? 1;
+            const effectiveOpacity = opacity * trackColorOpacity;
+            (mesh.material as any).opacity = effectiveOpacity;
+            (mesh.material as any).transparent = effectiveOpacity < 0.999;
           }
         }
       });
@@ -1771,26 +1819,26 @@ export class Player implements IPlayer {
         mesh.rotation.z = transform.rotation * (Math.PI / 180);
         mesh.scale.copy(transform.scale);
         
-        if ((mesh.material as any).opacity !== undefined) {
-          const opacity = transform.opacity < 1 ? transform.opacity : 1;
-          (mesh.material as any).opacity = opacity;
-          (mesh.material as any).transparent = opacity < 0.999;
-          mesh.userData.opacity = opacity;
-          
-          // Update children (decorations/icons) opacity
-          mesh.traverse((child) => {
-            if (child !== mesh && (child as any).material) {
-              const childMat = (child as any).material;
-              if (childMat.opacity !== undefined) {
-                childMat.opacity = opacity;
-                childMat.transparent = opacity < 0.999;
-              }
-            }
-          });
-        }
+        const opacity = transform.opacity < 1 ? transform.opacity : 1;
+        mesh.userData.opacity = opacity;
+        // Composite with track color alpha
+        const trackColorOpacity = mesh.userData.trackColorOpacity ?? 1;
+        const effectiveOpacity = opacity * trackColorOpacity;
+        mesh.visible = effectiveOpacity > 0.001;
+
+        (mesh.material as any).opacity = effectiveOpacity;
+        (mesh.material as any).transparent = effectiveOpacity < 0.999;
+
+        // Update children (decorations/icons) opacity
+        mesh.traverse((child) => {
+          if (child !== mesh && (child as any).material) {
+            const childMat = (child as any).material;
+            childMat.opacity = effectiveOpacity;
+          }
+        });
       }
     });
-    
+
     // Update tileStickToFloors array
     for (let i = 0; i < this.levelData.tiles.length; i++) {
       const transform = allTransforms.get(i);
@@ -1835,20 +1883,18 @@ export class Player implements IPlayer {
     const defaultStyle = settings.trackStyle || 'Standard';
     const defaultColorType = settings.trackColorType || 'Single';
 
-    const colors = this.tileColorManager.parseColorTrackType(
-        event.trackStyle || defaultStyle, 
-        event.trackColor || defaultColor, 
-        event.secondaryTrackColor || defaultSecondaryColor
-    );
-
+    // Store RAW colors — let getTileRenderer handle all trackStyle-specific processing.
+    // Do NOT pre-process with parseColorTrackType: it would corrupt secondaryTrackColor
+    // for non-Single color types (Stripes/Blink/Switch/Glow).
     const config: TileColorConfig = {
         trackStyle: event.trackStyle || defaultStyle,
         trackColorType: event.trackColorType || defaultColorType,
-        trackColor: colors.color,
-        secondaryTrackColor: colors.bgcolor,
+        trackColor: event.trackColor || defaultColor,
+        secondaryTrackColor: event.secondaryTrackColor || defaultSecondaryColor,
         trackColorPulse: event.trackColorPulse || settings.trackColorPulse || 'None',
         trackColorAnimDuration: event.trackColorAnimDuration || settings.trackColorAnimDuration || 2,
-        trackPulseLength: event.trackPulseLength || settings.trackPulseLength || 10
+        trackPulseLength: event.trackPulseLength || settings.trackPulseLength || 10,
+        trackOpacity: parseHexAlpha(event.trackColor || defaultColor)
     };
 
     const minIdx = Math.max(0, Math.min(startIdx, endIdx));
@@ -1857,12 +1903,21 @@ export class Player implements IPlayer {
     for (let i = minIdx; i <= maxIdx; i += (gap + 1)) {
         this.tileColorManager.setTileRecolorConfig(i, config);
         const rendered = this.tileColorManager.getTileRenderer(i, this.elapsedTime / 1000, config, this.music.amplitude);
-        this.applyTileColor(i, rendered.color, rendered.bgcolor);
+        this.applyTileColor(i, rendered.color, rendered.bgcolor, rendered.opacity);
     }
   }
 
-  private applyTileColor(index: number, color: string, bgcolor: string): void {
+  private applyTileColor(index: number, color: string, bgcolor: string, colorOpacity: number = 1): void {
     this.tileColorManager.setTileColor(index, color, bgcolor);
+    const id = index.toString();
+    const mesh = this.tiles.get(id);
+    if (mesh) {
+      mesh.userData.trackColorOpacity = colorOpacity;
+      const moveTrackOpacity = mesh.userData.opacity !== undefined ? mesh.userData.opacity : 1;
+      const effectiveOpacity = moveTrackOpacity * colorOpacity;
+      (mesh.material as any).opacity = effectiveOpacity;
+      (mesh.material as any).transparent = effectiveOpacity < 0.999;
+    }
     this.updateTileMeshColor(index);
   }
 
@@ -1872,9 +1927,25 @@ export class Player implements IPlayer {
     const colors = this.tileColorManager.getTileColor(index);
     
     if (colors) {
-        if (mesh && mesh.material instanceof THREE.ShaderMaterial) {
-            mesh.material.uniforms.uColor.value.set(colors.color);
-            mesh.material.uniforms.uBgColor.value.set(colors.secondaryColor || colors.color);
+        if (mesh && mesh.material instanceof THREE.MeshBasicMaterial && mesh.geometry.userData?.colorMask) {
+            const colorAttr = mesh.geometry.getAttribute('color') as THREE.BufferAttribute;
+            const maskAttr = mesh.geometry.userData.colorMask as THREE.BufferAttribute;
+            const cFill = new THREE.Color(colors.color);
+            const cBorder = new THREE.Color(colors.secondaryColor || colors.color);
+            const arr = colorAttr.array;
+            const mask = maskAttr.array;
+            for (let i = 0; i < arr.length; i += 3) {
+                if (mask[i] < 0.5) {
+                    arr[i] = cBorder.r;
+                    arr[i + 1] = cBorder.g;
+                    arr[i + 2] = cBorder.b;
+                } else {
+                    arr[i] = cFill.r;
+                    arr[i + 1] = cFill.g;
+                    arr[i + 2] = cFill.b;
+                }
+            }
+            colorAttr.needsUpdate = true;
         }
         
         if (this.instancedMeshManager) {
@@ -1883,6 +1954,21 @@ export class Player implements IPlayer {
                 colors.color,
                 colors.secondaryColor || colors.color
             );
+            // Also update instance opacity to reflect color alpha × MoveTrack opacity
+            const mesh = this.tiles.get(index.toString());
+            if (mesh) {
+                const colorOpacity = mesh.userData.trackColorOpacity ?? 1;
+                const moveTrackOpacity = mesh.userData.opacity ?? 1;
+                const effectiveOpacity = moveTrackOpacity * colorOpacity;
+                // Use current transform values — dirty check prevents unnecessary updates
+                this.instancedMeshManager.updateTileTransform(
+                    index,
+                    mesh.position,
+                    mesh.rotation as THREE.Euler,
+                    mesh.scale,
+                    effectiveOpacity
+                );
+            }
         }
     }
   }
@@ -2206,36 +2292,40 @@ export class Player implements IPlayer {
     const colors = this.tileColorManager.getTileColor(index);
     const color = colors?.color || '#ffffff';
     const bgcolor = colors?.secondaryColor || color;
-    
-    const material = new THREE.ShaderMaterial({
-        uniforms: {
-            uColor: { value: new THREE.Color(color) },
-            uBgColor: { value: new THREE.Color(bgcolor) },
-            opacity: { value: 1.0 }
-        },
-        vertexShader: `
-            varying vec3 vColor;
-            void main() {
-                vColor = color;
-                gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-            }
-        `,
-        fragmentShader: `
-            uniform vec3 uColor;
-            uniform vec3 uBgColor;
-            uniform float opacity;
-            varying vec3 vColor;
-            void main() {
-                vec3 finalColor = mix(uBgColor, uColor, vColor.r);
-                gl_FragColor = vec4(finalColor, opacity);
-            }
-        `,
+
+    // Clone geometry and bake actual vertex colors from the mask
+    const tileGeo = geometry.clone();
+    const sharedColorAttr = geometry.getAttribute('color') as THREE.BufferAttribute;
+    const colorAttr = tileGeo.getAttribute('color') as THREE.BufferAttribute;
+    const cFill = new THREE.Color(color);
+    const cBorder = new THREE.Color(bgcolor);
+    const colorArray = colorAttr.array;
+    const maskArray = sharedColorAttr.array;
+
+    for (let i = 0; i < colorArray.length; i += 3) {
+        if (maskArray[i] < 0.5) {
+            colorArray[i] = cBorder.r;
+            colorArray[i + 1] = cBorder.g;
+            colorArray[i + 2] = cBorder.b;
+        } else {
+            colorArray[i] = cFill.r;
+            colorArray[i + 1] = cFill.g;
+            colorArray[i + 2] = cFill.b;
+        }
+    }
+    colorAttr.needsUpdate = true;
+
+    // Store mask reference for future color updates
+    tileGeo.userData.colorMask = sharedColorAttr;
+
+    const material = new THREE.MeshBasicMaterial({
         vertexColors: true,
         side: THREE.DoubleSide,
-        transparent: true
+        transparent: true,
+        depthWrite: false
     });
 
-    const tileMesh = new THREE.Mesh(geometry, material);
+    const tileMesh = new THREE.Mesh(tileGeo, material);
 
     // Calculate transform from PositionTrack
     let finalPos = new THREE.Vector3(x, y, 0);
@@ -2253,23 +2343,26 @@ export class Player implements IPlayer {
         finalPos.copy(transform.position);
         finalRot.z = transform.rotation * (Math.PI / 180);
         finalScale.copy(transform.scale);
-        finalOpacity = transform.opacity;
 
-        // Apply opacity if supported by material
-        if (transform.opacity < 1 && (material as any).transparent !== undefined) {
-          (material as any).transparent = true;
-          (material as any).opacity = transform.opacity;
-          tileMesh.userData.opacity = transform.opacity;
-        } else {
-          tileMesh.userData.opacity = 1;
-        }
+        // Composite MoveTrack opacity with color hex alpha
+        const colorOpacity = tileConfig?.trackOpacity ?? 1;
+        tileMesh.userData.trackColorOpacity = colorOpacity;
+        finalOpacity = transform.opacity * colorOpacity;
+        tileMesh.userData.opacity = transform.opacity;
+
+        // Apply combined opacity
+        material.opacity = finalOpacity;
+        material.transparent = finalOpacity < 0.999;
       }
     } else {
       // Fallback to original position calculation - use stable Z
       const stableZ = (1000 - (index % 1000)) * 0.0001;
       tileMesh.position.set(x, y, stableZ);
       finalPos.set(x, y, stableZ);
+      const colorOpacity = tileConfig?.trackOpacity ?? 1;
       tileMesh.userData.opacity = 1;
+      tileMesh.userData.trackColorOpacity = colorOpacity;
+      finalOpacity = colorOpacity;
     }
 
     tileMesh.castShadow = true;
@@ -2313,9 +2406,10 @@ export class Player implements IPlayer {
         const decoMaterial = this.sharedTwirlMaterial.clone();
         const twirlMesh = new THREE.Mesh(this.sharedDecoGeometry, decoMaterial);
         twirlMesh.position.set(0, 0, decoZ);
-        // Copy parent mesh opacity to the decoration mesh
-        const initialOpacity = tileMesh.userData.opacity !== undefined ? tileMesh.userData.opacity : 1.0;
-        decoMaterial.transparent = initialOpacity < 0.999;
+        // Copy parent mesh combined opacity to the decoration mesh
+        // Always transparent=true so opacity changes take effect without shader recompile
+        const initialOpacity = (tileMesh.userData.opacity ?? 1) * (tileMesh.userData.trackColorOpacity ?? 1);
+        decoMaterial.transparent = true;
         decoMaterial.opacity = initialOpacity;
         tileMesh.add(twirlMesh);
     }
@@ -2330,14 +2424,14 @@ export class Player implements IPlayer {
             const decoMaterial = this.sharedSpeedUpMaterial.clone();
             const speedMesh = new THREE.Mesh(this.sharedDecoGeometry, decoMaterial);
             speedMesh.position.set(0, 0, decoZ + (hasTwirl ? 0.001 : 0));
-            decoMaterial.transparent = initialOpacity < 0.999;
+            decoMaterial.transparent = true;
             decoMaterial.opacity = initialOpacity;
             tileMesh.add(speedMesh);
         } else if (ratio < 0.95 && this.sharedSpeedDownMaterial) {
             const decoMaterial = this.sharedSpeedDownMaterial.clone();
             const speedMesh = new THREE.Mesh(this.sharedDecoGeometry, decoMaterial);
             speedMesh.position.set(0, 0, decoZ + (hasTwirl ? 0.001 : 0));
-            decoMaterial.transparent = initialOpacity < 0.999;
+            decoMaterial.transparent = true;
             decoMaterial.opacity = initialOpacity;
             tileMesh.add(speedMesh);
         }

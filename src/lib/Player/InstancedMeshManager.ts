@@ -25,6 +25,7 @@ interface ShapeInstancedMesh {
     instances: Map<number, number>; // tileIndex -> instanceIndex
     maxInstances: number;
     instanceCount: number;
+    minTileIndex: number; // lowest tile ID in this mesh → highest render priority
 }
 
 /**
@@ -98,6 +99,9 @@ export class InstancedMeshManager {
             side: THREE.DoubleSide,
             transparent: true,
             depthTest: true,
+            // depthWrite: false — prevents transparent tiles from occluding tiles behind them.
+            // Tiles are sorted back-to-front via renderOrder, so the painter's algorithm is correct
+            // even without depth writes.
             depthWrite: true
         });
 
@@ -135,7 +139,8 @@ export class InstancedMeshManager {
             dummy,
             instances: new Map(),
             maxInstances,
-            instanceCount: 0
+            instanceCount: 0,
+            minTileIndex: Infinity // will be set when first tile is added
         };
 
         this.scene.add(instancedMesh);
@@ -202,15 +207,76 @@ export class InstancedMeshManager {
         // Check if we need more instances
         let instanceIndex = shapeData.instances.get(tileIndex);
         if (instanceIndex === undefined) {
-            // Add new instance
             if (shapeData.instanceCount >= shapeData.maxInstances) {
-                // Need to expand the instanced mesh
                 this.expandInstancedMesh(shapeData);
             }
-            instanceIndex = shapeData.instanceCount;
-            shapeData.instances.set(tileIndex, instanceIndex);
+
+            const { instancedMesh } = shapeData;
+            const count = shapeData.instanceCount;
+
+            // Find correct insertion position to maintain DESCENDING tile ID order
+            // In the instance buffer, higher tile IDs must come first (lower index)
+            // so they draw first/behind with depthWrite=false.
+            // Lower tile IDs come later (higher index) → draw last/on top.
+            let insertAt = count;
+            if (count > 0) {
+                // Build position→tileID map for existing instances
+                const posToTile = new Map<number, number>();
+                for (const [tIdx, instIdx] of shapeData.instances) {
+                    posToTile.set(instIdx, tIdx);
+                }
+                // Find first position where the tile ID is lower than the new tile
+                // The new tile (with higher ID) should go BEFORE that position
+                for (let pos = 0; pos < count; pos++) {
+                    const tIdxAtPos = posToTile.get(pos);
+                    if (tIdxAtPos !== undefined && tIdxAtPos < tileIndex) {
+                        insertAt = pos;
+                        break;
+                    }
+                }
+            }
+
+            // Shift instances at positions >= insertAt up by 1
+            if (count > 0 && insertAt < count) {
+                for (let i = count - 1; i >= insertAt; i--) {
+                    const mat = new THREE.Matrix4();
+                    instancedMesh.getMatrixAt(i, mat);
+                    instancedMesh.setMatrixAt(i + 1, mat);
+                }
+
+                const iColor = instancedMesh.geometry.attributes.iColor! as THREE.InstancedBufferAttribute;
+                const iBgColor = instancedMesh.geometry.attributes.iBgColor! as THREE.InstancedBufferAttribute;
+                const iOpacity = instancedMesh.geometry.attributes.iOpacity! as THREE.InstancedBufferAttribute;
+
+                for (let i = count - 1; i >= insertAt; i--) {
+                    iColor.setXYZ(i + 1, iColor.getX(i), iColor.getY(i), iColor.getZ(i));
+                    iBgColor.setXYZ(i + 1, iBgColor.getX(i), iBgColor.getY(i), iBgColor.getZ(i));
+                    iOpacity.setX(i + 1, iOpacity.getX(i));
+                }
+                iColor.needsUpdate = true;
+                iBgColor.needsUpdate = true;
+                iOpacity.needsUpdate = true;
+                instancedMesh.instanceMatrix.needsUpdate = true;
+
+                // Update tileIndex→instanceIndex mapping for shifted instances only
+                for (const [tIdx, instIdx] of shapeData.instances) {
+                    if (instIdx >= insertAt) {
+                        shapeData.instances.set(tIdx, instIdx + 1);
+                    }
+                }
+            }
+
+            instanceIndex = insertAt;
+            shapeData.instances.set(tileIndex, insertAt);
             shapeData.instanceCount++;
             shapeData.instancedMesh.count = shapeData.instanceCount;
+
+            // Update minTileIndex and renderOrder for correct between-shape z-ordering
+            if (tileIndex < shapeData.minTileIndex) {
+                shapeData.minTileIndex = tileIndex;
+                // Lower tile ID = higher layer = rendered last = higher renderOrder
+                shapeData.instancedMesh.renderOrder = -tileIndex;
+            }
         }
 
         // Update instance transform and color
@@ -255,6 +321,7 @@ export class InstancedMeshManager {
 
     /**
      * Update only transform for an existing tile
+     * Skips GPU upload if nothing changed (dirty check)
      */
     public updateTileTransform(
         tileIndex: number,
@@ -266,31 +333,41 @@ export class InstancedMeshManager {
         const instance = this.tileInstances.get(tileIndex);
         if (!instance) return;
 
-        instance.position.copy(position);
-        instance.rotation.copy(rotation);
-        instance.scale.copy(scale);
-        if (opacity !== undefined) instance.opacity = opacity;
+        // Dirty check — skip if nothing changed to avoid per-frame GPU upload
+        const posChanged = !instance.position.equals(position);
+        const rotChanged = !instance.rotation.equals(rotation);
+        const scaleChanged = !instance.scale.equals(scale);
+        const opacityChanged = opacity !== undefined && Math.abs(instance.opacity - opacity) > 1e-6;
+
+        if (!posChanged && !rotChanged && !scaleChanged && !opacityChanged) return;
+
+        if (posChanged) instance.position.copy(position);
+        if (rotChanged) instance.rotation.copy(rotation);
+        if (scaleChanged) instance.scale.copy(scale);
+        if (opacityChanged) instance.opacity = opacity;
 
         // Find in instanced meshes
         for (const shapeData of this.instancedMeshes.values()) {
             const instanceIndex = shapeData.instances.get(tileIndex);
             if (instanceIndex !== undefined) {
                 const { instancedMesh, dummy } = shapeData;
-                
-                dummy.position.copy(position);
-                dummy.rotation.copy(rotation);
-                if (instance.visible) {
-                    dummy.scale.copy(scale);
-                } else {
-                    dummy.scale.set(0, 0, 0);
+
+                if (posChanged || rotChanged || scaleChanged) {
+                    dummy.position.copy(position);
+                    dummy.rotation.copy(rotation);
+                    if (instance.visible) {
+                        dummy.scale.copy(scale);
+                    } else {
+                        dummy.scale.set(0, 0, 0);
+                    }
+                    dummy.updateMatrix();
+
+                    instancedMesh.setMatrixAt(instanceIndex, dummy.matrix);
+                    instancedMesh.instanceMatrix.needsUpdate = true;
                 }
-                dummy.updateMatrix();
-                
-                instancedMesh.setMatrixAt(instanceIndex, dummy.matrix);
-                instancedMesh.instanceMatrix.needsUpdate = true;
-                
-                if (opacity !== undefined) {
-                    instancedMesh.geometry.attributes.iOpacity!.setX(instanceIndex, opacity);
+
+                if (opacityChanged) {
+                    instancedMesh.geometry.attributes.iOpacity!.setX(instanceIndex, opacity!);
                     instancedMesh.geometry.attributes.iOpacity!.needsUpdate = true;
                 }
                 break;
@@ -300,6 +377,7 @@ export class InstancedMeshManager {
 
     /**
      * Update only color for an existing tile
+     * Skips GPU upload if colors haven't changed (dirty check)
      */
     public updateTileColor(
         tileIndex: number,
@@ -309,30 +387,42 @@ export class InstancedMeshManager {
         const instance = this.tileInstances.get(tileIndex);
         if (!instance) return;
 
-        instance.color.set(color);
-        instance.bgColor.set(bgColor);
+        // Dirty check — parse incoming colors and compare with stored
+        const newColor = new THREE.Color(color);
+        const newBgColor = new THREE.Color(bgColor);
+        const colorChanged = !instance.color.equals(newColor);
+        const bgColorChanged = !instance.bgColor.equals(newBgColor);
+
+        if (!colorChanged && !bgColorChanged) return;
+
+        if (colorChanged) instance.color.copy(newColor);
+        if (bgColorChanged) instance.bgColor.copy(newBgColor);
 
         // Find in instanced meshes
         for (const shapeData of this.instancedMeshes.values()) {
             const instanceIndex = shapeData.instances.get(tileIndex);
             if (instanceIndex !== undefined) {
                 const { instancedMesh } = shapeData;
-                
-                instancedMesh.geometry.attributes.iColor!.setXYZ(
-                    instanceIndex,
-                    instance.color.r,
-                    instance.color.g,
-                    instance.color.b
-                );
-                instancedMesh.geometry.attributes.iBgColor!.setXYZ(
-                    instanceIndex,
-                    instance.bgColor.r,
-                    instance.bgColor.g,
-                    instance.bgColor.b
-                );
-                
-                instancedMesh.geometry.attributes.iColor!.needsUpdate = true;
-                instancedMesh.geometry.attributes.iBgColor!.needsUpdate = true;
+
+                if (colorChanged) {
+                    instancedMesh.geometry.attributes.iColor!.setXYZ(
+                        instanceIndex,
+                        newColor.r,
+                        newColor.g,
+                        newColor.b
+                    );
+                }
+                if (bgColorChanged) {
+                    instancedMesh.geometry.attributes.iBgColor!.setXYZ(
+                        instanceIndex,
+                        newBgColor.r,
+                        newBgColor.g,
+                        newBgColor.b
+                    );
+                }
+
+                if (colorChanged) instancedMesh.geometry.attributes.iColor!.needsUpdate = true;
+                if (bgColorChanged) instancedMesh.geometry.attributes.iBgColor!.needsUpdate = true;
                 break;
             }
         }

@@ -16,6 +16,14 @@ interface AnimationProperty {
     extra?: any;
 }
 
+interface DeltaAnimation {
+    property: string;
+    delta: number;           // total change to apply (e.g., rotationDelta in radians)
+    startTime: number;
+    duration: number;
+    easingFunc: (t: number) => number;
+}
+
 interface TileAnimationState {
     startPos: THREE.Vector3;
     startRot: THREE.Euler;
@@ -23,6 +31,7 @@ interface TileAnimationState {
     startOpacity: number;
     tweens: Map<string, MoveTrackTween>;
     animations: Map<string, AnimationProperty>;
+    deltaAnimations: DeltaAnimation[];  // additive delta animations (PIXI-style)
 }
 
 /**
@@ -62,6 +71,26 @@ export class MoveTrackManager {
         duration: number;
         ease: string;
     }> = new Map();
+
+    /**
+     * PIXI-style savingtrack for rotationOffset: stores the absolute rotationOffset
+     * value per tile. Each new event computes change = newCr - oldCr, then replaces
+     * savingtrack. Multiple delta animations can run simultaneously (additive),
+     * matching PIXI's TrackTickRush behavior where events overlap/interrupt.
+     */
+    private savingtrackRotation: Map<number, number> = new Map();
+
+    /**
+     * Callback fired when a tile's transform is updated by an animation.
+     * Used to sync changes to InstancedMeshManager when instanced rendering is active.
+     */
+    public tileTransformChanged?: (
+        tileIndex: number,
+        position: THREE.Vector3,
+        rotation: THREE.Euler,
+        scale: THREE.Vector3,
+        opacity: number
+    ) => void;
 
     constructor(levelData: any, tileStartTimes: number[], tileBPM: number[]) {
         this.levelData = levelData;
@@ -115,10 +144,18 @@ export class MoveTrackManager {
         console.log('[MoveTrackManager] tileStartTimes at initialization:', this.tileStartTimes.slice(0, 10).map((t, i) => `[${i}]=${t.toFixed(3)}s`).join(', '));
         console.log('[MoveTrackManager] tileBPM at initialization:', this.tileBPM.slice(0, 10).map((b, i) => `[${i}]=${b}`).join(', '));
 
+        // CRITICAL: tileStartTimes from Player.ts are shifted so that tileStartTimes[1] = 0.
+        // ADOFAN_PIXI uses raw times where time[0] = 0 (tile 0 at level start).
+        // We must unshift to match ADOFAN_PIXI timing, otherwise ALL MoveTrack event times
+        // are off by tileDurations[0] (e.g. 0.6s at 100 BPM / 180°), causing events to fire
+        // before the planet reaches the corresponding tile.
+        const shiftAmount = this.tileStartTimes.length > 0 ? -this.tileStartTimes[0] : 0;
+
         tileMoveTrackEvents.forEach((events, floor) => {
             const bpm = this.tileBPM[floor] || 100;
             const secPerBeat = 60 / bpm;
-            const startTime = this.tileStartTimes[floor] || 0; // seconds
+            const startTime = this.tileStartTimes[floor] || 0; // seconds (shifted)
+            const unshiftedStartTime = startTime + shiftAmount; // seconds (matches ADOFAN_PIXI time[floor])
 
             events.forEach(event => {
                 // Skip disabled events
@@ -130,12 +167,12 @@ export class MoveTrackManager {
                 // angleOffset is in degrees. 180 degrees = 1 beat.
                 const angleOffset = event.angleOffset || 0;
                 const timeOffset = (angleOffset / 180) * secPerBeat;
-                const eventTime = startTime + timeOffset;
+                const eventTime = unshiftedStartTime + timeOffset;
 
                 // Duration in seconds (duration is in beats, multiply by secPerBeat)
                 const duration = (event.duration || 1) * secPerBeat;
 
-                console.log(`[MoveTrackManager] MoveTrack event at floor ${floor}: eventTime=${eventTime.toFixed(3)}s = startTime(${startTime.toFixed(3)}s from tileStartTimes[${floor}]=${this.tileStartTimes[floor]?.toFixed(3)}s) + timeOffset(${timeOffset.toFixed(3)}s from angleOffset=${angleOffset}°), duration=${duration.toFixed(3)}s, bpm=${bpm}, secPerBeat=${secPerBeat.toFixed(4)}s`);
+                console.log(`[MoveTrackManager] MoveTrack event at floor ${floor}: eventTime=${eventTime.toFixed(3)}s = unshiftedStartTime(${unshiftedStartTime.toFixed(3)}s from tileStartTimes[${floor}]=${this.tileStartTimes[floor]?.toFixed(3)}s + shiftAmount=${shiftAmount.toFixed(3)}s) + timeOffset(${timeOffset.toFixed(3)}s from angleOffset=${angleOffset}°), duration=${duration.toFixed(3)}s, bpm=${bpm}, secPerBeat=${secPerBeat.toFixed(4)}s`);
 
                 entries.push({
                     time: eventTime,
@@ -207,9 +244,6 @@ export class MoveTrackManager {
                     case 'positionY':
                         mesh.position.y = value;
                         break;
-                    case 'rotation':
-                        mesh.rotation.z = value;
-                        break;
                     case 'scaleX':
                         mesh.scale.x = value;
                         break;
@@ -225,25 +259,60 @@ export class MoveTrackManager {
                             }
                             (mesh.material as any).transparent = value < 0.999;
                             mesh.userData.opacity = value;
+                            mesh.visible = value > 0.001;
 
                             // Update children (decorations/icons) opacity
+                            // Children always have transparent=true (set at creation),
+                            // so we only need to set opacity — no shader recompile needed.
                             mesh.traverse((child) => {
                                 if (child !== mesh && (child as any).material) {
                                     const childMat = (child as any).material;
                                     if (childMat.opacity !== undefined) {
                                         childMat.opacity = value;
-                                        childMat.transparent = value < 0.999;
                                     }
                                 }
                             });
                         }
                         break;
                 }
-                
+
                 // Remove animation when complete
                 if (progress >= 1) {
                     state.animations.delete(propertyName);
                 }
+            }
+
+            // PIXI-style delta animations: sum all active delta contributions
+            // applied on top of the tile's initial rotation
+            if (state.deltaAnimations.length > 0) {
+                const initialState = this.tileInitialStates.get(tileIndex);
+                const initialRotation = initialState ? initialState.rotation.z : 0;
+                let totalDelta = 0;
+
+                for (let j = state.deltaAnimations.length - 1; j >= 0; j--) {
+                    const anim = state.deltaAnimations[j];
+                    const elapsed = currentTime - anim.startTime;
+                    const progress = Math.min(elapsed / anim.duration, 1);
+                    const easedProgress = anim.easingFunc(progress);
+                    totalDelta += anim.delta * easedProgress;
+
+                    if (progress >= 1) {
+                        state.deltaAnimations.splice(j, 1);
+                    }
+                }
+
+                mesh.rotation.z = initialRotation + totalDelta;
+            }
+
+            // Sync to InstancedMeshManager when instanced rendering is active
+            if (this.tileTransformChanged) {
+                this.tileTransformChanged(
+                    tileIndex,
+                    mesh.position,
+                    mesh.rotation as THREE.Euler,
+                    mesh.scale,
+                    mesh.userData.opacity !== undefined ? mesh.userData.opacity : 1
+                );
             }
         }
     }
@@ -407,7 +476,8 @@ export class MoveTrackManager {
                     startScale: tileMesh.scale.clone(),
                     startOpacity: 1,
                     tweens: new Map(),
-                    animations: new Map()
+                    animations: new Map(),
+                    deltaAnimations: []
                 };
                 this.tileAnimationStates.set(i, state);
             }
@@ -454,36 +524,38 @@ export class MoveTrackManager {
                 }
             }
 
-            // Rotation animation
+            // Rotation animation — PIXI-style savingtrack + delta approach
+            // Each event's rotationOffset is an ABSOLUTE value (like PIXI savingtrack[F][1][1]).
+            // change = newCr - oldCr (delta from previous savingtrack).
+            // The delta is animated additively — multiple active deltas accumulate,
+            // matching PIXI's TrackTickRush where overlapping events both contribute.
             if (rotationUsed) {
-                // Convert rotation offset from degrees to radians
-                const rotationOffsetRad = rotationOffset * Math.PI / 180;
-                const targetRot = tileBaseRot + rotationOffsetRad;
+                // Read PIXI-style savingtrack value (default 0 = no rotation offset)
+                const oldRotationOffset = this.savingtrackRotation.get(i) || 0;
+                const rotationChange = rotationOffset - oldRotationOffset;
 
-                console.log(`[MoveTrackManager] Tile ${i} rotation: base=${(tileBaseRot * 180 / Math.PI).toFixed(1)}°, offset=${rotationOffset}°, target=${(targetRot * 180 / Math.PI).toFixed(1)}°, current=${(tileMesh.rotation.z * 180 / Math.PI).toFixed(1)}°`);
+                // Update savingtrack to new absolute value (PIXI: this.savingtrack[F][1][1] = target[i][2])
+                this.savingtrackRotation.set(i, rotationOffset);
 
-                // For rotation comparison, normalize angles to -π to π range
-                // This prevents issues with angle wraparound (e.g., -π ≈ π)
-                const normalizedCurrent = this.normalizeAngle(tileMesh.rotation.z);
-                const normalizedTarget = this.normalizeAngle(targetRot);
-                const angleDiff = Math.abs(normalizedCurrent - normalizedTarget);
+                console.log(`[MoveTrackManager] Tile ${i} rotation: savingtrack=${oldRotationOffset}° → ${rotationOffset}°, change=${rotationChange}°, current=${(tileMesh.rotation.z * 180 / Math.PI).toFixed(1)}°`);
 
-                // Only create new tween if target differs from current
-                if (!this.approximatelyEqual(normalizedCurrent, normalizedTarget, 0.001)) {
-                    console.log(`[MoveTrackManager] Tile ${i} starting rotation animation: ${angleDiff * 180 / Math.PI}° change`);
-                    this.animateProperty(
-                        tileMesh,
-                        'rotation',
-                        tileMesh.rotation.z,
-                        targetRot,
+                // Only animate if there's an actual change
+                if (!this.approximatelyEqual(rotationChange, 0, 0.001)) {
+                    // PIXI: tracks[trackname].rotation -= movper * nowchange[2] * Math.PI / 180
+                    // So delta = -change * PI/180 applied additively on top of initial rotation
+                    const deltaRad = -rotationChange * Math.PI / 180;
+
+                    state.deltaAnimations.push({
+                        property: 'rotation',
+                        delta: deltaRad,
+                        startTime: currentTime,
                         duration,
-                        easingFunc,
-                        state,
-                        undefined,
-                        currentTime
-                    );
+                        easingFunc
+                    });
+
+                    console.log(`[MoveTrackManager] Tile ${i} rotation delta animation: ${(deltaRad * 180 / Math.PI).toFixed(2)}° over ${duration.toFixed(3)}s`);
                 } else {
-                    console.log(`[MoveTrackManager] Tile ${i} rotation already at target, skipping animation`);
+                    console.log(`[MoveTrackManager] Tile ${i} rotation no change, skipping animation`);
                 }
             }
 
@@ -620,7 +692,6 @@ export class MoveTrackManager {
             switch (property) {
                 case 'positionX': mesh.position.x = endValue; break;
                 case 'positionY': mesh.position.y = endValue; break;
-                case 'rotation': mesh.rotation.z = endValue; break;
                 case 'scaleX': mesh.scale.x = endValue; break;
                 case 'scaleY': mesh.scale.y = endValue; break;
                 case 'opacity':
@@ -632,6 +703,7 @@ export class MoveTrackManager {
                         }
                         (mesh.material as any).transparent = endValue < 0.999;
                         mesh.userData.opacity = endValue;
+                        mesh.visible = endValue > 0.001;
 
                         // Update children (decorations/icons) opacity
                         mesh.traverse((child) => {
@@ -639,7 +711,6 @@ export class MoveTrackManager {
                                 const childMat = (child as any).material;
                                 if (childMat.opacity !== undefined) {
                                     childMat.opacity = endValue;
-                                    childMat.transparent = endValue < 0.999;
                                 }
                             }
                         });
@@ -737,9 +808,10 @@ export class MoveTrackManager {
     public reset(): void {
         console.log('[MoveTrackManager] Resetting animations and tiles');
         
-        // Clear active animations
+        // Clear active animations and savingtrack
         this.tileAnimationStates.clear();
         this.activeMoveTracks.clear();
+        this.savingtrackRotation.clear();
         this.lastMoveTrackEventIndex = -1;
 
         // Reset tiles to their captured initial states
@@ -751,10 +823,32 @@ export class MoveTrackManager {
                     mesh.rotation.copy(initial.rotation);
                     mesh.scale.copy(initial.scale);
                     mesh.userData.opacity = initial.opacity;
-                    
+                    mesh.visible = initial.opacity > 0.001;
+
                     if (mesh.material) {
                         (mesh.material as any).opacity = initial.opacity;
                         (mesh.material as any).transparent = initial.opacity < 0.999;
+                    }
+
+                    // Update children (decorations/icons) opacity to match
+                    mesh.traverse((child) => {
+                        if (child !== mesh && (child as any).material) {
+                            const childMat = (child as any).material;
+                            if (childMat.opacity !== undefined) {
+                                childMat.opacity = initial.opacity;
+                            }
+                        }
+                    });
+
+                    // Sync to InstancedMeshManager when instanced rendering is active
+                    if (this.tileTransformChanged) {
+                        this.tileTransformChanged(
+                            index,
+                            mesh.position,
+                            mesh.rotation as THREE.Euler,
+                            mesh.scale,
+                            mesh.userData.opacity !== undefined ? mesh.userData.opacity : 1
+                        );
                     }
                 }
             });

@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
-import createTrackMesh, { expandToPerFace } from '@/lib/Geo/mesh_reserve'
+import createTrackMesh from '@/lib/Geo/mesh_reserve'
 import { ArrowLeft } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 
@@ -141,20 +141,12 @@ export default function MeshPage() {
 
     const userColor = hexToRgb(color)
     const newColors = recolorVertices(data.colors, userColor, 0.20)
-
-    // Expand to per-face vertices for proper transparency handling
-    const expandedData = expandToPerFace({
-      vertices: data.vertices,
-      faces: data.faces,
-      colors: newColors
-    })
-
-    const zVertices = applyOutlineZ(expandedData.vertices, expandedData.colors, Z_OFFSET)
+    const zVertices = applyOutlineZ(data.vertices, newColors, Z_OFFSET)
 
     const geometry = new THREE.BufferGeometry()
     geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(zVertices), 3))
-    geometry.setAttribute('color', new THREE.BufferAttribute(new Float32Array(expandedData.colors), 3))
-    // No index needed - expandToPerFace creates independent vertices for each face
+    geometry.setAttribute('color', new THREE.BufferAttribute(new Float32Array(newColors), 3))
+    geometry.setIndex(new THREE.BufferAttribute(new Uint16Array(data.faces), 1))
     geometry.computeVertexNormals()
 
     const material = new THREE.MeshStandardMaterial({
@@ -164,7 +156,7 @@ export default function MeshPage() {
       roughness: 0.35,
       metalness: 0.05,
       side: THREE.DoubleSide,
-      depthWrite: opacity > 0.95,
+      depthWrite: true,
     })
 
     const mesh = new THREE.Mesh(geometry, material)

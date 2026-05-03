@@ -111,11 +111,11 @@ export class PositionTrackManager {
                     this.positionTrackEvents.set(floor, []);
                 }
                 this.positionTrackEvents.get(floor)!.push({
-                    positionOffset: action.positionOffset || [0, 0],
-                    relativeTo: action.relativeTo || [0, 'ThisTile'],
-                    rotation: action.rotation || 0,
-                    scale: action.scale || 100,
-                    opacity: action.opacity || 100,
+                    positionOffset: action.positionOffset,
+                    relativeTo: action.relativeTo,
+                    rotation: action.rotation,
+                    scale: action.scale,
+                    opacity: action.opacity,
                     justThisTile: action.justThisTile || false,
                     editorOnly: action.editorOnly || false,
                     stickToFloors: this.parseStickToFloors(action.stickToFloors)
@@ -125,149 +125,176 @@ export class PositionTrackManager {
     }
 
     /**
-     * Calculate all tile positions and transforms
-     * Uses ADOFAI-JS structure for position calculation
-     * Uses ADOFAI-Src cumulative logic for PositionTrack
+     * Calculate all tile positions and transforms using a two-pass approach
+     * matching ADOFAN_PIXI's architecture:
+     *   Pass 1: Calculate ALL base tile positions from angle data (loadtilepos)
+     *   Pass 2: Apply PositionTrack events in order, modifying positions
+     *           in-place (loadpositiontrack) — all positions are available
+     *           for relativeTo lookups
+     *
+     * This fixes the critical bug where relativeTo forward references
+     * (tile i referencing tile j where j > i) silently failed because
+     * the target tile's transform hadn't been computed yet.
      */
     public calculateAllTileTransforms(isEditorMode: boolean = false): Map<number, TileTransform> {
         const transforms = new Map<number, TileTransform>();
         const tiles = this.levelData.tiles;
         const angleData = this.levelData.angleData || [];
-        const TILE_SIZE = 1.0; // Tile size in world units (matches Re_ADOJAS system)
+        const TILE_SIZE = 1.0;
 
-        // Start from (0, 0)
-        let currentPos = new THREE.Vector2(0, 0);
+        // ============================================================
+        // PASS 1: Calculate ALL base tile positions from angle data
+        // Like ADOFAN_PIXI's loadtilepos()
+        // ============================================================
+        this.tilePositions.clear();
 
-        // Cumulative values (vector in ADOFAI-Src)
-        let cumulativeOffset = new THREE.Vector2(0, 0);
-        let cumulativeRotation = 0;
-        let cumulativeScale = 1;
-        let cumulativeOpacity = 1;
-        let cumulativeStickToFloors = this.levelData.settings?.stickToFloors !== false;
-
-        // Pre-calculate all angles
         const floats = new Array(tiles.length);
         for (let i = 0; i < tiles.length; i++) {
-            floats[i] = angleData[i] === 999 ? (angleData[i - 1] || 0) + 180 : angleData[i];
+            floats[i] = angleData[i] === 999 ? (floats[i - 1] || 0) + 180 : angleData[i];
         }
 
-        for (let i = 0; i <= tiles.length; i++) {
-            const isLastTile = i === tiles.length;
-            const angle1 = isLastTile ? (floats[i - 1] || 0) : floats[i];
-            const angle2 = i === 0 ? 0 : (floats[i - 1] || 0);
+        // tilePositions stores base positions for tiles 0..tiles.length
+        // (the extra entry at tiles.length is the "position after last tile" for camera/planet)
+        let currentPos = new THREE.Vector2(0, 0);
+        this.tilePositions.set(0, currentPos.clone());
+        for (let i = 0; i < tiles.length; i++) {
+            const rad = floats[i] * Math.PI / 180;
+            currentPos.x += Math.cos(rad) * TILE_SIZE;
+            currentPos.y += Math.sin(rad) * TILE_SIZE;
+            this.tilePositions.set(i + 1, currentPos.clone());
+        }
 
-            if (!isLastTile) {
-                // Store base tile position (startPos in ADOFAI)
-                const tileBasePos = currentPos.clone();
+        // ============================================================
+        // PASS 2: Apply PositionTrack events in order
+        // Like ADOFAN_PIXI's loadpositiontrack()
+        //
+        // Working mutable arrays (equivalent to ADOFAN_PIXI's trackpos,
+        // tracksro, trackscale arrays modified in-place)
+        // ============================================================
+        const workingPos: THREE.Vector2[] = [];
+        const workingRot: number[] = [];
+        const workingScale: number[] = [];
+        const workingOpacity: number[] = [];
+        const workingStick: boolean[] = [];
+        const defaultStick = this.levelData.settings?.stickToFloors !== false;
 
-                // Current tile transform (vector2 in ADOFAI-Src)
-                let tileOffset = cumulativeOffset.clone();
-                let tileRotation = cumulativeRotation;
-                let tileScale = cumulativeScale;
-                let tileOpacity = cumulativeOpacity;
-                let tileStickToFloors = cumulativeStickToFloors;
+        for (let i = 0; i < tiles.length; i++) {
+            const basePos = this.tilePositions.get(i);
+            workingPos.push(basePos ? basePos.clone() : new THREE.Vector2(0, 0));
+            workingRot.push(0);
+            workingScale.push(1);
+            workingOpacity.push(1);
+            workingStick.push(defaultStick);
+        }
 
-                // Process PositionTrack events for this tile
-                const events = this.positionTrackEvents.get(i);
-                if (events && events.length > 0) {
-                    for (const event of events) {
-                        if (event.editorOnly && !isEditorMode) {
-                            continue;
-                        }
+        // Process PositionTrack events in tile order
+        for (let floor = 0; floor < tiles.length; floor++) {
+            const events = this.positionTrackEvents.get(floor);
+            if (!events || events.length === 0) continue;
 
-                        // Apply position offset
-                        if (event.positionOffset) {
-                            let offsetX = event.positionOffset[0] || 0;
-                            let offsetY = event.positionOffset[1] || 0;
+            for (const event of events) {
+                if (event.editorOnly && !isEditorMode) continue;
 
-                            // Handle relativeTo
-                            if (event.relativeTo) {
-                                const targetTileId = this.IDFromTile(event.relativeTo, i);
+                // Calculate position change (relativeTo + positionOffset combine into one delta,
+                // just like ADOFAN_PIXI where changeX/Y accumulate both contributions)
+                let changeX = 0, changeY = 0;
+                let hasPosChange = false;
 
-                                if (targetTileId !== i) {
-                                    // Get the target tile's base position
-                                    const targetBasePos = this.tilePositions.get(targetTileId);
-                                    if (targetBasePos) {
-                                        // Calculate position difference: targetBasePos + targetOffset - currentBasePos - currentOffset
-                                        // Matches ADOFAI: scrFloor3.startPos + scrFloor3.offsetPos - (scrFloor2.startPos + vector)
-                                        const targetTransform = transforms.get(targetTileId);
-                                        const targetOffsetPos = targetTransform ? 
-                                            new THREE.Vector2(
-                                                targetTransform.position.x - targetBasePos.x,
-                                                targetTransform.position.y - targetBasePos.y
-                                            ) : new THREE.Vector2(0, 0);
+                // Handle relativeTo: difference between target tile's current position and this tile's position
+                // ADOFAN_PIXI: changeX = this.trackpos[rela][0] - this.trackpos[event['floor']][0];
+                if (event.relativeTo) {
+                    const targetTileId = this.IDFromTile(event.relativeTo, floor);
+                    if (targetTileId !== floor && targetTileId < workingPos.length) {
+                        changeX += workingPos[targetTileId].x - workingPos[floor].x;
+                        changeY += workingPos[targetTileId].y - workingPos[floor].y;
+                        hasPosChange = true;
+                    }
+                }
 
-                                        const relativeOffset = new THREE.Vector2(
-                                            targetBasePos.x + targetOffsetPos.x - tileBasePos.x - tileOffset.x,
-                                            targetBasePos.y + targetOffsetPos.y - tileBasePos.y - tileOffset.y
-                                        );
+                // Handle positionOffset (in track-width units)
+                // ADOFAN_PIXI: changeX += this.trackradius[event['floor']] * event['positionOffset'][0];
+                if (event.positionOffset) {
+                    changeX += event.positionOffset[0] * TILE_SIZE;
+                    changeY += event.positionOffset[1] * TILE_SIZE;
+                    hasPosChange = true;
+                }
 
-                                        tileOffset.add(relativeOffset);
-                                    }
-                                }
-                            }
-
-                            // Multiply by TILE_SIZE (matches ADOFAI)
-                            tileOffset.x += offsetX * TILE_SIZE;
-                            tileOffset.y += offsetY * TILE_SIZE;
-                        }
-
-                        // Apply rotation
-                        if (event.rotation !== undefined) {
-                            tileRotation = event.rotation;
-                        }
-
-                        // Apply scale
-                        if (event.scale !== undefined) {
-                            tileScale = event.scale / 100;
-                        }
-
-                        // Apply opacity
-                        if (event.opacity !== undefined) {
-                            tileOpacity = event.opacity / 100;
-                        }
-
-                        // Apply stickToFloors
-                        if (event.stickToFloors !== undefined) {
-                            tileStickToFloors = this.parseStickToFloors(event.stickToFloors);
-                        }
-
-                        // Update cumulative values for next tiles (if not justThisTile)
-                        if (!event.justThisTile) {
-                            cumulativeOffset = tileOffset.clone();
-                            cumulativeRotation = tileRotation;
-                            cumulativeScale = tileScale;
-                            cumulativeOpacity = tileOpacity;
-                            cumulativeStickToFloors = tileStickToFloors;
+                // Determine affected tiles (ADOFAN_PIXI's ct array)
+                if (hasPosChange) {
+                    if (event.justThisTile) {
+                        // Only affect this floor
+                        workingPos[floor].x += changeX;
+                        workingPos[floor].y += changeY;
+                    } else {
+                        // Affect this floor and ALL following tiles (ADOFAN_PIXI default behavior)
+                        for (let j = floor; j < tiles.length; j++) {
+                            workingPos[j].x += changeX;
+                            workingPos[j].y += changeY;
                         }
                     }
                 }
 
-                // Calculate final position
-                const finalX = currentPos.x + tileOffset.x;
-                const finalY = currentPos.y + tileOffset.y;
-                
-                // Use a stable Z calculation that doesn't clip with millions of tiles
-                // We use renderOrder for fine-grained sorting, so Z only needs to handle broad layers
-                // Bricks are around Z=0, we use a very small offset to help with depth sorting if needed
-                const zLevel = (1000 - (i % 1000)) * 0.0001; 
+                // Apply rotation to affected tiles
+                if (event.rotation !== undefined && event.rotation !== null) {
+                    if (event.justThisTile) {
+                        workingRot[floor] = event.rotation;
+                    } else {
+                        for (let j = floor; j < tiles.length; j++) {
+                            workingRot[j] = event.rotation;
+                        }
+                    }
+                }
 
-                transforms.set(i, {
-                    position: new THREE.Vector3(finalX, finalY, zLevel),
-                    rotation: tileRotation,
-                    scale: new THREE.Vector3(tileScale, tileScale, tileScale),
-                    opacity: tileOpacity,
-                    stickToFloors: tileStickToFloors
-                });
+                // Apply scale to affected tiles
+                if (event.scale !== undefined && event.scale !== null) {
+                    const s = event.scale / 100;
+                    if (event.justThisTile) {
+                        workingScale[floor] = s;
+                    } else {
+                        for (let j = floor; j < tiles.length; j++) {
+                            workingScale[j] = s;
+                        }
+                    }
+                }
 
-                // Store base tile position for relative calculations
-                this.tilePositions.set(i, tileBasePos);
+                // Apply opacity to affected tiles
+                if (event.opacity !== undefined && event.opacity !== null) {
+                    const o = event.opacity / 100;
+                    if (event.justThisTile) {
+                        workingOpacity[floor] = o;
+                    } else {
+                        for (let j = floor; j < tiles.length; j++) {
+                            workingOpacity[j] = o;
+                        }
+                    }
+                }
+
+                // Apply stickToFloors to affected tiles
+                if (event.stickToFloors !== undefined) {
+                    const st = this.parseStickToFloors(event.stickToFloors);
+                    if (event.justThisTile) {
+                        workingStick[floor] = st;
+                    } else {
+                        for (let j = floor; j < tiles.length; j++) {
+                            workingStick[j] = st;
+                        }
+                    }
+                }
             }
+        }
 
-            // Update position for next tile (based on angle)
-            const rad = angle1 * Math.PI / 180;
-            currentPos.x += Math.cos(rad);
-            currentPos.y += Math.sin(rad);
+        // ============================================================
+        // PASS 3: Build TileTransform results from working arrays
+        // ============================================================
+        for (let i = 0; i < tiles.length; i++) {
+            const zLevel = (1000 - (i % 1000)) * 0.0001;
+            transforms.set(i, {
+                position: new THREE.Vector3(workingPos[i].x, workingPos[i].y, zLevel),
+                rotation: workingRot[i],
+                scale: new THREE.Vector3(workingScale[i], workingScale[i], workingScale[i]),
+                opacity: workingOpacity[i],
+                stickToFloors: workingStick[i]
+            });
         }
 
         this.tileTransforms = transforms;
