@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { EasingFunctions } from './Easing';
+import { debugLog } from './DebugLog';
 
 interface MoveTrackTween {
     type: 'position' | 'rotation' | 'scale' | 'opacity';
@@ -35,6 +36,25 @@ interface TileAnimationState {
 }
 
 /**
+ * Pending target for a tile that hasn't been created yet (lazy tile creation).
+ * Stored when processMoveTrackEvent encounters a tile that doesn't exist,
+ * then applied in registerTileInitial when the tile is eventually created.
+ */
+interface PendingMoveTrackAnimation {
+    startTime: number;
+    duration: number;
+    easingFunc: (t: number) => number;
+    targets: {
+        positionX?: number;
+        positionY?: number;
+        rotationZ?: number;
+        scaleX?: number;
+        scaleY?: number;
+        opacity?: number;
+    };
+}
+
+/**
  * Manager for MoveTrack events
  * Handles animation of tiles (position, rotation, scale, opacity)
  */
@@ -60,6 +80,11 @@ export class MoveTrackManager {
 
     // Reference to tiles map (will be set by Player)
     private tiles: Map<string, THREE.Mesh> | null = null;
+
+    // Base positions from angle data (unmodified by PositionTrack)
+    // These match ADOFAI's startPos — the raw tile position before any
+    // PositionTrack/MoveTrack modifications.
+    private basePositions: THREE.Vector2[] = [];
 
     // Track active MoveTrack animations for planet following
     private activeMoveTracks: Map<number, {
@@ -92,6 +117,18 @@ export class MoveTrackManager {
         opacity: number
     ) => void;
 
+    // Pending animations for tiles that don't exist yet (lazy tile creation)
+    // When processMoveTrackEvent skips a non-existent tile, the target is stored here
+    // and applied when registerTileInitial is called for that tile.
+    private pendingMoveTrackTargets: Map<number, PendingMoveTrackAnimation[]> = new Map();
+
+    // Current game time in seconds (updated every frame by update())
+    private currentTime: number = 0;
+
+    // Debug: play counter for FAIL→PASS→PASS diagnosis
+    private static playCounter: number = 0;
+    private debugPlayId: number = 0;
+
     constructor(levelData: any, tileStartTimes: number[], tileBPM: number[]) {
         this.levelData = levelData;
         this.tileStartTimes = tileStartTimes;
@@ -119,17 +156,108 @@ export class MoveTrackManager {
     }
 
     /**
+     * Set base positions from angle data (unmodified by PositionTrack).
+     * These are used for computing absolute MoveTrack targets,
+     * matching ADOFAI's use of target.startPos.
+     */
+    public setBasePositions(positions: THREE.Vector2[]): void {
+        this.basePositions = positions;
+    }
+
+    /**
      * Register a tile's initial state (called when tile is first created)
      */
     public registerTileInitial(index: number, tileMesh: THREE.Mesh): void {
+        const playLabel = `[MoveTrackManager][Play#${this.debugPlayId}]`;
         if (!this.tileInitialStates.has(index)) {
-            console.log(`[MoveTrackManager] Registering initial state for tile ${index}`);
+            debugLog(playLabel, `Registering initial state for tile ${index}: pos=(${tileMesh.position.x.toFixed(3)},${tileMesh.position.y.toFixed(3)}), rot=${tileMesh.rotation.z.toFixed(6)}, scale=(${tileMesh.scale.x.toFixed(3)},${tileMesh.scale.y.toFixed(3)}), opacity=${tileMesh.userData.opacity ?? 1}`);
             this.tileInitialStates.set(index, {
                 position: tileMesh.position.clone(),
                 rotation: tileMesh.rotation.clone() as THREE.Euler,
                 scale: tileMesh.scale.clone(),
                 opacity: tileMesh.userData.opacity !== undefined ? tileMesh.userData.opacity : 1
             });
+
+            // Apply any pending MoveTrack animations that were stored when this tile
+            // didn't exist yet (lazy tile creation). This fixes the FAIL→PASS→PASS bug
+            // where MoveTrack events for far-ahead tiles were silently dropped.
+            const pendingAnims = this.pendingMoveTrackTargets.get(index);
+            if (pendingAnims && pendingAnims.length > 0) {
+                debugLog(playLabel, `  tile[${index}] has ${pendingAnims.length} pending MoveTrack animation(s)`);
+                for (const pending of pendingAnims) {
+                    const elapsed = this.currentTime - pending.startTime;
+                    const progress = Math.min(elapsed / pending.duration, 1);
+
+                    // When tile is created after animation would have completed,
+                    // snap to final target. Otherwise create a fresh animation
+                    // with the remaining time.
+                    if (progress >= 1) {
+                        // Animation window has passed — apply final values immediately
+                        for (const [prop, value] of Object.entries(pending.targets)) {
+                            switch (prop) {
+                                case 'positionX': tileMesh.position.x = value; break;
+                                case 'positionY': tileMesh.position.y = value; break;
+                                case 'rotationZ': tileMesh.rotation.z = value; break;
+                                case 'scaleX': tileMesh.scale.x = value; break;
+                                case 'scaleY': tileMesh.scale.y = value; break;
+                                case 'opacity':
+                                    if (tileMesh.material) {
+                                        if (tileMesh.material instanceof THREE.ShaderMaterial && tileMesh.material.uniforms.opacity) {
+                                            tileMesh.material.uniforms.opacity.value = value;
+                                        } else {
+                                            (tileMesh.material as any).opacity = value;
+                                        }
+                                        (tileMesh.material as any).transparent = value < 0.999;
+                                        tileMesh.userData.opacity = value;
+                                        tileMesh.visible = value > 0.001;
+                                    }
+                                    break;
+                            }
+                        }
+                        debugLog(playLabel, `  tile[${index}] applied final pending target (progress=${progress.toFixed(4)})`);
+                    } else {
+                        // Still within animation window — create fresh animation
+                        // from current value to target with remaining duration
+                        let state = this.tileAnimationStates.get(index);
+                        if (!state) {
+                            state = {
+                                startPos: tileMesh.position.clone(),
+                                startRot: tileMesh.rotation.clone() as THREE.Euler,
+                                startScale: tileMesh.scale.clone(),
+                                startOpacity: 1,
+                                tweens: new Map(),
+                                animations: new Map(),
+                                deltaAnimations: []
+                            };
+                            this.tileAnimationStates.set(index, state);
+                        }
+
+                        const remainingDuration = pending.duration - elapsed;
+                        for (const [prop, targetValue] of Object.entries(pending.targets)) {
+                            let currentValue: number;
+                            switch (prop) {
+                                case 'positionX': currentValue = tileMesh.position.x; break;
+                                case 'positionY': currentValue = tileMesh.position.y; break;
+                                case 'rotationZ': currentValue = tileMesh.rotation.z; break;
+                                case 'scaleX': currentValue = tileMesh.scale.x; break;
+                                case 'scaleY': currentValue = tileMesh.scale.y; break;
+                                case 'opacity': currentValue = tileMesh.userData.opacity ?? 1; break;
+                                default: continue;
+                            }
+                            this.animateProperty(
+                                tileMesh, prop, currentValue, targetValue,
+                                remainingDuration, pending.easingFunc, state,
+                                undefined, this.currentTime
+                            );
+                        }
+                        debugLog(playLabel, `  tile[${index}] created catch-up animation (progress=${progress.toFixed(4)}, remaining=${remainingDuration.toFixed(3)}s)`);
+                    }
+                }
+                this.pendingMoveTrackTargets.delete(index);
+            }
+        } else {
+            const existing = this.tileInitialStates.get(index)!;
+            debugLog(playLabel, `Skipping registerTileInitial for tile ${index} (already exists): existing rot=${existing.rotation.z.toFixed(6)}, current rot=${tileMesh.rotation.z.toFixed(6)}`);
         }
     }
 
@@ -141,8 +269,8 @@ export class MoveTrackManager {
         this.moveTrackEventsTimeline = [];
         const entries: { time: number; event: any }[] = [];
 
-        console.log('[MoveTrackManager] tileStartTimes at initialization:', this.tileStartTimes.slice(0, 10).map((t, i) => `[${i}]=${t.toFixed(3)}s`).join(', '));
-        console.log('[MoveTrackManager] tileBPM at initialization:', this.tileBPM.slice(0, 10).map((b, i) => `[${i}]=${b}`).join(', '));
+        debugLog('[MoveTrackManager] tileStartTimes at initialization:', this.tileStartTimes.slice(0, 10).map((t, i) => `[${i}]=${t.toFixed(3)}s`).join(', '));
+        debugLog('[MoveTrackManager] tileBPM at initialization:', this.tileBPM.slice(0, 10).map((b, i) => `[${i}]=${b}`).join(', '));
 
         // CRITICAL: tileStartTimes from Player.ts are shifted so that tileStartTimes[1] = 0.
         // ADOFAN_PIXI uses raw times where time[0] = 0 (tile 0 at level start).
@@ -172,7 +300,7 @@ export class MoveTrackManager {
                 // Duration in seconds (duration is in beats, multiply by secPerBeat)
                 const duration = (event.duration || 1) * secPerBeat;
 
-                console.log(`[MoveTrackManager] MoveTrack event at floor ${floor}: eventTime=${eventTime.toFixed(3)}s = unshiftedStartTime(${unshiftedStartTime.toFixed(3)}s from tileStartTimes[${floor}]=${this.tileStartTimes[floor]?.toFixed(3)}s + shiftAmount=${shiftAmount.toFixed(3)}s) + timeOffset(${timeOffset.toFixed(3)}s from angleOffset=${angleOffset}°), duration=${duration.toFixed(3)}s, bpm=${bpm}, secPerBeat=${secPerBeat.toFixed(4)}s`);
+                debugLog(`[MoveTrackManager] MoveTrack event at floor ${floor}: eventTime=${eventTime.toFixed(3)}s = unshiftedStartTime(${unshiftedStartTime.toFixed(3)}s from tileStartTimes[${floor}]=${this.tileStartTimes[floor]?.toFixed(3)}s + shiftAmount=${shiftAmount.toFixed(3)}s) + timeOffset(${timeOffset.toFixed(3)}s from angleOffset=${angleOffset}°), duration=${duration.toFixed(3)}s, bpm=${bpm}, secPerBeat=${secPerBeat.toFixed(4)}s`);
 
                 entries.push({
                     time: eventTime,
@@ -185,8 +313,8 @@ export class MoveTrackManager {
             });
         });
 
-        console.log('[MoveTrackManager] Found MoveTrack events:', entries.length);
-        console.log('[MoveTrackManager] Sorted timeline:', entries.map(e => `floor=${e.event.floor}, time=${e.time.toFixed(3)}s`).join(', '));
+        debugLog('[MoveTrackManager] Found MoveTrack events:', entries.length);
+        debugLog('[MoveTrackManager] Sorted timeline:', entries.map(e => `floor=${e.event.floor}, time=${e.time.toFixed(3)}s`).join(', '));
 
         // Sort by time
         entries.sort((a, b) => a.time - b.time);
@@ -209,6 +337,7 @@ export class MoveTrackManager {
      */
     public update(elapsedTimeMs: number): void {
         const timeInSeconds = elapsedTimeMs / 1000;
+        this.currentTime = timeInSeconds;
         this.processMoveTrackEvents(timeInSeconds);
 
         // Update all active animations with current game time (synchronized)
@@ -249,6 +378,13 @@ export class MoveTrackManager {
                         break;
                     case 'scaleY':
                         mesh.scale.y = value;
+                        break;
+                    case 'rotationZ':
+                        mesh.rotation.z = value;
+                        if (tileIndex < 10) { // Only log for first 10 tiles to avoid spam
+                            const playLabel = `[MoveTrackManager][Play#${this.debugPlayId}]`;
+                            debugLog(playLabel, `  updateAnim tile[${tileIndex}] rotationZ: ${animation.startValue.toFixed(4)} → ${value.toFixed(4)} (end=${animation.endValue.toFixed(4)}, progress=${progress.toFixed(4)})`);
+                        }
                         break;
                     case 'opacity':
                         if (mesh.material) {
@@ -383,10 +519,12 @@ export class MoveTrackManager {
      * Process MoveTrack events
      */
     private processMoveTrackEvents(timeInSeconds: number): void {
+        const playLabel = `[MoveTrackManager][Play#${this.debugPlayId}]`;
         // Check if we need to reset
         if (this.lastMoveTrackEventIndex >= 0 && this.lastMoveTrackEventIndex < this.moveTrackEventsTimeline.length) {
             const lastEvent = this.moveTrackEventsTimeline[this.lastMoveTrackEventIndex];
             if (timeInSeconds < lastEvent.time) {
+                debugLog(playLabel, `REWIND: time=${timeInSeconds.toFixed(3)}s < lastEvent.time=${lastEvent.time.toFixed(3)}s (floor=${lastEvent.event.floor}), resetting lastMoveTrackEventIndex from ${this.lastMoveTrackEventIndex} to -1`);
                 this.lastMoveTrackEventIndex = -1;
             }
         }
@@ -400,6 +538,7 @@ export class MoveTrackManager {
         ) {
             this.lastMoveTrackEventIndex++;
             const entry = this.moveTrackEventsTimeline[this.lastMoveTrackEventIndex];
+            debugLog(playLabel, `Processing event idx=${this.lastMoveTrackEventIndex}: floor=${entry.event.floor}, time=${entry.time.toFixed(3)}s, currentTime=${timeInSeconds.toFixed(3)}s, remaining=${(this.moveTrackEventsTimeline.length - this.lastMoveTrackEventIndex - 1)} events left`);
             if (entry) {
                 this.processMoveTrackEvent(entry.event, timeInSeconds);
             }
@@ -419,16 +558,20 @@ export class MoveTrackManager {
     private processMoveTrackEvent(event: any, currentTime: number): void {
         if (!this.tiles) return;
 
-        console.log(`[MoveTrackManager] Processing MoveTrack event at currentTime=${currentTime.toFixed(3)}s`);
-
-        // Parse tile range
+        const playLabel = `[MoveTrackManager][Play#${this.debugPlayId}]`;
         const startTile = this.parseTileReference(event.startTile, event.floor);
         const endTile = this.parseTileReference(event.endTile, event.floor);
-        const gapLength = event.gapLength || 0;
-
-        // Ensure start <= end
         const start = Math.min(startTile, endTile);
         const end = Math.max(startTile, endTile);
+        const gapLength = event.gapLength || 0;
+
+        // Count how many tiles in range exist
+        let existCount = 0, totalCount = 0;
+        for (let i = start; i <= end; i += 1 + gapLength) {
+            totalCount++;
+            if (this.tiles.has(i.toString())) existCount++;
+        }
+        debugLog(playLabel, `Processing MoveTrack event: floor=${event.floor}, range=[${start},${end}] gap=${gapLength}, tilesExist=${existCount}/${totalCount}, rotationOffset=${event.rotationOffset}, positionOffset=${JSON.stringify(event.positionOffset)}`);
 
         // Get animation parameters
         const duration = event.duration || 1;
@@ -465,7 +608,48 @@ export class MoveTrackManager {
             const tileId = i.toString();
             const tileMesh = this.tiles.get(tileId);
 
-            if (!tileMesh) continue;
+            if (!tileMesh) {
+                if (i < 20) {
+                    debugLog(playLabel, `  tile[${i}] SKIPPED - mesh does not exist in tiles map`);
+                }
+                // Store pending animation target so it applies when tile is created later
+                const targets: PendingMoveTrackAnimation['targets'] = {};
+                if (positionUsed) {
+                    const tileBasePosForPending = (i < this.basePositions.length)
+                        ? this.basePositions[i]
+                        : null;
+                    if (tileBasePosForPending) {
+                        targets.positionX = tileBasePosForPending.x + positionOffset[0];
+                        targets.positionY = tileBasePosForPending.y + positionOffset[1];
+                    }
+                }
+                if (rotationUsed) {
+                    targets.rotationZ = rotationOffset * Math.PI / 180;
+                }
+                if (scaleUsed) {
+                    targets.scaleX = scale[0] / 100;
+                    targets.scaleY = scale[1] / 100;
+                }
+                if (opacityUsed) {
+                    targets.opacity = opacity;
+                }
+                if (Object.keys(targets).length > 0) {
+                    const pendingEntry: PendingMoveTrackAnimation = {
+                        startTime: currentTime,
+                        duration,
+                        easingFunc,
+                        targets
+                    };
+                    if (!this.pendingMoveTrackTargets.has(i)) {
+                        this.pendingMoveTrackTargets.set(i, []);
+                    }
+                    this.pendingMoveTrackTargets.get(i)!.push(pendingEntry);
+                    if (i < 20) {
+                        debugLog(playLabel, `  tile[${i}] stored pending animation: rotTarget=${targets.rotationZ?.toFixed(6)}, posTarget=(${targets.positionX?.toFixed(3)},${targets.positionY?.toFixed(3)})`);
+                    }
+                }
+                continue;
+            }
 
             // Get or create animation state
             let state = this.tileAnimationStates.get(i);
@@ -484,9 +668,15 @@ export class MoveTrackManager {
 
             // Get initial state for this tile (used as base like in official code)
             const initialState = this.tileInitialStates.get(i);
-            const tileBasePos = initialState ? initialState.position : state.startPos;
             const tileBaseRot = initialState ? initialState.rotation.z : state.startRot.z;
             const tileBaseScale = initialState ? initialState.scale : state.startScale;
+
+            // ADOFAI ffxMoveFloorPlus: position target = target.startPos + positionOffset * tileSize
+            // where startPos is the UNMODIFIED base position from angle data
+            // (NOT the PositionTrack-modified mesh position).
+            const tileBasePos = (i < this.basePositions.length)
+                ? this.basePositions[i]
+                : (initialState ? new THREE.Vector2(initialState.position.x, initialState.position.y) : new THREE.Vector2(state.startPos.x, state.startPos.y));
 
             // Position animation - following official logic
             if (positionUsed) {
@@ -524,38 +714,30 @@ export class MoveTrackManager {
                 }
             }
 
-            // Rotation animation — PIXI-style savingtrack + delta approach
-            // Each event's rotationOffset is an ABSOLUTE value (like PIXI savingtrack[F][1][1]).
-            // change = newCr - oldCr (delta from previous savingtrack).
-            // The delta is animated additively — multiple active deltas accumulate,
-            // matching PIXI's TrackTickRush where overlapping events both contribute.
+            // ADOFAI ffxMoveFloorPlus rotation: absolute target
+            // In ADOFAI: target = startRot.z + rotationOffset[1]
+            // where startRot is typically 0 for all tiles (base rotation from angle data).
+            // The tween interpolates from current rotation (which may include
+            // PositionTrack modifications) to this absolute target.
+            // NOTE: This OVERRIDES any PositionTrack rotation on the tile.
             if (rotationUsed) {
-                // Read PIXI-style savingtrack value (default 0 = no rotation offset)
-                const oldRotationOffset = this.savingtrackRotation.get(i) || 0;
-                const rotationChange = rotationOffset - oldRotationOffset;
+                const targetRot = rotationOffset * Math.PI / 180;
 
-                // Update savingtrack to new absolute value (PIXI: this.savingtrack[F][1][1] = target[i][2])
-                this.savingtrackRotation.set(i, rotationOffset);
-
-                console.log(`[MoveTrackManager] Tile ${i} rotation: savingtrack=${oldRotationOffset}° → ${rotationOffset}°, change=${rotationChange}°, current=${(tileMesh.rotation.z * 180 / Math.PI).toFixed(1)}°`);
-
-                // Only animate if there's an actual change
-                if (!this.approximatelyEqual(rotationChange, 0, 0.001)) {
-                    // PIXI: tracks[trackname].rotation -= movper * nowchange[2] * Math.PI / 180
-                    // So delta = -change * PI/180 applied additively on top of initial rotation
-                    const deltaRad = -rotationChange * Math.PI / 180;
-
-                    state.deltaAnimations.push({
-                        property: 'rotation',
-                        delta: deltaRad,
-                        startTime: currentTime,
+                const currentRot = tileMesh.rotation.z;
+                const approxEqual = this.approximatelyEqual(currentRot, targetRot, 0.001);
+                debugLog(playLabel, `  tile[${i}] rotation: currentRot=${currentRot.toFixed(6)} targetRot=${targetRot.toFixed(6)} (offset=${rotationOffset}°) approxEqual=${approxEqual}`);
+                if (!approxEqual) {
+                    this.animateProperty(
+                        tileMesh,
+                        'rotationZ',
+                        currentRot,
+                        targetRot,
                         duration,
-                        easingFunc
-                    });
-
-                    console.log(`[MoveTrackManager] Tile ${i} rotation delta animation: ${(deltaRad * 180 / Math.PI).toFixed(2)}° over ${duration.toFixed(3)}s`);
-                } else {
-                    console.log(`[MoveTrackManager] Tile ${i} rotation no change, skipping animation`);
+                        easingFunc,
+                        state,
+                        undefined,
+                        currentTime
+                    );
                 }
             }
 
@@ -803,15 +985,162 @@ export class MoveTrackManager {
     }
 
     /**
+     * Fast-forward all MoveTrack events up to the given target time.
+     * Applies final animation values directly to existing tiles (no animation),
+     * and stores final targets for non-existing tiles as pending with duration=0
+     * (so they snap on creation).
+     */
+    public fastForwardTo(targetTime: number): void {
+        this.currentTime = targetTime;
+        const playLabel = `[MoveTrackManager][Play#${this.debugPlayId}]`;
+        debugLog(playLabel, `Fast-forwarding MoveTrack events to targetTime=${targetTime.toFixed(3)}s`);
+
+        // Process all events up to target time, applying final values directly
+        while (
+            this.lastMoveTrackEventIndex + 1 < this.moveTrackEventsTimeline.length &&
+            this.moveTrackEventsTimeline[this.lastMoveTrackEventIndex + 1].time <= targetTime
+        ) {
+            this.lastMoveTrackEventIndex++;
+            const entry = this.moveTrackEventsTimeline[this.lastMoveTrackEventIndex];
+            if (entry) {
+                this.applyMoveTrackEventInstant(entry.event, targetTime);
+            }
+        }
+
+        // Clear any active animations (they're all completed by the fast-forward)
+        this.tileAnimationStates.clear();
+        this.activeMoveTracks.clear();
+        debugLog(playLabel, `Fast-forward complete: lastMoveTrackEventIndex=${this.lastMoveTrackEventIndex}`);
+    }
+
+    /**
+     * Apply a single MoveTrack event's final values instantly to all tiles in range.
+     * For non-existent tiles, stores a pending target with duration=0 (snap on creation).
+     */
+    private applyMoveTrackEventInstant(event: any, currentTime: number): void {
+        if (!this.tiles) return;
+
+        const startTile = this.parseTileReference(event.startTile, event.floor);
+        const endTile = this.parseTileReference(event.endTile, event.floor);
+        const start = Math.min(startTile, endTile);
+        const end = Math.max(startTile, endTile);
+        const gapLength = event.gapLength || 0;
+
+        const positionOffset = event.positionOffset || [0, 0];
+        const rotationOffset = event.rotationOffset || 0;
+        const scale = event.scale || [100, 100];
+        const opacity = event.opacity !== undefined ? event.opacity / 100 : 1;
+
+        const positionUsed = event.positionOffset !== undefined;
+        const rotationUsed = event.rotationOffset !== undefined;
+        const scaleUsed = event.scale !== undefined;
+        const opacityUsed = event.opacity !== undefined;
+
+        for (let i = start; i <= end; i += 1 + gapLength) {
+            const tileId = i.toString();
+            const tileMesh = this.tiles.get(tileId);
+
+            if (!tileMesh) {
+                // Store final targets as pending with duration=0 (snap on creation)
+                const targets: PendingMoveTrackAnimation['targets'] = {};
+                if (positionUsed) {
+                    const tileBasePos = (i < this.basePositions.length)
+                        ? this.basePositions[i] : null;
+                    if (tileBasePos) {
+                        targets.positionX = tileBasePos.x + positionOffset[0];
+                        targets.positionY = tileBasePos.y + positionOffset[1];
+                    }
+                }
+                if (rotationUsed) {
+                    targets.rotationZ = rotationOffset * Math.PI / 180;
+                }
+                if (scaleUsed) {
+                    targets.scaleX = scale[0] / 100;
+                    targets.scaleY = scale[1] / 100;
+                }
+                if (opacityUsed) {
+                    targets.opacity = opacity;
+                }
+                if (Object.keys(targets).length > 0) {
+                    const pendingEntry: PendingMoveTrackAnimation = {
+                        startTime: currentTime,
+                        duration: 0,
+                        easingFunc: (t: number) => t,
+                        targets
+                    };
+                    if (!this.pendingMoveTrackTargets.has(i)) {
+                        this.pendingMoveTrackTargets.set(i, []);
+                    }
+                    this.pendingMoveTrackTargets.get(i)!.push(pendingEntry);
+                }
+                continue;
+            }
+
+            // Apply final values directly to existing tiles
+            const tileBasePos = (i < this.basePositions.length)
+                ? this.basePositions[i]
+                : new THREE.Vector2(tileMesh.position.x, tileMesh.position.y);
+
+            if (positionUsed) {
+                tileMesh.position.x = tileBasePos.x + positionOffset[0];
+                tileMesh.position.y = tileBasePos.y + positionOffset[1];
+            }
+            if (rotationUsed) {
+                tileMesh.rotation.z = rotationOffset * Math.PI / 180;
+            }
+            if (scaleUsed) {
+                tileMesh.scale.x = scale[0] / 100;
+                tileMesh.scale.y = scale[1] / 100;
+            }
+            if (opacityUsed) {
+                tileMesh.userData.opacity = opacity;
+                if (tileMesh.material) {
+                    (tileMesh.material as any).opacity = opacity;
+                    (tileMesh.material as any).transparent = opacity < 0.999;
+                }
+                tileMesh.visible = opacity > 0.001;
+                tileMesh.traverse((child) => {
+                    if (child !== tileMesh && (child as any).material) {
+                        (child as any).material.opacity = opacity;
+                    }
+                });
+            }
+
+            // Sync to instanced mesh
+            if (this.tileTransformChanged) {
+                this.tileTransformChanged(
+                    i,
+                    tileMesh.position,
+                    tileMesh.rotation as THREE.Euler,
+                    tileMesh.scale,
+                    tileMesh.userData.opacity !== undefined ? tileMesh.userData.opacity : 1
+                );
+            }
+        }
+    }
+
+    /**
      * Reset all animations and tiles to initial state
      */
     public reset(): void {
-        console.log('[MoveTrackManager] Resetting animations and tiles');
+        this.debugPlayId = ++MoveTrackManager.playCounter;
+        const playLabel = `[MoveTrackManager][Play#${this.debugPlayId}]`;
+        debugLog(playLabel, 'Resetting animations and tiles. tileAnimationStates size:', this.tileAnimationStates.size, 'activeMoveTracks size:', this.activeMoveTracks.size, 'lastMoveTrackEventIndex:', this.lastMoveTrackEventIndex);
+
+        // Log tile initial states
+        debugLog(playLabel, `tileInitialStates has ${this.tileInitialStates.size} entries, tiles map has ${this.tiles?.size || 0} entries`);
+        if (this.tiles) {
+            this.tileInitialStates.forEach((initial, idx) => {
+                const exists = this.tiles!.has(idx.toString());
+                debugLog(playLabel, `  tile[${idx}] initial rot=${initial.rotation.z.toFixed(6)} pos=(${initial.position.x.toFixed(3)},${initial.position.y.toFixed(3)}) exists=${exists}`);
+            });
+        }
         
-        // Clear active animations and savingtrack
+        // Clear active animations, savingtrack, and pending targets
         this.tileAnimationStates.clear();
         this.activeMoveTracks.clear();
         this.savingtrackRotation.clear();
+        this.pendingMoveTrackTargets.clear();
         this.lastMoveTrackEventIndex = -1;
 
         // Reset tiles to their captured initial states
@@ -853,6 +1182,17 @@ export class MoveTrackManager {
                 }
             });
         }
+
+        // Post-reset verification for early tiles
+        if (this.tiles) {
+            for (let i = 0; i < Math.min(5, this.tiles.size); i++) {
+                const mesh = this.tiles.get(i.toString());
+                if (mesh) {
+                    debugLog(playLabel, `  POST-RESET tile[${i}]: pos=(${mesh.position.x.toFixed(3)},${mesh.position.y.toFixed(3)}) rot=${mesh.rotation.z.toFixed(6)}`);
+                }
+            }
+        }
+        debugLog(playLabel, 'Reset complete');
     }
 
     /**
