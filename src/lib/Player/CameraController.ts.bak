@@ -1,0 +1,702 @@
+import * as THREE from 'three';
+import { EasingFunctions } from './Easing';
+import { isEventActive } from './TileColorManager';
+
+// Camera mode configuration
+export interface CameraMode {
+    relativeTo: string;
+    anchorTileIndex: number;
+    position: { x: number; y: number };
+    zoom: number;
+    rotation: number;
+    angleOffset: number;
+    lastEventRelativePosition: { x: number; y: number };
+    lastUsedMovementType: string;
+    lastTileCamFloor: number;
+    followMode: boolean;
+}
+
+/**
+ * Per-property transition state (matching Unity's per-property DOTween tweens)
+ */
+export interface PropertyTransition<T> {
+    active: boolean;
+    startTime: number;
+    duration: number;
+    startValue: T;
+    endValue: T;
+    ease: string;
+}
+
+/**
+ * Timeline entry for camera events
+ */
+export interface CameraTimelineEntry {
+    time: number;
+    event: any;
+}
+
+/**
+ * Controller for camera movements and transitions
+ * Rewritten to match Unity ffxCameraPlus.cs per-property tween architecture
+ */
+export class CameraController {
+    private cameraMode: CameraMode;
+    private cameraTimeline: CameraTimelineEntry[] = [];
+    private lastCameraTimelineIndex: number = -1;
+
+    // Per-property transitions (matching Unity's moveXTween, moveYTween, rotationTween, zoomTween)
+    private posTransition: PropertyTransition<{ x: number; y: number }>;
+    private rotTransition: PropertyTransition<number>;
+    private zoomTransition: PropertyTransition<number>;
+
+    private levelData: any;
+    private tileStartTimes: number[];
+    private tileBPM: number[];
+
+    constructor(levelData: any, tileStartTimes: number[], tileBPM: number[]) {
+        this.levelData = levelData;
+        this.tileStartTimes = tileStartTimes;
+        this.tileBPM = tileBPM;
+
+        this.cameraMode = {
+            relativeTo: 'Player',
+            anchorTileIndex: 0,
+            position: { x: 0, y: 0 },
+            zoom: 100,
+            rotation: 0,
+            angleOffset: 0,
+            lastEventRelativePosition: { x: 0, y: 0 },
+            lastUsedMovementType: 'Player',
+            lastTileCamFloor: -1,
+            followMode: true,
+        };
+
+        this.posTransition = this.createEmptyPosTransition();
+        this.rotTransition = this.createEmptyRotTransition();
+        this.zoomTransition = this.createEmptyZoomTransition();
+    }
+
+    private createEmptyPosTransition(): PropertyTransition<{ x: number; y: number }> {
+        return { active: false, startTime: 0, duration: 0, startValue: { x: 0, y: 0 }, endValue: { x: 0, y: 0 }, ease: 'Linear' };
+    }
+
+    private createEmptyRotTransition(): PropertyTransition<number> {
+        return { active: false, startTime: 0, duration: 0, startValue: 0, endValue: 0, ease: 'Linear' };
+    }
+
+    private createEmptyZoomTransition(): PropertyTransition<number> {
+        return { active: false, startTime: 0, duration: 0, startValue: 0, endValue: 0, ease: 'Linear' };
+    }
+
+    public getCameraMode(): CameraMode {
+        return this.cameraMode;
+    }
+
+    public getCameraTimeline(): CameraTimelineEntry[] {
+        return this.cameraTimeline;
+    }
+
+    public getLastCameraTimelineIndex(): number {
+        return this.lastCameraTimelineIndex;
+    }
+
+    public setLastCameraTimelineIndex(index: number): void {
+        this.lastCameraTimelineIndex = index;
+    }
+
+    /**
+     * Reset camera state from level settings
+     */
+    public resetCameraState(): void {
+        const settings = this.levelData.settings;
+        if (settings) {
+            this.cameraMode.relativeTo = settings.relativeTo || 'Player';
+            this.cameraMode.anchorTileIndex = 0;
+            this.cameraMode.position = (settings.position && Array.isArray(settings.position)) ? { x: settings.position[0], y: settings.position[1] } : { x: 0, y: 0 };
+            this.cameraMode.rotation = settings.rotation !== undefined ? settings.rotation : 0;
+            this.cameraMode.zoom = settings.zoom !== undefined ? settings.zoom : 100;
+            this.cameraMode.angleOffset = settings.angleOffset !== undefined ? settings.angleOffset : 0;
+
+            if (this.cameraMode.relativeTo === 'Tile') {
+                const tile = this.levelData.tiles[0];
+                this.cameraMode.lastEventRelativePosition = (tile && tile.position) ? { x: tile.position[0], y: tile.position[1] } : { x: 0, y: 0 };
+            } else {
+                this.cameraMode.lastEventRelativePosition = { x: 0, y: 0 };
+            }
+            this.cameraMode.lastUsedMovementType = this.cameraMode.relativeTo;
+            this.cameraMode.lastTileCamFloor = this.cameraMode.relativeTo === 'Tile' ? 0 : -1;
+            this.cameraMode.followMode = this.cameraMode.relativeTo === 'Player';
+        } else {
+            this.cameraMode = {
+                relativeTo: 'Player',
+                anchorTileIndex: 0,
+                position: { x: 0, y: 0 },
+                zoom: 100,
+                rotation: 0,
+                angleOffset: 0,
+                lastEventRelativePosition: { x: 0, y: 0 },
+                lastUsedMovementType: 'Player',
+                lastTileCamFloor: -1,
+                followMode: true,
+            };
+        }
+
+        // Reset all transitions
+        this.posTransition = this.createEmptyPosTransition();
+        this.rotTransition = this.createEmptyRotTransition();
+        this.zoomTransition = this.createEmptyZoomTransition();
+    }
+
+    /**
+     * Build camera event timeline
+     */
+    public buildCameraTimeline(tileCameraEvents: Map<number, any[]>): void {
+        this.cameraTimeline = [];
+        const entries: CameraTimelineEntry[] = [];
+
+        tileCameraEvents.forEach((events, floor) => {
+            const startTime = this.tileStartTimes[floor] || 0;
+            const bpm = this.tileBPM[floor] || 100;
+            const secPerBeat = 60 / bpm;
+
+            const sortedEvents = [...events].sort((a, b) => {
+                const aId = a.id !== undefined ? a.id : Infinity;
+                const bId = b.id !== undefined ? b.id : Infinity;
+                return aId - bId;
+            });
+
+            sortedEvents.forEach((event, index) => {
+                if (!isEventActive(event)) return;
+                const eventWithFloor = { ...event, floor };
+                const angleOffset = event.angleOffset || 0;
+                let timeOffset = (angleOffset / 180) * secPerBeat;
+
+                if (angleOffset === 0) {
+                    const sameFloorZeroOffsetEvents = sortedEvents.filter(e =>
+                        isEventActive(e) && (e.angleOffset || 0) === 0
+                    );
+                    if (sameFloorZeroOffsetEvents.length > 1) {
+                        const eventIndex = sameFloorZeroOffsetEvents.findIndex(e => e.id === event.id);
+                        timeOffset += eventIndex * 0.0001;
+                    }
+                }
+
+                entries.push({ time: startTime + timeOffset, event: eventWithFloor });
+            });
+        });
+
+        entries.sort((a, b) => {
+            if (Math.abs(a.time - b.time) < 0.0001) {
+                const aId = a.event.id !== undefined ? a.event.id : Infinity;
+                const bId = b.event.id !== undefined ? b.event.id : Infinity;
+                return aId - bId;
+            }
+            return a.time - b.time;
+        });
+        this.cameraTimeline = entries;
+    }
+
+    /**
+     * Get the tile position for a given floor index
+     */
+    private getTilePosition(floorIndex: number): { x: number; y: number } {
+        const tile = this.levelData.tiles[floorIndex];
+        return (tile && tile.position) ? { x: tile.position[0], y: tile.position[1] } : { x: 0, y: 0 };
+    }
+
+    /**
+     * Get the world-space reference position for the current camera mode
+     */
+    private getModeReference(mode: string, pivot: { x: number; y: number }, tileIndex?: number): { x: number; y: number } {
+        switch (mode) {
+            case 'Player':
+                return { x: pivot.x, y: pivot.y };
+            case 'Tile': {
+                const idx = tileIndex !== undefined ? tileIndex : this.cameraMode.anchorTileIndex;
+                return this.getTilePosition(idx);
+            }
+            case 'Global': {
+                // Unity Global mode uses world origin (or first tile as origin)
+                const tile0 = this.levelData.tiles[0];
+                return (tile0 && tile0.position) ? { x: tile0.position[0], y: tile0.position[1] } : { x: 0, y: 0 };
+            }
+            default:
+                return { x: pivot.x, y: pivot.y };
+        }
+    }
+
+    /**
+     * Process a camera event following Unity ffxCameraPlus.cs StartEffect() architecture
+     */
+    public processCameraEvent(
+        event: any,
+        floorIndex: number,
+        elapsedTime: number,
+        cameraSnapshot?: { position: { x: number; y: number }; zoom: number; rotation: number },
+        currentPivotPosition?: { x: number; y: number }
+    ): void {
+        if (!isEventActive(event)) return;
+
+        const TILE_SIZE = 1.0;
+        const duration = (event.duration !== undefined) ? event.duration : 0;
+        const eventEase = event.ease || 'Linear';
+
+        // ==== Decode event properties ====
+        // targetPos: position * tileSize
+        const rawPos = event.position;
+        const posHasX = rawPos && rawPos[0] !== null && rawPos[0] !== undefined;
+        const posHasY = rawPos && rawPos[1] !== null && rawPos[1] !== undefined;
+        const targetPos = {
+            x: posHasX ? rawPos[0] * TILE_SIZE : NaN,
+            y: posHasY ? rawPos[1] * TILE_SIZE : NaN,
+        };
+        const positionUsed = rawPos !== undefined && rawPos !== null &&
+            !(Array.isArray(rawPos) && rawPos[0] === null && rawPos[1] === null);
+
+        const targetRot = (event.rotation !== undefined && event.rotation !== null) ? event.rotation : 0;
+        const rotationUsed = event.rotation !== undefined && event.rotation !== null;
+
+        const targetZoom = (event.zoom !== undefined && event.zoom !== null) ? event.zoom : 100;
+        const zoomUsed = event.zoom !== undefined && event.zoom !== null;
+
+        // relativeTo / movementType
+        const rawRelativeTo = event.relativeTo;
+        let movementType: string | undefined;
+        let movementTypeUsed = false;
+
+        if (rawRelativeTo !== undefined && rawRelativeTo !== null) {
+            movementTypeUsed = true;
+            if (typeof rawRelativeTo === 'string') {
+                movementType = rawRelativeTo;
+            } else if (typeof rawRelativeTo === 'number') {
+                movementType = ['Player', 'Tile', 'Global', 'LastPosition', 'LastPositionNoRotation'][rawRelativeTo] || 'Player';
+            }
+        }
+
+        const isLastPosition = movementType === 'LastPosition' || movementType === 'LastPositionNoRotation';
+
+        // ==== Unity line 74-77: skip movementTypeUsed when NaN position matches last type ====
+        if (movementTypeUsed &&
+            movementType !== 'Global' &&
+            movementType !== 'LastPosition' &&
+            movementType !== 'LastPositionNoRotation' &&
+            positionUsed &&
+            (isNaN(targetPos.x) || isNaN(targetPos.y)) &&
+            movementType === this.cameraMode.lastUsedMovementType) {
+            if (movementType !== 'Tile' ||
+                (event.floor !== undefined && event.floor === this.cameraMode.lastTileCamFloor)) {
+                movementTypeUsed = false;
+            }
+        }
+
+        // ==== Kill per-property transitions (Unity lines 78-112) ====
+        // Kill position transition when positionUsed OR movementTypeUsed
+        if (positionUsed || movementTypeUsed) {
+            if (!isNaN(targetPos.x) || movementTypeUsed) {
+                this.posTransition.active = false;
+            }
+            if (!isNaN(targetPos.y) || movementTypeUsed) {
+                this.posTransition.active = false;
+            }
+        }
+        // Kill rotation transition when rotationUsed OR (movementTypeUsed AND isLastPosition)
+        if (rotationUsed || (movementTypeUsed && isLastPosition)) {
+            this.rotTransition.active = false;
+        }
+        // Kill zoom transition when zoomUsed
+        if (zoomUsed) {
+            this.zoomTransition.active = false;
+        }
+
+        // ==== Determine effective mode (Unity line 127) ====
+        const effectiveMode: string = movementTypeUsed && movementType !== undefined
+            ? movementType
+            : this.cameraMode.lastUsedMovementType;
+
+        // ==== Compute current camera world position ====
+        // Use cameraSnapshot if available (it's the actual camera world position from Player.ts)
+        const pivot = currentPivotPosition || { x: 0, y: 0 };
+        let currentWorldPos: { x: number; y: number };
+        if (cameraSnapshot) {
+            currentWorldPos = { x: cameraSnapshot.position.x, y: cameraSnapshot.position.y };
+        } else {
+            // Fallback: compute from current mode + pivot
+            const ref = this.getModeReference(this.cameraMode.relativeTo, pivot, this.cameraMode.anchorTileIndex);
+            currentWorldPos = { x: ref.x + this.cameraMode.position.x, y: ref.y + this.cameraMode.position.y };
+        }
+
+        // ==== Compute target logical position ====
+        // When position IS used: target logical = event position (absolute in new/current mode)
+        // When position NOT used: target logical = keep current world pos in new mode's reference frame
+        // When position NOT used AND mode NOT changed: target logical = Unity vector2 formula
+
+        let targetLogical: { x: number; y: number };
+        let positionNeedsTransition = false;
+        let targetWorldPos: { x: number; y: number };
+
+        if (positionUsed) {
+            // Position IS specified — target logical is the event position
+            targetLogical = { x: targetPos.x, y: targetPos.y };
+            positionNeedsTransition = true;
+
+            // Compute target world position based on effective mode
+            const ref = this.getModeReference(effectiveMode, pivot, floorIndex);
+            targetWorldPos = { x: ref.x + targetLogical.x, y: ref.y + targetLogical.y };
+        } else if (movementTypeUsed) {
+            // Position NOT specified, mode IS changed
+            // Camera stays at current world position, convert to new reference frame
+            const ref = this.getModeReference(effectiveMode, pivot, floorIndex);
+            targetLogical = {
+                x: currentWorldPos.x - ref.x,
+                y: currentWorldPos.y - ref.y,
+            };
+            targetWorldPos = { ...currentWorldPos };
+            positionNeedsTransition = true;
+        } else {
+            // Position NOT specified, mode NOT changed
+            // Unity: vector2 = lastEventRelativePosition - camParent.position
+            // finalPos depends on mode (creates a small movement toward "default" position)
+            // For TS: stay at current position (no position transition)
+            const ref = this.getModeReference(effectiveMode, pivot, this.cameraMode.anchorTileIndex);
+            targetLogical = {
+                x: currentWorldPos.x - ref.x,
+                y: currentWorldPos.y - ref.y,
+            };
+            targetWorldPos = { ...currentWorldPos };
+            positionNeedsTransition = false;
+        }
+
+        // ==== Handle mode-specific camera state changes (Unity lines 145-196) ====
+        // Switch on the MOVEMENT TYPE (if specified) or current mode
+        const switchMode: string = movementTypeUsed && movementType !== undefined
+            ? movementType
+            : this.cameraMode.relativeTo;
+
+        if (switchMode === 'Player') {
+            // Unity lines 146-156
+            if (!this.cameraMode.followMode) {
+                this.cameraMode.followMode = true;
+            }
+        } else if (switchMode === 'Tile') {
+            // Unity lines 157-169
+            if (this.cameraMode.followMode) {
+                this.cameraMode.followMode = false;
+            }
+            // Set lastEventRelativePosition to floor position
+            const floorPos = this.getTilePosition(floorIndex);
+            this.cameraMode.lastEventRelativePosition = { ...floorPos };
+            this.cameraMode.lastTileCamFloor = floorIndex;
+        } else if (switchMode === 'Global') {
+            // Unity lines 170-178
+            if (this.cameraMode.followMode) {
+                this.cameraMode.followMode = false;
+            }
+            this.cameraMode.lastEventRelativePosition = { x: 0, y: 0 };
+        } else if (switchMode === 'LastPosition' || switchMode === 'LastPositionNoRotation') {
+            // Unity lines 179-196 — handled by logical position accumulation
+        }
+
+        // ==== Update lastUsedMovementType (Unity line 199-202) ====
+        if (movementTypeUsed && movementType !== undefined) {
+            this.cameraMode.lastUsedMovementType = movementType;
+        }
+
+        // ==== Update cameraMode fields ====
+        // Update relativeTo if specified
+        if (movementTypeUsed && movementType !== undefined) {
+            if (movementType !== 'LastPosition' && movementType !== 'LastPositionNoRotation') {
+                this.cameraMode.relativeTo = movementType;
+                if (movementType === 'Tile') {
+                    this.cameraMode.anchorTileIndex = floorIndex;
+                } else if (movementType === 'Global') {
+                    this.cameraMode.anchorTileIndex = 0;
+                }
+            }
+        }
+
+        // Update cameraMode.position
+        if (positionUsed) {
+            if (!movementTypeUsed) {
+                // Position specified, mode NOT changed → absolute in current mode
+                if (!isNaN(targetPos.x)) this.cameraMode.position.x = targetPos.x;
+                if (!isNaN(targetPos.y)) this.cameraMode.position.y = targetPos.y;
+            } else if (movementType === 'LastPosition' || movementType === 'LastPositionNoRotation') {
+                // LastPosition: accumulate
+                if (!isNaN(targetPos.x)) this.cameraMode.position.x += targetPos.x;
+                if (!isNaN(targetPos.y)) this.cameraMode.position.y += targetPos.y;
+            } else {
+                // Absolute in new mode
+                if (!isNaN(targetPos.x)) this.cameraMode.position.x = targetPos.x;
+                if (!isNaN(targetPos.y)) this.cameraMode.position.y = targetPos.y;
+            }
+        } else {
+            // Position not specified
+            if (movementTypeUsed) {
+                // Mode changed — set logical to preserve world position
+                this.cameraMode.position = { ...targetLogical };
+            }
+            // If mode also not changed: don't modify position
+        }
+
+        // Update rotation (Unity: rotation is absolute + rotationOffset for LastPosition)
+        let rotationOffset = 0;
+        if (switchMode === 'LastPosition') {
+            rotationOffset = this.cameraMode.rotation;
+        }
+        if (rotationUsed) {
+            this.cameraMode.rotation = targetRot + rotationOffset;
+        }
+
+        // Update zoom (always absolute)
+        if (zoomUsed) {
+            this.cameraMode.zoom = targetZoom;
+        }
+
+        // Angle offset
+        if (event.angleOffset !== undefined && event.angleOffset !== null) {
+            this.cameraMode.angleOffset = event.angleOffset;
+        }
+
+        // ==== Setup per-property transitions (Unity lines 203-233) ====
+        const eventBPM = (this.tileBPM && this.tileBPM[floorIndex]) || 100;
+
+        // High BPM shortcut
+        let effectiveDuration = duration;
+        if (eventBPM > 20000) {
+            const isPlayer = !movementTypeUsed || movementType === 'Player';
+            if (isPlayer) {
+                effectiveDuration = 0;
+            }
+        }
+
+        const durationSeconds = effectiveDuration * (60 / eventBPM);
+
+        // Capture current world pos for transition start values
+        const startWorldPos = { ...currentWorldPos };
+        const startZoom = cameraSnapshot ? cameraSnapshot.zoom : this.cameraMode.zoom;
+        const startRotation = cameraSnapshot ? cameraSnapshot.rotation : this.cameraMode.rotation;
+
+        // Position transition (X and Y → unified as ONE posTransition)
+        if (positionNeedsTransition && (positionUsed || movementTypeUsed)) {
+            if (durationSeconds > 0) {
+                this.posTransition = {
+                    active: true,
+                    startTime: elapsedTime / 1000,
+                    duration: durationSeconds,
+                    // Transition from current WORLD position to target WORLD position
+                    startValue: { x: startWorldPos.x, y: startWorldPos.y },
+                    // Sanitize NaN: if an axis wasn't specified, preserve current value
+                    endValue: {
+                        x: isNaN(targetWorldPos.x) ? startWorldPos.x : targetWorldPos.x,
+                        y: isNaN(targetWorldPos.y) ? startWorldPos.y : targetWorldPos.y,
+                    },
+                    ease: eventEase,
+                };
+            } else {
+                // Instant: just set position
+                this.posTransition.active = false;
+            }
+        }
+
+        // Rotation transition (Unity lines 220-225)
+        if (rotationUsed || (movementTypeUsed && isLastPosition)) {
+            const rotTarget = rotationUsed ? targetRot + rotationOffset : this.cameraMode.rotation;
+            if (durationSeconds > 0) {
+                this.rotTransition = {
+                    active: true,
+                    startTime: elapsedTime / 1000,
+                    duration: durationSeconds,
+                    startValue: startRotation,
+                    endValue: this.cameraMode.rotation,
+                    ease: eventEase,
+                };
+            } else {
+                this.rotTransition.active = false;
+            }
+        }
+
+        // Zoom transition (Unity lines 227-233)
+        if (zoomUsed) {
+            if (durationSeconds > 0) {
+                this.zoomTransition = {
+                    active: true,
+                    startTime: elapsedTime / 1000,
+                    duration: durationSeconds,
+                    startValue: startZoom,
+                    endValue: this.cameraMode.zoom,
+                    ease: eventEase,
+                };
+            } else {
+                this.zoomTransition.active = false;
+            }
+        }
+    }
+
+    /**
+     * Calculate target camera position.
+     *
+     * When posTransition is active: interpolatedPos is already in WORLD space
+     *   (the transition interpolates between current world pos and target world pos).
+     *   We return it directly without adding the pivot.
+     *
+     * When posTransition is inactive: interpolatedPos is LOGICAL position (offset from reference).
+     *   We convert to world by adding the mode's reference point.
+     */
+    public calculateTargetPosition(
+        currentPivotPosition: { x: number; y: number },
+        interpolatedPos?: { x: number; y: number }
+    ): { x: number; y: number } {
+        const pos = interpolatedPos || { ...this.cameraMode.position };
+
+        // When posTransition is active, it stores world positions — return directly.
+        // When inactive, pos is logical → convert to world.
+        if (this.posTransition.active) {
+            return { x: pos.x, y: pos.y };
+        }
+
+        // No active transition: pos is LOGICAL → convert to world via mode reference
+        if (this.cameraMode.relativeTo === 'Player') {
+            return { x: currentPivotPosition.x + pos.x, y: currentPivotPosition.y + pos.y };
+        } else if (this.cameraMode.relativeTo === 'Tile') {
+            const tile = this.levelData.tiles[this.cameraMode.anchorTileIndex];
+            if (tile && tile.position) {
+                return { x: tile.position[0] + pos.x, y: tile.position[1] + pos.y };
+            }
+            return { x: currentPivotPosition.x + pos.x, y: currentPivotPosition.y + pos.y };
+        } else if (this.cameraMode.relativeTo === 'Global') {
+            const tile0 = this.levelData.tiles[0];
+            const originX = (tile0 && tile0.position) ? tile0.position[0] : 0;
+            const originY = (tile0 && tile0.position) ? tile0.position[1] : 0;
+            return { x: originX + pos.x, y: originY + pos.y };
+        } else {
+            return { x: currentPivotPosition.x + pos.x, y: currentPivotPosition.y + pos.y };
+        }
+    }
+
+    /**
+     * Find real relativeTo by backtracking through LastPosition events
+     */
+    private findRealRelativeTo(
+        currentFloorIndex: number,
+        accumulatedPosition: { x: number; y: number },
+        isNoRotation: boolean
+    ): string {
+        for (let i = this.lastCameraTimelineIndex; i >= 0; i--) {
+            const entry = this.cameraTimeline[i];
+            if (!entry) continue;
+            const event = entry.event;
+            if (!isEventActive(event)) continue;
+
+            const eventRelativeTo = event.relativeTo;
+            let eventMode = this.cameraMode.relativeTo;
+
+            if (eventRelativeTo !== undefined && eventRelativeTo !== null) {
+                if (typeof eventRelativeTo === 'string') {
+                    eventMode = eventRelativeTo;
+                } else if (typeof eventRelativeTo === 'number') {
+                    eventMode = ['Player', 'Tile', 'Global', 'LastPosition', 'LastPositionNoRotation'][eventRelativeTo] || 'Player';
+                }
+            }
+
+            if (eventMode !== 'LastPosition' && eventMode !== 'LastPositionNoRotation') {
+                return eventMode;
+            }
+
+            if (event.position !== undefined && event.position !== null) {
+                if (event.position[0] !== null && event.position[0] !== undefined) {
+                    accumulatedPosition.x += event.position[0];
+                }
+                if (event.position[1] !== null && event.position[1] !== undefined) {
+                    accumulatedPosition.y += event.position[1];
+                }
+            }
+        }
+        return 'Player';
+    }
+
+    /**
+     * Update camera events based on current elapsed time
+     */
+    public update(elapsedTime: number): void {
+        for (let i = this.lastCameraTimelineIndex + 1; i < this.cameraTimeline.length; i++) {
+            const entry = this.cameraTimeline[i];
+            if (entry.time <= elapsedTime) {
+                this.processCameraEvent(entry.event, entry.event.floor || 0, elapsedTime * 1000);
+                this.lastCameraTimelineIndex = i;
+            } else {
+                break;
+            }
+        }
+    }
+
+    /**
+     * Get interpolated values during transitions — each property independently.
+     *
+     * For position: the posTransition interpolates between current/target WORLD positions.
+     * The returned position value is the interpolated world position (not logical),
+     * which calculateTargetPosition will use directly.
+     */
+    public getInterpolatedValues(elapsedTime: number): {
+        position: { x: number; y: number };
+        zoom: number;
+        rotation: number;
+    } {
+        // Default: use cameraMode's logical position → will be converted to world by calculateTargetPosition
+        let logicalPos = { ...this.cameraMode.position };
+        let logicalZoom = this.cameraMode.zoom;
+        let logicalRotation = this.cameraMode.rotation;
+
+        // Interpolate position transition independently (Unity: independent moveXTween/moveYTween)
+        if (this.posTransition.active) {
+            let t = (elapsedTime / 1000) - this.posTransition.startTime;
+            t = t / this.posTransition.duration;
+
+            if (t >= 1) {
+                this.posTransition.active = false;
+            } else {
+                const easeFunc = EasingFunctions[this.posTransition.ease] || EasingFunctions.Linear;
+                const progress = easeFunc(t);
+
+                // posTransition stores WORLD positions (start=current world pos, end=target world pos)
+                // Return the interpolated world position directly
+                logicalPos.x = this.posTransition.startValue.x +
+                    (this.posTransition.endValue.x - this.posTransition.startValue.x) * progress;
+                logicalPos.y = this.posTransition.startValue.y +
+                    (this.posTransition.endValue.y - this.posTransition.startValue.y) * progress;
+            }
+        }
+
+        // Interpolate rotation transition independently
+        if (this.rotTransition.active) {
+            let t = (elapsedTime / 1000) - this.rotTransition.startTime;
+            t = t / this.rotTransition.duration;
+
+            if (t >= 1) {
+                this.rotTransition.active = false;
+            } else {
+                const easeFunc = EasingFunctions[this.rotTransition.ease] || EasingFunctions.Linear;
+                const progress = easeFunc(t);
+                logicalRotation = this.rotTransition.startValue +
+                    (this.rotTransition.endValue - this.rotTransition.startValue) * progress;
+            }
+        }
+
+        // Interpolate zoom transition independently
+        if (this.zoomTransition.active) {
+            let t = (elapsedTime / 1000) - this.zoomTransition.startTime;
+            t = t / this.zoomTransition.duration;
+
+            if (t >= 1) {
+                this.zoomTransition.active = false;
+            } else {
+                const easeFunc = EasingFunctions[this.zoomTransition.ease] || EasingFunctions.Linear;
+                const progress = easeFunc(t);
+                logicalZoom = this.zoomTransition.startValue +
+                    (this.zoomTransition.endValue - this.zoomTransition.startValue) * progress;
+            }
+        }
+
+        return { position: logicalPos, zoom: logicalZoom, rotation: logicalRotation };
+    }
+}

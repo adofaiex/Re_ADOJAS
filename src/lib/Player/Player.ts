@@ -2644,10 +2644,11 @@ export class Player implements IPlayer {
               rotation: this.camera.rotation.z * (180 / Math.PI)
           };
           this.cameraController.processCameraEvent(
-              entry.event, 
-              entry.event.floor || 0, 
+              entry.event,
+              entry.event.floor || 0,
               this.elapsedTime,
-              cameraSnapshot
+              cameraSnapshot,
+              this.currentPivotPosition
           );
       }
       this.cameraController.setLastCameraTimelineIndex(newIdx);
@@ -2778,13 +2779,13 @@ export class Player implements IPlayer {
     video.loop = this.levelData.settings?.loopVideo || false;
     video.muted = true;
     video.playsInline = true;
-    
+
     this.videoElement = video;
     this.videoTexture = new THREE.VideoTexture(video);
     this.videoTexture.colorSpace = THREE.SRGBColorSpace;
 
-    const geometry = new THREE.PlaneGeometry(1, 1); 
-    const material = new THREE.MeshBasicMaterial({ 
+    const geometry = new THREE.PlaneGeometry(1, 1);
+    const material = new THREE.MeshBasicMaterial({
         map: this.videoTexture,
         depthWrite: false,
         depthTest: true,
@@ -2793,7 +2794,7 @@ export class Player implements IPlayer {
     this.videoMesh = new THREE.Mesh(geometry, material);
     this.videoMesh.position.set(0, 0, -500);
     this.videoMesh.renderOrder = -999;
-    this.scene.add(this.videoMesh); 
+    this.scene.add(this.videoMesh);
 
     video.onloadedmetadata = () => {
         this.updateVideoSize();
@@ -2835,6 +2836,7 @@ export class Player implements IPlayer {
     return 0;
   }
 
+  private lastVideoSeekTime: number = 0;
   private syncVideo(): void {
     if (!this.videoElement || !this.isPlaying || this.isPaused) return;
 
@@ -2843,9 +2845,9 @@ export class Player implements IPlayer {
     const initialSecPerBeat = 60 / initialBPM;
     const countdownTicks = settings.countdownTicks || 4;
     const countdownDuration = countdownTicks * initialSecPerBeat;
-    
+
     const timeInLevel = (this.elapsedTime / 1000) - countdownDuration;
-    
+
     const targetVideoTime = timeInLevel + (this.videoOffset / 1000);
 
     if (targetVideoTime < 0) {
@@ -2854,12 +2856,16 @@ export class Player implements IPlayer {
             this.videoElement.currentTime = 0;
         }
     } else {
-        if (this.videoElement.paused) {
+        if (this.videoElement.paused && this.videoElement.readyState >= 2) {
             this.videoElement.play().catch(e => console.warn("Video play failed:", e));
         }
-        
-        if (Math.abs(this.videoElement.currentTime - targetVideoTime) > 0.1) {
+
+        const drift = Math.abs(this.videoElement.currentTime - targetVideoTime);
+        // Throttle seeking: only seek when drift exceeds threshold, max once per 250ms
+        const now = performance.now();
+        if (drift > 0.3 && now - this.lastVideoSeekTime > 250) {
             this.videoElement.currentTime = targetVideoTime;
+            this.lastVideoSeekTime = now;
         }
     }
   }

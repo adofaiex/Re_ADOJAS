@@ -579,14 +579,14 @@ export class MoveTrackManager {
         const positionOffset = event.positionOffset || [0, 0];
         const rotationOffset = event.rotationOffset || 0;
         const scale = event.scale || [100, 100];
-        const opacity = event.opacity !== undefined ? event.opacity / 100 : 1;
+        const opacity = event.opacity != null ? event.opacity / 100 : 1;
 
         // Check which properties are actually used (not disabled)
         // In ADOFAI, properties are used if they are present in the event
         const positionUsed = event.positionOffset !== undefined;
         const rotationUsed = event.rotationOffset !== undefined;
         const scaleUsed = event.scale !== undefined;
-        const opacityUsed = event.opacity !== undefined;
+        const opacityUsed = event.opacity != null;
 
         // Store active MoveTrack for planet following
         const moveTrackId = this.activeMoveTracks.size;
@@ -678,13 +678,13 @@ export class MoveTrackManager {
                 ? this.basePositions[i]
                 : (initialState ? new THREE.Vector2(initialState.position.x, initialState.position.y) : new THREE.Vector2(state.startPos.x, state.startPos.y));
 
-            // Position animation - following official logic
+            // Position animation - following official ffxMoveFloorPlus logic
             if (positionUsed) {
                 const targetX = tileBasePos.x + positionOffset[0];
                 const targetY = tileBasePos.y + positionOffset[1];
 
-                // Only create new tween if target differs from current (approximate check)
-                if (!this.approximatelyEqual(tileMesh.position.x, targetX)) {
+                // Check NaN (matches C# !float.IsNaN(vector4.x))
+                if (!isNaN(targetX) && !this.approximatelyEqual(tileMesh.position.x, targetX)) {
                     this.animateProperty(
                         tileMesh,
                         'positionX',
@@ -698,8 +698,7 @@ export class MoveTrackManager {
                     );
                 }
 
-                // Only create new tween if target differs from current
-                if (!this.approximatelyEqual(tileMesh.position.y, targetY)) {
+                if (!isNaN(targetY) && !this.approximatelyEqual(tileMesh.position.y, targetY)) {
                     this.animateProperty(
                         tileMesh,
                         'positionY',
@@ -741,48 +740,42 @@ export class MoveTrackManager {
                 }
             }
 
-            // Scale animation
+            // Scale animation — matching C# !float.IsNaN check
             if (scaleUsed) {
                 const targetScaleX = scale[0] / 100;
                 const targetScaleY = scale[1] / 100;
 
-                // Handle scaleX
-                if (scale[0] !== 100) {
-                    if (!this.approximatelyEqual(tileMesh.scale.x, targetScaleX)) {
-                        this.animateProperty(
-                            tileMesh,
-                            'scaleX',
-                            tileMesh.scale.x,
-                            targetScaleX,
-                            duration,
-                            easingFunc,
-                            state,
-                            undefined,
-                            currentTime
-                        );
-                    }
+                if (!isNaN(targetScaleX) && !this.approximatelyEqual(tileMesh.scale.x, targetScaleX)) {
+                    this.animateProperty(
+                        tileMesh,
+                        'scaleX',
+                        tileMesh.scale.x,
+                        targetScaleX,
+                        duration,
+                        easingFunc,
+                        state,
+                        undefined,
+                        currentTime
+                    );
                 }
 
-                // Handle scaleY
-                if (scale[1] !== 100) {
-                    if (!this.approximatelyEqual(tileMesh.scale.y, targetScaleY)) {
-                        this.animateProperty(
-                            tileMesh,
-                            'scaleY',
-                            tileMesh.scale.y,
-                            targetScaleY,
-                            duration,
-                            easingFunc,
-                            state,
-                            undefined,
-                            currentTime
-                        );
-                    }
+                if (!isNaN(targetScaleY) && !this.approximatelyEqual(tileMesh.scale.y, targetScaleY)) {
+                    this.animateProperty(
+                        tileMesh,
+                        'scaleY',
+                        tileMesh.scale.y,
+                        targetScaleY,
+                        duration,
+                        easingFunc,
+                        state,
+                        undefined,
+                        currentTime
+                    );
                 }
             }
 
             // Opacity animation
-            if (event.opacity !== undefined) {
+            if (event.opacity != null) {
                 const currentOpacity = tileMesh.userData.opacity !== undefined ? tileMesh.userData.opacity : 1;
                 if (!this.approximatelyEqual(currentOpacity, opacity)) {
                     this.animateProperty(
@@ -919,69 +912,7 @@ export class MoveTrackManager {
      * Get easing function by name
      */
     private getEasingFunction(easeName: string): (t: number) => number {
-        const easeMap: { [key: string]: (t: number) => number } = {
-            'Linear.easeNone': (t) => t,
-            'Quad.easeIn': (t) => t * t,
-            'Quad.easeOut': (t) => t * (2 - t),
-            'Quad.easeInOut': (t) => t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t,
-            'Cubic.easeIn': (t) => t * t * t,
-            'Cubic.easeOut': (t) => 1 + (t - 1) * (t - 1) * (t - 1),
-            'Cubic.easeInOut': (t) => t < 0.5 ? 4 * t * t * t : 1 + (t - 1) * (2 * (t - 2)) * (2 * (t - 2)),
-            'Quart.easeIn': (t) => t * t * t * t,
-            'Quart.easeOut': (t) => 1 - (t - 1) * (t - 1) * (t - 1) * (t - 1),
-            'Quart.easeInOut': (t) => t < 0.5 ? 8 * t * t * t * t : 1 - 8 * (t - 1) * (t - 1) * (t - 1) * (t - 1),
-            'Quint.easeIn': (t) => t * t * t * t * t,
-            'Quint.easeOut': (t) => 1 + (t - 1) * (t - 1) * (t - 1) * (t - 1) * (t - 1),
-            'Quint.easeInOut': (t) => t < 0.5 ? 16 * t * t * t * t * t : 1 + 16 * (t - 1) * (t - 1) * (t - 1) * (t - 1) * (t - 1),
-            'Sine.easeIn': (t) => 1 - Math.cos((t * Math.PI) / 2),
-            'Sine.easeOut': (t) => Math.sin((t * Math.PI) / 2),
-            'Sine.easeInOut': (t) => -(Math.cos(Math.PI * t) - 1) / 2,
-            'Expo.easeIn': (t) => t === 0 ? 0 : Math.pow(2, 10 * t - 10),
-            'Expo.easeOut': (t) => t === 1 ? 1 : 1 - Math.pow(2, -10 * t),
-            'Expo.easeInOut': (t) => t === 0 ? 0 : t === 1 ? 1 : t < 0.5 ? Math.pow(2, 20 * t - 10) / 2 : (2 - Math.pow(2, -20 * t + 10)) / 2,
-            'Circ.easeIn': (t) => 1 - Math.sqrt(1 - Math.pow(t, 2)),
-            'Circ.easeOut': (t) => Math.sqrt(1 - Math.pow(t - 1, 2)),
-            'Circ.easeInOut': (t) => t < 0.5 ? (1 - Math.sqrt(1 - Math.pow(2 * t, 2))) / 2 : (Math.sqrt(1 - Math.pow(-2 * t + 2, 2)) + 1) / 2,
-            'Elastic.easeIn': (t) => t === 0 ? 0 : t === 1 ? 1 : -Math.pow(2, 10 * t - 10) * Math.sin((t * 10 - 10.75) * ((2 * Math.PI) / 3)),
-            'Elastic.easeOut': (t) => t === 0 ? 0 : t === 1 ? 1 : Math.pow(2, -10 * t) * Math.sin((t * 10 - 0.75) * ((2 * Math.PI) / 3)) + 1,
-            'Elastic.easeInOut': (t) => t === 0 ? 0 : t === 1 ? 1 : t < 0.5 ? -(Math.pow(2, 20 * t - 10) * Math.sin((20 * t - 11.125) * ((2 * Math.PI) / 4.5))) / 2 : (Math.pow(2, -20 * t + 10) * Math.sin((20 * t - 11.125) * ((2 * Math.PI) / 4.5))) / 2 + 1,
-            'Back.easeIn': (t) => {
-                const c1 = 1.70158;
-                const c3 = c1 + 1;
-                return c3 * t * t * t - c1 * t * t;
-            },
-            'Back.easeOut': (t) => {
-                const c1 = 1.70158;
-                const c3 = c1 + 1;
-                return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2);
-            },
-            'Back.easeInOut': (t) => {
-                const c1 = 1.70158;
-                const c2 = c1 * 1.525;
-                return t < 0.5
-                    ? (Math.pow(2 * t, 2) * ((c2 + 1) * 2 * t - c2)) / 2
-                    : (Math.pow(2 * t - 2, 2) * ((c2 + 1) * (t * 2 - 2) + c2) + 2) / 2;
-            },
-            'Bounce.easeOut': (t) => {
-                const n1 = 7.5625;
-                const d1 = 2.75;
-                if (t < 1 / d1) {
-                    return n1 * t * t;
-                } else if (t < 2 / d1) {
-                    return n1 * (t -= 1.5 / d1) * t + 0.75;
-                } else if (t < 2.5 / d1) {
-                    return n1 * (t -= 2.25 / d1) * t + 0.9375;
-                } else {
-                    return n1 * (t -= 2.625 / d1) * t + 0.984375;
-                }
-            },
-            'Bounce.easeIn': (t) => 1 - this.getEasingFunction('Bounce.easeOut')(1 - t),
-            'Bounce.easeInOut': (t) => t < 0.5
-                ? (1 - this.getEasingFunction('Bounce.easeOut')(1 - 2 * t)) / 2
-                : (1 + this.getEasingFunction('Bounce.easeOut')(2 * t - 1)) / 2,
-        };
-
-        return easeMap[easeName] || ((t) => t);
+        return EasingFunctions[easeName] || EasingFunctions.Linear;
     }
 
     /**
@@ -1029,12 +960,12 @@ export class MoveTrackManager {
         const positionOffset = event.positionOffset || [0, 0];
         const rotationOffset = event.rotationOffset || 0;
         const scale = event.scale || [100, 100];
-        const opacity = event.opacity !== undefined ? event.opacity / 100 : 1;
+        const opacity = event.opacity != null ? event.opacity / 100 : 1;
 
         const positionUsed = event.positionOffset !== undefined;
         const rotationUsed = event.rotationOffset !== undefined;
         const scaleUsed = event.scale !== undefined;
-        const opacityUsed = event.opacity !== undefined;
+        const opacityUsed = event.opacity != null;
 
         for (let i = start; i <= end; i += 1 + gapLength) {
             const tileId = i.toString();
