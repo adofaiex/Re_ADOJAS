@@ -1,0 +1,28 @@
+{
+  "entries": [
+    "engine/assembly/easing.ts",
+    "engine/assembly/tile-color.ts"
+  ],
+  "options": {
+    "optimizeLevel": 3,
+    "shrinkLevel": 0,
+    "converge": false,
+    "noAssert": true,
+    "exportRuntime": false,
+    "runtime": "stub",
+    "outDir": "public/wasm",
+    "use": ["abort="]
+  },
+  "targets": {
+    "release": {
+      "sourceMap": false,
+      "optimizeLevel": 3,
+      "shrinkLevel": 1
+    },
+    "debug": {
+      "sourceMap": true,
+      "optimizeLevel": 0,
+      "debug": true
+    }
+  }
+}

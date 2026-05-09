@@ -86,6 +86,11 @@ export class MoveTrackManager {
     // PositionTrack/MoveTrack modifications.
     private basePositions: THREE.Vector2[] = [];
 
+    // Base rotations from angle data (unmodified by PositionTrack)
+    // These match ADOFAI's startRot.z — the raw tile rotation before any
+    // PositionTrack/MoveTrack modifications. Stored in radians.
+    private baseRotations: number[] = [];
+
     // Track active MoveTrack animations for planet following
     private activeMoveTracks: Map<number, {
         event: any;
@@ -162,6 +167,16 @@ export class MoveTrackManager {
      */
     public setBasePositions(positions: THREE.Vector2[]): void {
         this.basePositions = positions;
+    }
+
+    /**
+     * Set base rotations from angle data (unmodified by PositionTrack).
+     * These are used for computing absolute MoveTrack rotation targets,
+     * matching ADOFAI's use of target.startRot.z.
+     * Stored in radians.
+     */
+    public setBaseRotations(rotations: number[]): void {
+        this.baseRotations = rotations;
     }
 
     /**
@@ -272,18 +287,13 @@ export class MoveTrackManager {
         debugLog('[MoveTrackManager] tileStartTimes at initialization:', this.tileStartTimes.slice(0, 10).map((t, i) => `[${i}]=${t.toFixed(3)}s`).join(', '));
         debugLog('[MoveTrackManager] tileBPM at initialization:', this.tileBPM.slice(0, 10).map((b, i) => `[${i}]=${b}`).join(', '));
 
-        // CRITICAL: tileStartTimes from Player.ts are shifted so that tileStartTimes[1] = 0.
-        // ADOFAN_PIXI uses raw times where time[0] = 0 (tile 0 at level start).
-        // We must unshift to match ADOFAN_PIXI timing, otherwise ALL MoveTrack event times
-        // are off by tileDurations[0] (e.g. 0.6s at 100 BPM / 180°), causing events to fire
-        // before the planet reaches the corresponding tile.
-        const shiftAmount = this.tileStartTimes.length > 0 ? -this.tileStartTimes[0] : 0;
-
+        // Use tileStartTimes directly (same as CameraController.buildCameraTimeline).
+        // tileStartTimes from Player.ts are already in the timeInLevel reference frame
+        // where tile 1 = 0 (after countdown). No unshifting needed.
         tileMoveTrackEvents.forEach((events, floor) => {
             const bpm = this.tileBPM[floor] || 100;
             const secPerBeat = 60 / bpm;
-            const startTime = this.tileStartTimes[floor] || 0; // seconds (shifted)
-            const unshiftedStartTime = startTime + shiftAmount; // seconds (matches ADOFAN_PIXI time[floor])
+            const startTime = this.tileStartTimes[floor] || 0; // seconds (timeInLevel reference frame)
 
             events.forEach(event => {
                 // Skip disabled events
@@ -295,12 +305,12 @@ export class MoveTrackManager {
                 // angleOffset is in degrees. 180 degrees = 1 beat.
                 const angleOffset = event.angleOffset || 0;
                 const timeOffset = (angleOffset / 180) * secPerBeat;
-                const eventTime = unshiftedStartTime + timeOffset;
+                const eventTime = startTime + timeOffset;
 
                 // Duration in seconds (duration is in beats, multiply by secPerBeat)
                 const duration = (event.duration || 1) * secPerBeat;
 
-                debugLog(`[MoveTrackManager] MoveTrack event at floor ${floor}: eventTime=${eventTime.toFixed(3)}s = unshiftedStartTime(${unshiftedStartTime.toFixed(3)}s from tileStartTimes[${floor}]=${this.tileStartTimes[floor]?.toFixed(3)}s + shiftAmount=${shiftAmount.toFixed(3)}s) + timeOffset(${timeOffset.toFixed(3)}s from angleOffset=${angleOffset}°), duration=${duration.toFixed(3)}s, bpm=${bpm}, secPerBeat=${secPerBeat.toFixed(4)}s`);
+                debugLog(`[MoveTrackManager] MoveTrack event at floor ${floor}: eventTime=${eventTime.toFixed(3)}s = tileStartTimes[${floor}]=${this.tileStartTimes[floor]?.toFixed(3)}s + timeOffset(${timeOffset.toFixed(3)}s from angleOffset=${angleOffset}°), duration=${duration.toFixed(3)}s, bpm=${bpm}, secPerBeat=${secPerBeat.toFixed(4)}s`);
 
                 entries.push({
                     time: eventTime,
@@ -624,7 +634,8 @@ export class MoveTrackManager {
                     }
                 }
                 if (rotationUsed) {
-                    targets.rotationZ = rotationOffset * Math.PI / 180;
+                    const tileBaseRot = (i < this.baseRotations.length) ? this.baseRotations[i] : 0;
+                    targets.rotationZ = tileBaseRot + rotationOffset * Math.PI / 180;
                 }
                 if (scaleUsed) {
                     targets.scaleX = scale[0] / 100;
@@ -714,17 +725,20 @@ export class MoveTrackManager {
             }
 
             // ADOFAI ffxMoveFloorPlus rotation: absolute target
-            // In ADOFAI: target = startRot.z + rotationOffset[1]
-            // where startRot is typically 0 for all tiles (base rotation from angle data).
+            // In ADOFAI: target = startRot.z + rotationOffset
+            // where startRot is the tile's base rotation from angle data.
             // The tween interpolates from current rotation (which may include
             // PositionTrack modifications) to this absolute target.
             // NOTE: This OVERRIDES any PositionTrack rotation on the tile.
             if (rotationUsed) {
-                const targetRot = rotationOffset * Math.PI / 180;
+                const tileBaseRot = (i < this.baseRotations.length)
+                    ? this.baseRotations[i]
+                    : (initialState ? initialState.rotation.z : 0);
+                const targetRot = tileBaseRot + rotationOffset * Math.PI / 180;
 
                 const currentRot = tileMesh.rotation.z;
                 const approxEqual = this.approximatelyEqual(currentRot, targetRot, 0.001);
-                debugLog(playLabel, `  tile[${i}] rotation: currentRot=${currentRot.toFixed(6)} targetRot=${targetRot.toFixed(6)} (offset=${rotationOffset}°) approxEqual=${approxEqual}`);
+                debugLog(playLabel, `  tile[${i}] rotation: baseRot=${tileBaseRot.toFixed(6)} currentRot=${currentRot.toFixed(6)} targetRot=${targetRot.toFixed(6)} (offset=${rotationOffset}°) approxEqual=${approxEqual}`);
                 if (!approxEqual) {
                     this.animateProperty(
                         tileMesh,
@@ -983,7 +997,8 @@ export class MoveTrackManager {
                     }
                 }
                 if (rotationUsed) {
-                    targets.rotationZ = rotationOffset * Math.PI / 180;
+                    const tileBaseRot = (i < this.baseRotations.length) ? this.baseRotations[i] : 0;
+                    targets.rotationZ = tileBaseRot + rotationOffset * Math.PI / 180;
                 }
                 if (scaleUsed) {
                     targets.scaleX = scale[0] / 100;
@@ -1017,7 +1032,8 @@ export class MoveTrackManager {
                 tileMesh.position.y = tileBasePos.y + positionOffset[1];
             }
             if (rotationUsed) {
-                tileMesh.rotation.z = rotationOffset * Math.PI / 180;
+                const tileBaseRot = (i < this.baseRotations.length) ? this.baseRotations[i] : 0;
+                tileMesh.rotation.z = tileBaseRot + rotationOffset * Math.PI / 180;
             }
             if (scaleUsed) {
                 tileMesh.scale.x = scale[0] / 100;
