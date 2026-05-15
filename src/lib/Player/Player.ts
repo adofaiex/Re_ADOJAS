@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import {WebGPURenderer} from 'three/webgpu';
 import { IPlayer, ILevelData, IMusic, TargetFramerateType } from './types';
 import { Planet } from './Planet';
-import { HitsoundManager, HitsoundType } from './HitsoundManager';
+import { HitsoundManager, HitsoundType, TimestampGroup } from './HitsoundManager';
 import { BloomEffect } from './BloomEffect';
 import { FlashEffect } from './FlashEffect';
 import createTrackMesh from '../Geo/mesh_reserve';
@@ -38,8 +38,12 @@ export class Player implements IPlayer {
   // Tile Management
   private tiles: Map<string, THREE.Mesh> = new Map();
   private visibleTiles: Set<string> = new Set();
-  private tileLimit: number = 0; // 0 means no limit? Or use a sensible default
-  
+  private tileLimit: number = 0;
+
+  // Dirty tile tracking: only tiles in this set get their instanced mesh synced.
+  // Most tiles are static each frame — this avoids iterating all visible tiles.
+  private dirtyTiles: Set<number> = new Set();
+
   // Spatial indexing for fast visibility checks
   private spatialGrid: Map<number, number[]> = new Map();
   private spatialGridSize: number = 5; // Grid cell size in world units
@@ -100,6 +104,12 @@ export class Player implements IPlayer {
   private tileEvents: Map<number, any[]> = new Map();
   private tileCameraEvents: Map<number, any[]> = new Map();
   private tileMoveTrackEvents: Map<number, any[]> = new Map();
+  private tileSetHitsoundEvents: Map<number, any[]> = new Map();
+  private tilePlayHitsoundEvents: Map<number, any[]> = new Map();
+
+  // Per-tile hitsound overrides (from SetHitsound events)
+  // Each entry: {type, volume} to override the default hitsound for that tile
+  private setHitsoundOverrides: Map<number, {type: HitsoundType, volume: number}> = new Map();
 
   // Camera Controller
   private cameraController: CameraController;
@@ -195,6 +205,20 @@ export class Player implements IPlayer {
                 this.tileMoveTrackEvents.set(floor, []);
             }
             this.tileMoveTrackEvents.get(floor)!.push(action);
+        } else if (action.eventType === 'SetHitsound') {
+            if (!this.tileSetHitsoundEvents.has(floor)) {
+                this.tileSetHitsoundEvents.set(floor, []);
+            }
+            this.tileSetHitsoundEvents.get(floor)!.push(action);
+            // Store per-tile override immediately
+            const hsType = (action.hitsound || 'ReverbClack') as HitsoundType;
+            const hsVol = action.hitsoundVolume != null ? action.hitsoundVolume : 100;
+            this.setHitsoundOverrides.set(floor, { type: hsType, volume: hsVol });
+        } else if (action.eventType === 'PlayHitsound') {
+            if (!this.tilePlayHitsoundEvents.has(floor)) {
+                this.tilePlayHitsoundEvents.set(floor, []);
+            }
+            this.tilePlayHitsoundEvents.get(floor)!.push(action);
         } else {
             if (!this.tileEvents.has(floor)) {
                 this.tileEvents.set(floor, []);
@@ -205,12 +229,11 @@ export class Player implements IPlayer {
     }
 
     // Initialize HitsoundManager
-    // If hitsound is "None" or empty, default to "Kick"
+    // Default type is used as fallback when no per-tile override exists
     const rawHitsound = this.levelData.settings?.hitsound;
-    const hitsoundType = (!rawHitsound || rawHitsound === 'None' ? 'Kick' : rawHitsound) as HitsoundType;
-    const hitsoundVolume = this.levelData.settings?.hitsoundVolume ?? 100;
-    console.log('[Player] Initializing HitsoundManager with type:', hitsoundType, 'volume:', hitsoundVolume, '(raw:', rawHitsound, ')');
-    this.hitsoundManager = new HitsoundManager(hitsoundType, hitsoundVolume);
+    const defaultHitsoundType = (!rawHitsound || rawHitsound === 'None' ? 'Kick' : rawHitsound) as HitsoundType;
+    console.log('[Player] Initializing HitsoundManager, default type:', defaultHitsoundType);
+    this.hitsoundManager = new HitsoundManager(defaultHitsoundType, 100);
 
     // Initialize Three.js components
     this.scene = new THREE.Scene();
@@ -345,43 +368,83 @@ export class Player implements IPlayer {
   }
   
   /**
-   * Pre-synthesize hitsounds at level load time (called during initialization)
+   * Pre-synthesize hitsounds at level load time.
+   * Groups timestamps by hitsound type to support per-tile overrides (SetHitsound)
+   * and on-demand events (PlayHitsound).
    */
   private async preSynthesizeHitsounds(): Promise<void> {
-    console.log('[Player] preSynthesizeHitsounds called');
-    console.log('[Player] preSynthesizeHitsounds called');
     if (!this.tileStartTimes || this.tileStartTimes.length === 0) {
       console.log('[Player] No tileStartTimes, skipping hitsound synthesis');
       return;
     }
-    
-    // Calculate total duration (last tile time + some buffer)
+
     const lastTileTime = this.tileStartTimes[this.tileStartTimes.length - 1] || 0;
-    const totalDuration = lastTileTime + 10; // Add 10 seconds buffer
-    
-    // Collect all hitsound timestamps
-    const hitsoundTimestamps: number[] = [];
-    // tileStartTimes[1] = 0 (after shift)
-    // tileStartTimes[i] = time from tile 1 to tile i (in seconds)
-    // When elapsedTime = tileStartTimes[i], the ball hits tile i+1
-    // Music.currentTime at that time = offset + tileStartTimes[i]
-    const offset = (this.levelData.settings.offset || 0) / 1000; // Used for music timing
-    const firstTileOffset = this.tileStartTimes.length > 0 ? this.tileStartTimes[0] : 0;
-    console.log('[Player] preSynthesizeHitsounds - offset:', offset, 'firstTileOffset:', firstTileOffset, 'tileStartTimes[1]:', this.tileStartTimes[1]);
+    const totalDuration = lastTileTime + 10;
+
+    // Get default hitsound type from level settings
+    const rawHitsound = this.levelData.settings?.hitsound;
+    const defaultType = (!rawHitsound || rawHitsound === 'None' ? 'Kick' : rawHitsound) as HitsoundType;
+    const defaultVolume = this.levelData.settings?.hitsoundVolume ?? 100;
+
+    // Build per-type timestamp groups
+    // Group 0: default type for all tiles without SetHitsound override
+    const defaultTimestamps: number[] = [];
+    // Additional groups: one per override type
+    const overrideGroups: Map<string, { type: HitsoundType; volume: number; timestamps: number[] }> = new Map();
+
+    // Process each tile
     for (let i = 1; i < this.tileStartTimes.length; i++) {
-        const t = this.tileStartTimes[i];
-        const tile = this.levelData.tiles[i];
-        if (tile && tile.angle !== 0) {
-            // Timestamp is the elapsed time when this tile is hit (in seconds)
-            hitsoundTimestamps.push(t);
+      const t = this.tileStartTimes[i];
+      const tile = this.levelData.tiles[i];
+      if (tile && tile.angle !== 0) {
+        const override = this.setHitsoundOverrides.get(i);
+        if (override) {
+          const key = `${override.type}_${override.volume}`;
+          let group = overrideGroups.get(key);
+          if (!group) {
+            group = { type: override.type, volume: override.volume, timestamps: [] };
+            overrideGroups.set(key, group);
+          }
+          group.timestamps.push(t);
+        } else {
+          defaultTimestamps.push(t);
         }
+      }
     }
-    
-    console.log('[Player] preSynthesizeHitsounds - Hitsound timestamps count:', hitsoundTimestamps.length, 'total duration:', totalDuration);
-    console.log('[Player] preSynthesizeHitsounds - Hitsound timestamps (first 5):', hitsoundTimestamps.slice(0, 5));
-    
-    // Pre-synthesize (no progress callback for private method)
-    await this.hitsoundManager.preSynthesize(hitsoundTimestamps, totalDuration);
+
+    // Process PlayHitsound events
+    for (const [floor, events] of this.tilePlayHitsoundEvents) {
+      const startTime = this.tileStartTimes[floor] || 0;
+      for (const evt of events) {
+        const hsType = (evt.hitsound || defaultType) as HitsoundType;
+        const hsVol = evt.hitsoundVolume != null ? evt.hitsoundVolume : defaultVolume;
+        const key = `${hsType}_${hsVol}`;
+        // Use the floors tile start time as the hitsound trigger time
+        const t = startTime;
+        if (hsType === defaultType && hsVol === defaultVolume) {
+          defaultTimestamps.push(t);
+        } else {
+          let group = overrideGroups.get(key);
+          if (!group) {
+            group = { type: hsType, volume: hsVol, timestamps: [] };
+            overrideGroups.set(key, group);
+          }
+          group.timestamps.push(t);
+        }
+      }
+    }
+
+    // Build the groups array
+    const groups: TimestampGroup[] = [];
+    if (defaultTimestamps.length > 0) {
+      groups.push({ type: defaultType, volume: defaultVolume, timestamps: defaultTimestamps });
+    }
+    for (const group of overrideGroups.values()) {
+      groups.push(group);
+    }
+
+    console.log(`[Player] preSynthesizeHitsounds: ${groups.length} groups, ${defaultTimestamps.length} default hits, ${overrideGroups.size} override groups, duration=${totalDuration.toFixed(2)}s`);
+    await this.hitsoundManager.preSynthesize(groups, totalDuration);
   }
   
   /**
@@ -390,46 +453,75 @@ export class Player implements IPlayer {
    */
   public async preSynthesizeHitsoundsWithProgress(onProgress?: (percent: number) => void): Promise<void> {
     console.log('[Player] preSynthesizeHitsoundsWithProgress called');
-    
-    // Check if hitsounds are disabled or set to None
-    if (!this.hitsoundManager.isEnabled() || this.hitsoundManager.getHitsoundType() === 'None') {
-      console.log('[Player] Hitsounds disabled or set to None, skipping synthesis');
+
+    if (!this.hitsoundManager.isEnabled()) {
       if (onProgress) onProgress(100);
       return;
     }
-    
+
     if (!this.tileStartTimes || this.tileStartTimes.length === 0) {
-      console.log('[Player] No tileStartTimes, skipping hitsound synthesis');
+      if (onProgress) onProgress(100);
       return;
     }
-    
-    // Calculate total duration (last tile time + some buffer)
+
     const lastTileTime = this.tileStartTimes[this.tileStartTimes.length - 1] || 0;
-    const totalDuration = lastTileTime + 10; // Add 10 seconds buffer
-    
-    // Collect all hitsound timestamps
-    const hitsoundTimestamps: number[] = [];
-    // tileStartTimes[1] = 0 (after shift)
-    // tileStartTimes[i] = time from tile 1 to tile i
-    // When elapsedTime = tileStartTimes[i], the ball hits tile i+1
-    // Music.currentTime at that time = offset + tileStartTimes[i]
-    const offset = (this.levelData.settings.offset || 0) / 1000; // Used for music timing
-    const firstTileOffset = this.tileStartTimes.length > 0 ? this.tileStartTimes[0] : 0;
-    console.log('[Player] preSynthesizeHitsoundsWithProgress - offset:', offset, 'firstTileOffset:', firstTileOffset, 'tileStartTimes[1]:', this.tileStartTimes[1]);
+    const totalDuration = lastTileTime + 10;
+
+    const rawHitsound = this.levelData.settings?.hitsound;
+    const defaultType = (!rawHitsound || rawHitsound === 'None' ? 'Kick' : rawHitsound) as HitsoundType;
+    const defaultVolume = this.levelData.settings?.hitsoundVolume ?? 100;
+
+    const defaultTimestamps: number[] = [];
+    const overrideGroups: Map<string, { type: HitsoundType; volume: number; timestamps: number[] }> = new Map();
+
     for (let i = 1; i < this.tileStartTimes.length; i++) {
-        const t = this.tileStartTimes[i];
-        const tile = this.levelData.tiles[i];
-        if (tile && tile.angle !== 0) {
-            // Timestamp is the elapsed time when this tile is hit (in seconds)
-            hitsoundTimestamps.push(t);
+      const t = this.tileStartTimes[i];
+      const tile = this.levelData.tiles[i];
+      if (tile && tile.angle !== 0) {
+        const override = this.setHitsoundOverrides.get(i);
+        if (override) {
+          const key = `${override.type}_${override.volume}`;
+          let group = overrideGroups.get(key);
+          if (!group) {
+            group = { type: override.type, volume: override.volume, timestamps: [] };
+            overrideGroups.set(key, group);
+          }
+          group.timestamps.push(t);
+        } else {
+          defaultTimestamps.push(t);
         }
+      }
     }
-    
-    console.log('[Player] preSynthesizeHitsoundsWithProgress - Hitsound timestamps count:', hitsoundTimestamps.length, 'total duration:', totalDuration);
-    console.log('[Player] preSynthesizeHitsoundsWithProgress - Hitsound timestamps (first 5):', hitsoundTimestamps.slice(0, 5));
-    
-    // Pre-synthesize (no progress callback for private method)
-    await this.hitsoundManager.preSynthesize(hitsoundTimestamps, totalDuration);
+
+    for (const [floor, events] of this.tilePlayHitsoundEvents) {
+      const startTime = this.tileStartTimes[floor] || 0;
+      for (const evt of events) {
+        const hsType = (evt.hitsound || defaultType) as HitsoundType;
+        const hsVol = evt.hitsoundVolume != null ? evt.hitsoundVolume : defaultVolume;
+        const key = `${hsType}_${hsVol}`;
+        if (hsType === defaultType && hsVol === defaultVolume) {
+          defaultTimestamps.push(startTime);
+        } else {
+          let group = overrideGroups.get(key);
+          if (!group) {
+            group = { type: hsType, volume: hsVol, timestamps: [] };
+            overrideGroups.set(key, group);
+          }
+          group.timestamps.push(startTime);
+        }
+      }
+    }
+
+    const groups: TimestampGroup[] = [];
+    if (defaultTimestamps.length > 0) {
+      groups.push({ type: defaultType, volume: defaultVolume, timestamps: defaultTimestamps });
+    }
+    for (const group of overrideGroups.values()) {
+      groups.push(group);
+    }
+
+    console.log(`[Player] preSynthesizeHitsoundsWithProgress: ${groups.length} groups, ${defaultTimestamps.length} default hits, ${overrideGroups.size} override groups`);
+    await this.hitsoundManager.preSynthesize(groups, totalDuration, onProgress);
   }
   
   /**
@@ -1236,25 +1328,26 @@ export class Player implements IPlayer {
 
   private syncInstancedTiles(): void {
     if (!this.instancedMeshManager) return;
+    // Only sync tiles that have actually changed this frame
+    if (this.dirtyTiles.size === 0) return;
 
-    this.visibleTiles.forEach(id => {
-        const index = parseInt(id);
+    this.dirtyTiles.forEach(index => {
+        const id = index.toString();
         const mesh = this.tiles.get(id);
-        if (mesh) {
-            const moveTrackOpacity = mesh.userData.opacity !== undefined ? mesh.userData.opacity : 1.0;
-            const colorOpacity = mesh.userData.trackColorOpacity ?? 1;
-            const effectiveOpacity = moveTrackOpacity * colorOpacity;
-            this.instancedMeshManager!.updateTileTransform(
-                index,
-                mesh.position,
-                mesh.rotation as THREE.Euler,
-                mesh.scale,
-                effectiveOpacity
-            );
-            // When fully transparent, hide the instanced instance to prevent depth occlusion
-            this.instancedMeshManager!.setTileVisibility(index, effectiveOpacity > 0.001);
-        }
+        if (!mesh) return;
+        const moveTrackOpacity = mesh.userData.opacity !== undefined ? mesh.userData.opacity : 1.0;
+        const colorOpacity = mesh.userData.trackColorOpacity ?? 1;
+        const effectiveOpacity = moveTrackOpacity * colorOpacity;
+        this.instancedMeshManager!.updateTileTransform(
+            index,
+            mesh.position,
+            mesh.rotation as THREE.Euler,
+            mesh.scale,
+            effectiveOpacity
+        );
+        this.instancedMeshManager!.setTileVisibility(index, effectiveOpacity > 0.001);
     });
+    this.dirtyTiles.clear();
   }
   
   private updateDecorations(): void {
@@ -1282,6 +1375,11 @@ export class Player implements IPlayer {
 
     // Pass timeInLevel in milliseconds
     this.moveTrackManager.update(timeInLevel * 1000);
+
+    // Mark tiles animated by MoveTrack as dirty for instanced mesh sync
+    for (const idx of this.moveTrackManager.getAnimatedTileIndices()) {
+        this.dirtyTiles.add(idx);
+    }
   }
 
   private updateAnimatedTiles(): void {
@@ -1919,6 +2017,7 @@ export class Player implements IPlayer {
       (mesh.material as any).transparent = effectiveOpacity < 0.999;
     }
     this.updateTileMeshColor(index);
+    this.dirtyTiles.add(index);
   }
 
   private updateTileMeshColor(index: number): void {
@@ -2091,7 +2190,7 @@ export class Player implements IPlayer {
   private createPlanets(): void {
     this.planetRed = new Planet(0xff0000, undefined, this.showTrail);
     this.planetBlue = new Planet(0x0000ff, undefined, this.showTrail);
-    
+
     this.planetRed.render(this.scene);
     this.planetBlue.render(this.scene);
     
@@ -2102,6 +2201,129 @@ export class Player implements IPlayer {
         this.planetRed.position.set(t0.position[0], t0.position[1], 1.0);
         this.planetBlue.position.set(t1.position[0], t1.position[1], 1.0);
       }
+    }
+  }
+
+  /**
+   * Compute planet positions for BOTH planets at a given timeInLevel.
+   * Used by the trail system to generate trail points on-the-fly.
+   * Writes [x, y] pairs into redOut/blueOut starting at the given offset.
+   * Returns the number of positions written.
+   */
+  private computePositionsAtTime(timeInLevel: number, idx: number,
+    redOut: Float64Array, blueOut: Float64Array, offset: number): void {
+    const tiles = this.levelData.tiles;
+    const n = tiles.length;
+
+    let tileIndex = idx;
+    // Clamp tileIndex to valid range
+    if (tileIndex < 0) tileIndex = 0;
+    if (tileIndex >= n) tileIndex = n - 1;
+
+    let px: number, py: number, mx: number, my: number;
+
+    if (tileIndex >= n - 1) {
+      // Last tile: pivot planet stays at tile center, moving planet orbits freely
+      const lastP = tiles[n - 1];
+      px = lastP.position[0]; py = lastP.position[1];
+      if (n - 1 > 0) {
+        const prev = tiles[n - 2];
+        const startAngle = Math.atan2(prev.position[1] - py, prev.position[0] - px);
+        const extraTime = timeInLevel - (this.tileStartTimes[n - 1] || 0);
+        const bpm = this.tileBPM[n - 1] || 100;
+        const totalAngle = extraTime * (bpm / 60) * Math.PI;
+        const isCW = this.tileIsCW[n - 1];
+        const ca = isCW ? startAngle - totalAngle : startAngle + totalAngle;
+        mx = px + Math.cos(ca); my = py + Math.sin(ca);
+      } else {
+        mx = px + 1; my = py;
+      }
+    } else {
+      const tp = tiles[tileIndex];
+      px = tp.position[0]; py = tp.position[1];
+      const st = this.tileStartTimes[tileIndex];
+      const dur = this.tileDurations[tileIndex];
+      const rawProgress = dur > 0.0001 ? (timeInLevel - st) / dur : 1;
+      const clampedProgress = Math.max(0, Math.min(1, rawProgress));
+      const ca = this.tileStartAngle[tileIndex] + this.tileTotalAngle[tileIndex] * rawProgress;
+      const sd = this.tileStartDist[tileIndex];
+      const cd = sd + (this.tileEndDist[tileIndex] - sd) * clampedProgress;
+      mx = px + Math.cos(ca) * cd;
+      my = py + Math.sin(ca) * cd;
+    }
+
+    // Even tiles: red = pivot, blue = moving
+    if (tileIndex % 2 === 0) {
+      redOut[offset * 2] = px;     redOut[offset * 2 + 1] = py;
+      blueOut[offset * 2] = mx;    blueOut[offset * 2 + 1] = my;
+    } else {
+      redOut[offset * 2] = mx;     redOut[offset * 2 + 1] = my;
+      blueOut[offset * 2] = px;    blueOut[offset * 2 + 1] = py;
+    }
+  }
+
+  /**
+   * Compute trail positions for both planets for the time window [timeInLevel - 0.4, timeInLevel].
+   * Feeds results to planet trails.
+   */
+  private computePlanetTrails(timeInLevel: number): void {
+    if (!this.showTrail || !this.planetRed?.trail || !this.planetBlue?.trail) return;
+    if (this.tileStartTimes.length < 2) return;
+
+    const TRAIL_DURATION = 0.4;
+    const INV_INTERVAL = 200; // 5ms = 200 samples/sec
+    const startTime = timeInLevel - TRAIL_DURATION;
+    const numSteps = Math.ceil(TRAIL_DURATION * INV_INTERVAL); // ~80
+
+    // Find starting tile index
+    let tileIndex = 0;
+    for (let i = this.tileStartTimes.length - 1; i >= 0; i--) {
+      if (startTime >= this.tileStartTimes[i]) { tileIndex = i; break; }
+    }
+
+    const redArr = new Float64Array(numSteps * 2);
+    const blueArr = new Float64Array(numSteps * 2);
+    let written = 0;
+
+    for (let s = 0; s < numSteps; s++) {
+      const t = startTime + s / INV_INTERVAL;
+      if (t > timeInLevel) break;
+
+      // Advance tileIndex if needed
+      while (tileIndex + 1 < this.tileStartTimes.length && t >= this.tileStartTimes[tileIndex + 1]) {
+        tileIndex++;
+      }
+
+      this.computePositionsAtTime(t, tileIndex, redArr, blueArr, written);
+      written++;
+    }
+
+    if (written > 1) {
+      const trimRed = new Float64Array(redArr.buffer, 0, written * 2);
+      const trimBlue = new Float64Array(blueArr.buffer, 0, written * 2);
+      this.planetRed.setTrailPoints(trimRed);
+      this.planetBlue.setTrailPoints(trimBlue);
+      // Compute reference position at exactly timeInLevel (avoids 5ms sample alignment jitter)
+      let refTileIdx = 0;
+      for (let i = this.tileStartTimes.length - 1; i >= 0; i--) {
+        if (timeInLevel >= this.tileStartTimes[i]) { refTileIdx = i; break; }
+      }
+      const refRed = new Float64Array(2);
+      const refBlue = new Float64Array(2);
+      this.computePositionsAtTime(timeInLevel, refTileIdx, refRed, refBlue, 0);
+
+      const redOffX = this.planetRed.position.x - refRed[0];
+      const redOffY = this.planetRed.position.y - refRed[1];
+      const blueOffX = this.planetBlue.position.x - refBlue[0];
+      const blueOffY = this.planetBlue.position.y - refBlue[1];
+
+      this.planetRed.trail.mesh.position.x = redOffX;
+      this.planetRed.trail.mesh.position.y = redOffY;
+      this.planetBlue.trail.mesh.position.x = blueOffX;
+      this.planetBlue.trail.mesh.position.y = blueOffY;
+    } else {
+      this.planetRed.trail.clear();
+      this.planetBlue.trail.clear();
     }
   }
 
@@ -2161,7 +2383,7 @@ export class Player implements IPlayer {
     const top = this.cameraPosition.y + this.camera.top / zoom;
     
     const margin = 2.0;
-    const newVisibleTiles: number[] = [];
+    const newVisibleSet = new Set<number>();
 
     const minCellX = Math.floor((left - margin) / this.spatialGridSize);
     const maxCellX = Math.floor((right + margin) / this.spatialGridSize);
@@ -2173,17 +2395,16 @@ export class Player implements IPlayer {
         const tileIndices = this.spatialGrid.get(cx * 100000 + cy);
         if (tileIndices) {
           for (let i = 0; i < tileIndices.length; i++) {
-            newVisibleTiles.push(tileIndices[i]);
+            newVisibleSet.add(tileIndices[i]);
           }
         }
       }
     }
 
-    const idsInScene = Array.from(this.visibleTiles);
-    for (let i = 0; i < idsInScene.length; i++) {
-        const id = idsInScene[i];
+    // Remove tiles no longer visible — iterate visibleTiles directly instead of Array.from()
+    for (const id of this.visibleTiles) {
         const idx = parseInt(id);
-        if (!newVisibleTiles.includes(idx)) {
+        if (!newVisibleSet.has(idx)) {
             const mesh = this.tiles.get(id);
             if (mesh) {
                 this.scene.remove(mesh);
@@ -2191,27 +2412,25 @@ export class Player implements IPlayer {
             if (this.instancedMeshManager) {
                 this.instancedMeshManager.setTileVisibility(idx, false);
             }
+            this.dirtyTiles.add(idx);
             this.visibleTiles.delete(id);
         }
     }
 
-    for (let i = 0; i < newVisibleTiles.length; i++) {
-      const idx = newVisibleTiles[i];
+    // Add newly visible tiles
+    for (const idx of newVisibleSet) {
       const id = idx.toString();
       if (!this.visibleTiles.has(id)) {
         const tileMesh = this.getOrCreateTileMesh(idx);
         if (tileMesh) {
-          // If not using instancing, add to scene
           if (!this.instancedMeshManager) {
             this.scene.add(tileMesh);
           } else {
-            // Even when using instancing, we need the tileMesh in the scene 
-            // so its children (decorations/icons) can be rendered.
-            // The tileMesh's own geometry is hidden via material.visible = false
             this.scene.add(tileMesh);
             this.instancedMeshManager.setTileVisibility(idx, true);
           }
           this.visibleTiles.add(id);
+          this.dirtyTiles.add(idx);
         }
       }
     }
@@ -2546,9 +2765,10 @@ export class Player implements IPlayer {
                  1.0
              );
              
-             pivotPlanet.position.z = 1.0;
-             pivotPlanet.update(0, currentTimeInSeconds);
-             movingPlanet.update(0, currentTimeInSeconds);
+     	    pivotPlanet.position.z = 1.0;
+             pivotPlanet.update(0, timeInLevel);
+             movingPlanet.update(0, timeInLevel);
+             this.computePlanetTrails(timeInLevel);
         }
         return;
     }
@@ -2604,8 +2824,9 @@ export class Player implements IPlayer {
         movingPlanet.position.set(planetX, planetY, 1.0);
     }
     
-    this.planetRed.update(0, currentTimeInSeconds);
-    this.planetBlue.update(0, currentTimeInSeconds);
+    this.planetRed.update(0, timeInLevel);
+    this.planetBlue.update(0, timeInLevel);
+    this.computePlanetTrails(timeInLevel);
   }
   
   private updateCameraFollow(delta: number): void {

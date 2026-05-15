@@ -7,6 +7,7 @@ import { LargeFileParser } from "@/lib/LargeFileParser"
 import JSZip from "jszip"
 // @ts-ignore
 import LevelLoaderWorker from '../../lib/Player/levelLoaderWorker?worker&inline'
+import wasmLoaderBase64 from 'virtual:wasm-level-loader'
 
 // 类型导入
 type ParseProgressEvent = Structure.ParseProgressEvent;
@@ -315,7 +316,7 @@ export function useFileHandlers({
       }
 
       // Start precomputation in worker
-      worker.postMessage({ type: 'load', levelData })
+      worker.postMessage({ type: 'load', levelData, wasmBase64: wasmLoaderBase64 })
 
     } catch (error) {
       console.error('Failed to create worker:', error)

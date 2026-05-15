@@ -1,10 +1,11 @@
 "use client"
 import { useEffect, useState } from "react"
 import { Link } from "react-router-dom"
-import { Settings, Code, EditIcon as Cube, Github } from "lucide-react"
+import { Settings, Code, Github } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { version } from "@/control/VersionManager"
 import { useI18n } from "@/lib/i18n/context"
+import logoSrc from "@/assets/logo.png"
 
 export default function HomePage() {
   const { t, mounted } = useI18n()
@@ -28,7 +29,7 @@ export default function HomePage() {
       {/* Header */}
       <header className="flex justify-between items-center p-4 sm:p-6 w-full">
         <div className="flex items-center gap-2">
-          <Cube className="w-6 h-6 sm:w-8 sm:h-8 text-purple-400 dark:text-purple-400" />
+          <img src={logoSrc} alt="Logo" className="w-6 h-6 sm:w-8 sm:h-8 rounded" />
           <span className="text-lg sm:text-xl font-bold text-slate-900 dark:text-white">ADOJAS</span>
         </div>
         <div className="flex items-center gap-2">
@@ -68,8 +69,8 @@ export default function HomePage() {
           {/* Logo */}
           <div className="flex justify-center">
             <div className="relative">
-              <div className="w-24 h-24 sm:w-32 sm:h-32 bg-gradient-to-br from-purple-500 to-pink-500 rounded-2xl flex items-center justify-center shadow-2xl">
-                <Cube className="w-12 h-12 sm:w-16 sm:h-16 text-white" />
+              <div className="w-24 h-24 sm:w-32 sm:h-32 rounded-2xl flex items-center justify-center shadow-2xl overflow-hidden">
+                <img src={logoSrc} alt="ADOJAS Logo" className="w-full h-full object-cover" />
               </div>
               <div className="absolute -inset-1 bg-gradient-to-br from-purple-500 to-pink-500 rounded-2xl blur opacity-30"></div>
             </div>

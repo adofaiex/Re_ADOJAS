@@ -21,17 +21,6 @@ const HEX: Record<string, number> = {
   a: 10, b: 11, c: 12, d: 13, e: 14, f: 15
 };
 
-const SIXTH = [1 / 6, 1 / 3, 1 / 2, 2 / 3, 5 / 6];
-
-const RAINBOW_PROCESS: Record<string, [string, number, number]> = {
-  RB: ['G', 1, 0],
-  GB: ['R', -1, 0.16666666],
-  GR: ['B', 1, 0.3333333333],
-  BR: ['G', -1, 0.5],
-  BG: ['R', 1, 0.66666666666],
-  RG: ['B', -1, 0.83333333333]
-};
-
 function toHex(n: number): string {
   return Math.round(n).toString(16).padStart(2, '0');
 }
@@ -62,10 +51,15 @@ export function parseHexAlpha(hex: string): number {
 
 type ColorFunc = (inst: any, p: number) => string;
 
+// Matches C# scrFloor.ColorFloor behavior:
+//   Single/Glow/Blink/Switch/Volume → color = color1 (primary)
+//   Stripes → alternates by floor parity
+//   Rainbow → white base, hue rotates, S/V from color1
 const COLOR_FUNCS: Record<string, ColorFunc> = {
   Single:    (inst, p) => inst.colorString.slice(0, 6),
   Stripe:    (inst, p) => p < 0.5 ? inst.colorString.slice(0, 6) : inst.seccolorString.slice(0, 6),
   Stripes:   (inst, p) => p < 0.5 ? inst.colorString.slice(0, 6) : inst.seccolorString.slice(0, 6),
+  // C# stores both specialColor1/2 for shader to interpolate between them
   Glow:      (inst, p) => {
     const pp = 1 - Math.abs(1 - 2 * p);
     const r = inst.r + (inst.r2 - inst.r) * pp;
@@ -73,13 +67,9 @@ const COLOR_FUNCS: Record<string, ColorFunc> = {
     const b = inst.b + (inst.b2 - inst.b) * pp;
     return toHex(r) + toHex(g) + toHex(b);
   },
-  Blink:     (inst, p) => {
-    const r = inst.r + (inst.r2 - inst.r) * p;
-    const g = inst.g + (inst.g2 - inst.g) * p;
-    const b = inst.b + (inst.b2 - inst.b) * p;
-    return toHex(r) + toHex(g) + toHex(b);
-  },
-  Switch:    (inst, p) => p < 0.5 ? inst.colorString.slice(0, 6) : inst.seccolorString.slice(0, 6),
+  Blink:     (inst, p) => inst.colorString.slice(0, 6),
+  Switch:    (inst, p) => inst.colorString.slice(0, 6),
+  // Rainbow C#: SetColor(white) + HSV(0, S_of_color1, V_of_color1), shader rotates H
   Rainbow:   (inst, p) => inst._rainbow(p),
   Volume:    (inst, p) => inst.colorString.slice(0, 6)
 };
@@ -152,57 +142,50 @@ class RGBcolor {
 const _ch = (k: string): 'r' | 'g' | 'b' =>
   k === 'R' ? 'r' : k === 'G' ? 'g' : 'b';
 
+// RGB ↔ HSV conversion for Rainbow (matching C# behavior)
+function rgbToHsv(r: number, g: number, b: number): [number, number, number] {
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  const v = max / 255;
+  const d = max - min;
+  const s = max === 0 ? 0 : d / max;
+  let h = 0;
+  if (max !== min) {
+    if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) / 6;
+    else if (max === g) h = ((b - r) / d + 2) / 6;
+    else h = ((r - g) / d + 4) / 6;
+  }
+  return [h, s, v];
+}
+
+function hsvToRgb(h: number, s: number, v: number): [number, number, number] {
+  const i = Math.floor(h * 6);
+  const f = h * 6 - i;
+  const p = v * (1 - s);
+  const q = v * (1 - f * s);
+  const t = v * (1 - (1 - f) * s);
+  switch (i % 6) {
+    case 0: return [v * 255, t * 255, p * 255];
+    case 1: return [q * 255, v * 255, p * 255];
+    case 2: return [p * 255, v * 255, t * 255];
+    case 3: return [p * 255, q * 255, v * 255];
+    case 4: return [t * 255, p * 255, v * 255];
+    default: return [v * 255, p * 255, q * 255];
+  }
+}
+
 class ColorType extends RGBcolor {
   constructor(color: string, seccolor: string) {
     super(color, seccolor);
     this.convert();
   }
 
+  // C#: SetColor(white), extract S/V from color1, shader rotates H over time
   _rainbow(percent: number): string {
-    let max = 'R', min = 'R';
-    if (this.g > this.r) max = 'G';
-    if (this.b > (this as any)[_ch(max)]) max = 'B';
-    if (this.g < this.r) min = 'G';
-    if (this.b < (this as any)[_ch(min)]) min = 'B';
-    if (max === min) return this.colorString.slice(0, 6);
-
-    const deal = RAINBOW_PROCESS[max + min];
-    const range = (this as any)[_ch(max)] - (this as any)[_ch(min)];
-    if (range === 0) return this.colorString.slice(0, 6);
-
-    let per: number;
-    if (deal[1] === 1) {
-      per = deal[2] + ((this as any)[_ch(deal[0])] - (this as any)[_ch(min)]) / range / 6;
-    } else {
-      per = deal[2] + ((this as any)[_ch(max)] - (this as any)[_ch(deal[0])]) / range / 6;
-    }
-    per = fmod(per + percent, 1);
-    const base = (this as any)[_ch(min)];
-    const rr = base + range * Rchange(per);
-    const gg = base + range * Gchange(per);
-    const bb = base + range * Bchange(per);
+    const [_, s, v] = rgbToHsv(this.r, this.g, this.b);
+    const h = fmod(percent, 1);
+    const [rr, gg, bb] = hsvToRgb(h, s, v);
     return toHex(rr) + toHex(gg) + toHex(bb);
   }
-}
-
-function Rchange(p: number): number {
-  if (p > 0 && p < SIXTH[0]) return 1;
-  else if (p < SIXTH[1]) return 1 - (p - SIXTH[0]) / SIXTH[0];
-  else if (p < SIXTH[3]) return 0;
-  else if (p < SIXTH[4]) return (p - SIXTH[3]) / SIXTH[0];
-  else return 1;
-}
-function Gchange(p: number): number {
-  if (p > 0 && p < SIXTH[0]) return p / SIXTH[0];
-  else if (p < SIXTH[2]) return 1;
-  else if (p < SIXTH[3]) return 1 - (p - SIXTH[2]) / SIXTH[0];
-  else return 0;
-}
-function Bchange(p: number): number {
-  if (p > 0 && p < SIXTH[1]) return 0;
-  else if (p < SIXTH[2]) return (p - SIXTH[1]) / SIXTH[0];
-  else if (p < SIXTH[4]) return 1;
-  else return 1 - (p - SIXTH[4]) / SIXTH[0];
 }
 
 // ========== Pulse ==========
@@ -631,6 +614,15 @@ export class TileColorManager {
     }
 
     const [fill, stroke, _useTex] = shift.doCalculateColor(time, id);
+
+    // Shader-approximation effects for Blink
+    if (trackColorType === 'Blink') {
+      // C# shader: toggles visibility. Approximate with opacity square wave.
+      const dur = trackColorAnimDuration || 2;
+      const on = Math.sin(time * (2 * Math.PI / dur)) > 0;
+      return { color: '#' + fill, bgcolor: '#' + stroke, opacity: on ? shift.alpha : 0 };
+    }
+
     return { color: '#' + fill, bgcolor: '#' + stroke, opacity: shift.alpha };
   }
 

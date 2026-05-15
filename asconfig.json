@@ -1,7 +1,8 @@
 {
   "entries": [
     "engine/assembly/easing.ts",
-    "engine/assembly/tile-color.ts"
+    "engine/assembly/tile-color.ts",
+    "engine/assembly/level-loader.ts"
   ],
   "options": {
     "optimizeLevel": 3,

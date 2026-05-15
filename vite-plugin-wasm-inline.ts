@@ -44,6 +44,12 @@ const ENTRIES: WasmEntry[] = [
     srcRel: 'engine/assembly/tile-color.ts',
     ascArgs: ['--noAssert'],
   },
+  {
+    name: 'level-loader',
+    wasmRel: 'public/wasm/level-loader.wasm',
+    srcRel: 'engine/assembly/level-loader.ts',
+    ascArgs: ['--noAssert', '--exportTable'],
+  },
 ];
 
 const VIRTUAL_PREFIX = '\0virtual:wasm-';

@@ -13,3 +13,8 @@ declare module 'virtual:wasm-tile-color' {
   const base64: string;
   export default base64;
 }
+
+declare module 'virtual:wasm-level-loader' {
+  const base64: string;
+  export default base64;
+}

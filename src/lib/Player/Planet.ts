@@ -32,12 +32,12 @@ export class Planet implements IPlanet {
   }
 
   update(deltaTime: number, currentTime: number = 0): void {
-    // Sync mesh position with logical position
     this.mesh.position.copy(this.position);
-    
-    if (this.trail) {
-      this.trail.update(this.position, currentTime);
-    }
+  }
+
+  /** Feed computed trail positions (Float64Array of XY pairs) to the trail renderer */
+  setTrailPoints(xy: Float64Array): void {
+    if (this.trail) this.trail.setPoints(xy);
   }
 
   render(scene: THREE.Scene): void {
@@ -55,6 +55,15 @@ export class Planet implements IPlanet {
     }
     if (this.trail && scene.children.includes(this.trail.mesh)) {
       scene.remove(this.trail.mesh);
+    }
+  }
+
+  setRadius(r: number): void {
+    this.radius = r;
+    this.mesh.geometry.dispose();
+    this.mesh.geometry = new THREE.SphereGeometry(r, 32, 32);
+    if (this.trail) {
+      this.trail.setPlanetRadius(r);
     }
   }
 

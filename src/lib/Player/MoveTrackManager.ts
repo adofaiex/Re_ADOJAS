@@ -592,7 +592,7 @@ export class MoveTrackManager {
         const opacity = event.opacity != null ? event.opacity / 100 : 1;
 
         // Check which properties are actually used (not disabled)
-        // In ADOFAI, properties are used if they are present in the event
+        // In ADOFAI, properties are used if they are not disabled in the editor.
         const positionUsed = event.positionOffset !== undefined;
         const rotationUsed = event.rotationOffset !== undefined;
         const scaleUsed = event.scale !== undefined;
@@ -789,7 +789,7 @@ export class MoveTrackManager {
             }
 
             // Opacity animation
-            if (event.opacity != null) {
+            if (opacityUsed) {
                 const currentOpacity = tileMesh.userData.opacity !== undefined ? tileMesh.userData.opacity : 1;
                 if (!this.approximatelyEqual(currentOpacity, opacity)) {
                     this.animateProperty(
@@ -1064,6 +1064,15 @@ export class MoveTrackManager {
                 );
             }
         }
+    }
+
+    /**
+     * Returns the set of tile indices currently being animated by MoveTrack.
+     * Used by Player.ts to mark only truly animated tiles as dirty for instanced mesh sync,
+     * avoiding iterating all visible tiles every frame.
+     */
+    public getAnimatedTileIndices(): Set<number> {
+        return new Set(this.tileAnimationStates.keys());
     }
 
     /**

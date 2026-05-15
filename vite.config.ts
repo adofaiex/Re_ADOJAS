@@ -3,6 +3,7 @@ import react from "@vitejs/plugin-react"
 import path from "path"
 import legacy from '@vitejs/plugin-legacy'
 import htmlPostBuildPlugin from './no-attr'
+import { wasmInlinePlugin } from './vite-plugin-wasm-inline'
 
 const base = './'
 
@@ -10,6 +11,7 @@ const base = './'
 export default defineConfig(({ mode, command }) => {
   const isBuild = command == 'build'
   const plugins = [
+    wasmInlinePlugin(),
     react(),
   ]
   if (isBuild) {
