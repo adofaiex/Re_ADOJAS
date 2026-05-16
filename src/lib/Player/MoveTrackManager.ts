@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { EasingFunctions } from './Easing';
+import { getEasingFunction } from './WasmEasing';
 import { debugLog } from './DebugLog';
 
 interface MoveTrackTween {
@@ -926,7 +926,7 @@ export class MoveTrackManager {
      * Get easing function by name
      */
     private getEasingFunction(easeName: string): (t: number) => number {
-        return EasingFunctions[easeName] || EasingFunctions.Linear;
+        return getEasingFunction(easeName);
     }
 
     /**

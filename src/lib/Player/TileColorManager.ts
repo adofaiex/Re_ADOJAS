@@ -13,6 +13,8 @@
  *   getTileRenderer() computes the final fill/stroke for a tile at a given time.
  */
 
+import { addBlackWasm, halfColorWasm, rainbowWasm, lerpColorWasm } from './WasmTileColor';
+
 // ========== Hex utilities ==========
 
 const HEX: Record<string, number> = {
@@ -125,14 +127,17 @@ class RGBcolor {
     const fr = HEX[fc[0]] * 16 + HEX[fc[1]];
     const fg = HEX[fc[2]] * 16 + HEX[fc[3]];
     const fb = HEX[fc[4]] * 16 + HEX[fc[5]];
-    return toHex(opa * fr) + toHex(opa * fg) + toHex(opa * fb);
+    const [rr, gg, bb] = addBlackWasm(opa, fr, fg, fb);
+    return toHex(rr) + toHex(gg) + toHex(bb);
   }
 
   halfColor(color: string): string {
     const c = color.replace('#', '');
-    return toHex((HEX[c[0]] * 16 + HEX[c[1]]) / 2) +
-           toHex((HEX[c[2]] * 16 + HEX[c[3]]) / 2) +
-           toHex((HEX[c[4]] * 16 + HEX[c[5]]) / 2);
+    const r = HEX[c[0]] * 16 + HEX[c[1]];
+    const g = HEX[c[2]] * 16 + HEX[c[3]];
+    const b = HEX[c[4]] * 16 + HEX[c[5]];
+    const [rr, gg, bb] = halfColorWasm(r, g, b);
+    return toHex(rr) + toHex(gg) + toHex(bb);
   }
 }
 
@@ -173,6 +178,8 @@ function hsvToRgb(h: number, s: number, v: number): [number, number, number] {
   }
 }
 
+
+
 class ColorType extends RGBcolor {
   constructor(color: string, seccolor: string) {
     super(color, seccolor);
@@ -181,9 +188,7 @@ class ColorType extends RGBcolor {
 
   // C#: SetColor(white), extract S/V from color1, shader rotates H over time
   _rainbow(percent: number): string {
-    const [_, s, v] = rgbToHsv(this.r, this.g, this.b);
-    const h = fmod(percent, 1);
-    const [rr, gg, bb] = hsvToRgb(h, s, v);
+    const [rr, gg, bb] = rainbowWasm(this.r, this.g, this.b, percent);
     return toHex(rr) + toHex(gg) + toHex(bb);
   }
 }
