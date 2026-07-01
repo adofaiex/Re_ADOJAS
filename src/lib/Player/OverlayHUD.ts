@@ -73,7 +73,7 @@ export class OverlayHUD {
 
   private drawFPS(ctx: CanvasRenderingContext2D, w: number, h: number): void {
     const text = `FPS  ${this.fps.toFixed(2)}`;
-    ctx.font = `${this.fs}px monospace`;
+    ctx.font = `${this.fs}px "Google Sans Code"`;
     const tw = ctx.measureText(text).width;
     const x = 16;
     const y = 64;
@@ -90,7 +90,7 @@ export class OverlayHUD {
 
   private drawPanel(ctx: CanvasRenderingContext2D, w: number, h: number, text: string): void {
     const lines = text.split('\n');
-    ctx.font = `${this.fs}px monospace`;
+    ctx.font = `${this.fs}px "Google Sans Code"`;
     let maxW = 0;
     for (const l of lines) {
       const m = ctx.measureText(l).width;
