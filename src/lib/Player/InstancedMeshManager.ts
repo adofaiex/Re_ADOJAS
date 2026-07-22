@@ -66,6 +66,36 @@ export class InstancedMeshManager {
         }
     }
 
+    /**
+     * Enable or disable the tile texture overlay for ALL tiles at once.
+     * When disabled, the fragment shader skips texture sampling entirely.
+     *
+     * @param enabled  true = textures on, false = textures off
+     * @param clearSeed  also zero out per-instance texSeed attributes
+     *   (only needed on explicit user toggle; auto zoom-disable should keep seeds intact)
+     */
+    public setTileTextureEnabled(enabled: boolean, clearSeed: boolean = false): void {
+        const value = enabled ? 0.0 : 1.0;
+        for (const shapeData of this.instancedMeshes.values()) {
+            const mat = shapeData.instancedMesh.material as ShaderMaterial;
+            if (mat.uniforms) {
+                mat.uniforms.uDisableTexture.value = value;
+            }
+
+            if (!enabled && clearSeed) {
+                const attr = shapeData.instancedMesh.geometry.getAttribute('iTexSeed') as InstancedBufferAttribute;
+                if (attr) {
+                    for (const [tileIdx, instIdx] of shapeData.instances) {
+                        attr.array[instIdx] = 0;
+                        const inst = this.tileInstances.get(tileIdx);
+                        if (inst) inst.texSeed = 0;
+                    }
+                    attr.needsUpdate = true;
+                }
+            }
+        }
+    }
+
     constructor(
         scene: Scene,
         onGeometryNeeded: (shapeKey: string) => BufferGeometry | null,
@@ -93,7 +123,8 @@ export class InstancedMeshManager {
                 uTexScale: { value: this.texScale },
                 uIconAtlas: { value: this.iconAtlasTexture },
                 uIconAtlasCols: { value: this.iconAtlasCols },
-                uIconSize: { value: this.iconSize }
+                uIconSize: { value: this.iconSize },
+                uDisableTexture: { value: 0.0 }
             },
             vertexShader: instancedVert,
             fragmentShader: instancedFrag,

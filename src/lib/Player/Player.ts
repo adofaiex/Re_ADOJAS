@@ -333,7 +333,7 @@ export class Player implements IPlayer {
     // Build Camera Timeline from repeat-expanded events
     const expandedCamera = this.timelineManager.cameraEvents.map(e => ({
         time: e.time,
-        event: { ...e.event, floor: e.floor },
+        event: { ...e.event, floor: e.floor, angleOffset: e.angleOffset },
     }));
     this.cameraController.loadCameraTimeline(expandedCamera);
 
@@ -364,6 +364,9 @@ export class Player implements IPlayer {
       }
       const mesh = this.tiles.get(tileIndex.toString());
       if (mesh) {
+        if (this.instancedMeshManager) {
+          this.instancedMeshManager.setTileVisibility(tileIndex, mesh.visible);
+        }
         this.updateTileChildSpriteRotations(mesh, this.camera.rotation.z);
       }
     };
@@ -983,6 +986,18 @@ export class Player implements IPlayer {
     }
   }
 
+  private disableTrackTexture: boolean = false;
+  private _textureAutoDisabled: boolean = false;
+
+  public setDisableTrackTexture(disabled: boolean): void {
+    if (this.disableTrackTexture === disabled) return;
+    this.disableTrackTexture = disabled;
+    this._textureAutoDisabled = false; // reset so zoom logic re-evaluates
+    if (this.instancedMeshManager) {
+      this.instancedMeshManager.setTileTextureEnabled(!disabled, true);
+    }
+  }
+
   public setHitsoundEnabled(enabled: boolean): void {
     this.hitsoundManager.setEnabled(enabled);
   }
@@ -1221,10 +1236,17 @@ export class Player implements IPlayer {
     const ct0 = s.countdownTicks || 4;
     const cd0 = ct0 * spb0;
     const timeInLevel = timeMs / 1000 - cd0;
+    const times = this.tileStartTimes;
+    let lo = 0, hi = times.length - 1;
     let idx = 0;
-    for (let i = 0; i < this.tileStartTimes.length; i++) {
-      if (this.tileStartTimes[i] <= timeInLevel) idx = i;
-      else break;
+    while (lo <= hi) {
+      const mid = (lo + hi) >>> 1;
+      if (times[mid] <= timeInLevel) {
+        idx = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
     }
     return idx;
   }
@@ -1454,10 +1476,18 @@ export class Player implements IPlayer {
       const now = performance.now();
       this.elapsedTime = now - this.startTime;
     } else {
-      // No music or countdown phase - use performance.now()
+      // No music or countdown phase
       if (this.isPlaying && !this.isPaused) {
-        const now = performance.now();
-        this.elapsedTime = now - this.startTime;
+        if (this.useAudioContextTime) {
+          const ctx = getSharedAudioContext();
+          if (ctx) {
+            this.elapsedTime = (ctx.currentTime - this.audioContextStartOffset) * 1000;
+          } else {
+            this.elapsedTime = performance.now() - this.startTime;
+          }
+        } else {
+          this.elapsedTime = performance.now() - this.startTime;
+        }
         
         // Debug: Log elapsedTime occasionally
         if (Math.floor(this.elapsedTime) % 1000 === 0 && this.elapsedTime < 10000) {
@@ -1498,19 +1528,23 @@ export class Player implements IPlayer {
     
     // --- One-time audio sync ---
     // After music starts, verify the actual audio position matches expected.
-    // If they differ (due to async timing of play()), adjust the timing base once.
-    // Audio playback can drift over time from HTMLAudioElement stutters, but a one-shot
-    // sync at start handles the most common case (imprecise playback start timing).
+    // Uses timeInLevel (elapsed game time after countdown) as the common reference,
+    // which works correctly for both first-play and seek paths.
     if (this.music.hasAudio && this.music.isPlaying && this.music.audio &&
         !this.audioDriftSynced &&
         typeof this.music.audio.currentTime === 'number' && !isNaN(this.music.audio.currentTime) &&
-        this.elapsedTime > (this.musicStartDelay + 0.1) * 1000) {
+        this.elapsedTime > 100) {
       const settings = this.levelData.settings;
+      const bpm0 = settings.bpm || 100;
+      const spb0 = 60 / bpm0;
+      const ct0 = settings.countdownTicks || 4;
+      const cd0 = ct0 * spb0;
       const offsetSec = (settings.offset || 0) / 1000;
-      const expectedMusicPos = offsetSec + (this.elapsedTime / 1000 - this.musicStartDelay);
+      const timeInLevel = this.elapsedTime / 1000 - cd0;
+      const expectedMusicPos = offsetSec + Math.max(0, timeInLevel);
       const actualMusicPos = this.music.audio.currentTime;
       const drift = expectedMusicPos - actualMusicPos;
-      if (Math.abs(drift) > 0.025) {
+      if (Math.abs(drift) > 0.01) {
         console.log('[Player] One-shot audio sync:', (drift * 1000).toFixed(1), 'ms');
         if (this.useAudioContextTime) {
           const audioCtx = getSharedAudioContext();
@@ -1524,6 +1558,7 @@ export class Player implements IPlayer {
         }
       }
       this.audioDriftSynced = true;
+      this.useAudioContextTime = true;
     }
 
     // Unified trigger event dispatch from TimelineManager
@@ -1570,18 +1605,7 @@ export class Player implements IPlayer {
 
   private syncInstancedTiles(): void {
     if (!this.instancedMeshManager) return;
-    // Only sync tiles that have actually changed this frame
-    if (this.dirtyTiles.size === 0) {
-      // Still ensure floor icon types are set for ALL tiles
-      for (const [id, mesh] of this.tiles) {
-        const idx = parseInt(id, 10);
-        if (!isNaN(idx)) {
-          this.instancedMeshManager.setFloorIconType(idx, mesh.userData.floorIconType ?? 0);
-          this.instancedMeshManager.setFloorIconAngle(idx, mesh.userData.floorIconAngle ?? 0);
-        }
-      }
-      return;
-    }
+    if (this.dirtyTiles.size === 0) return;
 
     this.dirtyTiles.forEach(index => {
         const id = index.toString();
@@ -1957,15 +1981,18 @@ export class Player implements IPlayer {
           this.music.play();
         }
       }
-      if (this.hitsoundManager && this.hitsoundManager.isSynthesized() && timeInLevel > 0) {
-        this.hitsoundManager.startAtOffset(timeInLevel);
+      if (this.hitsoundManager && this.hitsoundManager.isSynthesized()) {
+        if (timeInLevel >= 0) {
+          this.hitsoundManager.startAtOffset(timeInLevel);
+        } else {
+          this.hitsoundManager.start(-timeInLevel);
+        }
       }
       if (this.videoElement) {
         this.videoElement.currentTime = Math.max(0, startAtMs / 1000 - this.musicStartDelay);
       }
-      // Use performance.now() timekeeping (AudioContext not yet synced)
-      this.useAudioContextTime = false;
-      this.audioDriftSynced = true; // skip one-shot audio sync — already seeked
+        // Use performance.now() timekeeping (AudioContext not yet synced)
+        this.useAudioContextTime = false;
     }
 
     // Calculate delay for countdown
@@ -2011,6 +2038,11 @@ export class Player implements IPlayer {
       if (audioContext) {
         // audioContextStartOffset is the AudioContext time when game time = 0
         this.audioContextStartOffset = audioContext.currentTime - this.elapsedTime / 1000;
+        // AudioContext.currentTime advances even in background tabs and without audio.
+        // Use it as the game clock when no music is available.
+        if (!this.music.hasAudio) {
+          this.useAudioContextTime = true;
+        }
       }
     } catch (e) {
       console.warn('[Player] Failed to initialize AudioContext:', e);
@@ -2195,6 +2227,9 @@ export class Player implements IPlayer {
   public stopPlay(): void {
     this.isPlaying = false;
     this.isPaused = false;
+    this.deselectTile();
+    this.elapsedTime = 0;
+    this.audioDriftSynced = false;
     this.removePlanets();
     
     if (this.music && (this.music as any).hasAudio ? this.music.hasAudio : false) {
@@ -2318,6 +2353,8 @@ export class Player implements IPlayer {
 
     this.elapsedTime = timeMs;
     this.startTime = performance.now() - timeMs;
+    // Allow drift correction to re-sync after seek
+    this.audioDriftSynced = false;
     // When paused, sync pauseTime so resumePlay doesn't double-add pause duration
     if (this.isPaused) this.pauseTime = performance.now();
 
@@ -2382,32 +2419,26 @@ export class Player implements IPlayer {
         }
       }
       this.cameraController.seek(timeInLevel, this.currentPivotPosition);
-      // Update absolute camera position for non-play/paused display
-      if (!this.isPlaying || this.isPaused) {
-        const interp = this.cameraController.getInterpolatedValues(this.elapsedTime);
-        const pivot = this.isPaused
-          ? this.currentPivotPosition
-          : (() => {
-              const seekIdx = this.getTileIndexAtTime(this.elapsedTime);
-              const seekTile = this.levelData.tiles?.[seekIdx];
-              return seekTile?.position
-                ? { x: seekTile.position[0], y: seekTile.position[1] }
-                : this.currentPivotPosition;
-            })();
-        const target = this.cameraController.calculateTargetPosition(pivot, interp);
-        this.cameraPosition.x = target.x;
-        this.cameraPosition.y = target.y;
-        this.camera.position.x = target.x;
-        this.camera.position.y = target.y;
-      }
+      // Update absolute camera position for display (always, to avoid 1-frame lag)
+      const interp = this.cameraController.getInterpolatedValues(this.elapsedTime);
+      const pivot = this.isPaused
+        ? this.currentPivotPosition
+        : (() => {
+            const seekIdx = this.getTileIndexAtTime(this.elapsedTime);
+            const seekTile = this.levelData.tiles?.[seekIdx];
+            return seekTile?.position
+              ? { x: seekTile.position[0], y: seekTile.position[1] }
+              : this.currentPivotPosition;
+          })();
+      const target = this.cameraController.calculateTargetPosition(pivot, interp);
+      this.cameraPosition.x = target.x;
+      this.cameraPosition.y = target.y;
+      this.camera.position.x = target.x;
+      this.camera.position.y = target.y;
     }
 
     if (this.moveTrackManager) {
       this.moveTrackManager.fastForwardTo(timeInLevel);
-      // Mark tiles as dirty so instanced mesh sync picks up the changes
-      for (const idx of this.timelineManager.getAllTileIndices()) {
-        this.dirtyTiles.add(idx);
-      }
     }
   }
 
@@ -2565,7 +2596,7 @@ export class Player implements IPlayer {
         // Update instanced mesh with new trackStyle (shapeKey + texSeed)
         if (this.instancedMeshManager) {
             const newTrackStyle = config.trackStyle;
-            const texSeed = newTrackStyle === 'Standard' ? Math.random() * 10 + 1 : 0;
+            const texSeed = newTrackStyle === 'Standard' && !this.disableTrackTexture ? Math.random() * 10 + 1 : 0;
             const tileMesh = this.tiles.get(i.toString());
             if (tileMesh) {
                 const resolved = this.getResolvedTileDirection(i);
@@ -3270,7 +3301,7 @@ export class Player implements IPlayer {
 
     // Update instanced mesh with icon type and direction angle
     if (this.instancedMeshManager) {
-        const texSeed = trackStyle === 'Standard' ? Math.random() * 10 + 1 : 0;
+        const texSeed = trackStyle === 'Standard' && !this.disableTrackTexture ? Math.random() * 10 + 1 : 0;
         this.instancedMeshManager.updateTile(
             index,
             shapeKey,
@@ -3552,6 +3583,22 @@ export class Player implements IPlayer {
       this.zoom = 100 / interpolated.zoom;
       this.camera.zoom = this.zoom * this.zoomMultiplier;
       this.camera.updateProjectionMatrix();
+
+      // Auto-disable tile texture when zoomed out past threshold
+      // (texture is imperceptible on tiny tiles, but still costs GPU bandwidth).
+      // Only interferes when the user has NOT explicitly toggled textures off.
+      if (!this.disableTrackTexture && this.instancedMeshManager) {
+          const zoomThreshold = 300; // ADOFAI zoom > 300 → tiles are very small
+          if (interpolated.zoom > zoomThreshold) {
+              if (!this._textureAutoDisabled) {
+                  this._textureAutoDisabled = true;
+                  this.instancedMeshManager.setTileTextureEnabled(false);
+              }
+          } else if (this._textureAutoDisabled) {
+              this._textureAutoDisabled = false;
+              this.instancedMeshManager.setTileTextureEnabled(true);
+          }
+      }
       
       // Rotation (in degrees, convert to radians)
       this.camera.rotation.z = interpolated.rotation * (Math.PI / 180);
@@ -3595,7 +3642,7 @@ export class Player implements IPlayer {
     const texture = loader.load(tileTextureUrl);
     texture.wrapS = RepeatWrapping;
     texture.wrapT = RepeatWrapping;
-    texture.minFilter = LinearMipmapLinearFilter;
+    texture.minFilter = LinearFilter;
     texture.magFilter = LinearFilter;
     texture.colorSpace = SRGBColorSpace;
     if (this.instancedMeshManager) {

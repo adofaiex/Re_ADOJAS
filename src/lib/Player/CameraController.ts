@@ -138,12 +138,26 @@ export class CameraController {
         this.resetTransitions();
 
         // Sync lastCameraTimelineIndex so updateCameraFollow doesn't reprocess
-        let lastIdx = -1;
-        for (let i = 0; i < timeline.length; i++) {
-            if (timeline[i].time <= time) lastIdx = i;
-            else break;
+        let lo = 0, hi = timeline.length - 1, lastIdx = -1;
+        while (lo <= hi) {
+            const mid = (lo + hi) >>> 1;
+            if (timeline[mid].time <= time) {
+                lastIdx = mid;
+                lo = mid + 1;
+            } else {
+                hi = mid - 1;
+            }
         }
         this.lastCameraTimelineIndex = lastIdx;
+
+        // Set smoothFollow origin to the seeked position so the next playback
+        // frame doesn't jerky-Lerp from {0,0} (resetCameraState default).
+        const targetWorld = this.calculateTargetPosition(
+            pivot ?? { x: 0, y: 0 },
+            { x: this.cameraMode.position.x, y: this.cameraMode.position.y, zoom: this.cameraMode.zoom, rotation: this.cameraMode.rotation },
+        );
+        this.smoothFrom = { x: targetWorld.x, y: targetWorld.y };
+        this.smoothTimer = 10; // large enough that t >= 1 for any reasonable BPM
     }
 
     // ── 跟随平滑（匹配 C# scrCamera.UpdateFollowCam） ─────────────────

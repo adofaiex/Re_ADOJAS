@@ -3,6 +3,7 @@ uniform float uTexScale;
 uniform sampler2D uIconAtlas;
 uniform float uIconAtlasCols;
 uniform float uIconSize;
+uniform float uDisableTexture;
 
 varying vec3 vColor;
 varying vec3 vInstanceColor;
@@ -17,7 +18,7 @@ varying float vFloorIconAngle;
 void main() {
     vec3 finalColor = mix(vInstanceBgColor, vInstanceColor, vColor.r);
 
-    if (vTexSeed > 0.0) {
+    if (vTexSeed > 0.0 && uDisableTexture < 0.5) {
         vec2 uv = vWorldPosition.xy * uTexScale;
         float angle = vTexSeed * 6.2832;
         float c = cos(angle);

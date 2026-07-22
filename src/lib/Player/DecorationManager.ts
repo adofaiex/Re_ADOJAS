@@ -4,6 +4,7 @@ import { TimelineManager } from './TimelineManager';
 import createTrackMesh from '../Geo/mesh_reserve';
 import { isEventActive } from './EventUtils';
 import { getIconTexture, getIconTextureForCustomFloor, createIconSprite } from './IconLoader';
+import { debugLog } from './DebugLog';
 
 /**
  * Parse ADOFAI hex color which may be #RRGGBBAA (8-digit with alpha).
@@ -109,6 +110,64 @@ export interface DecorationConfig {
     imageSmoothing?: boolean;
 }
 
+/**
+ * Uniform spatial grid for static decorations.
+ * Static decorations have a fixed world position (no parallax / lock / stickToFloor),
+ * so they can be culled cheaply by skipping cells outside the camera view.
+ * Cell size is chosen relative to typical camera view height (~8 / camZoom units)
+ * to keep visible cell count low (single-digit typically).
+ */
+class DecorationSpatialGrid {
+    private cellSize: number;
+    private cells: Map<string, DecorationInstance[]> = new Map();
+    public lastQueryCount: number = 0;
+
+    constructor(cellSize: number = 32) {
+        this.cellSize = cellSize;
+    }
+
+    private key(cx: number, cy: number): string {
+        return cx + ',' + cy;
+    }
+
+    public clear(): void {
+        this.cells.clear();
+        this.lastQueryCount = 0;
+    }
+
+    public insert(deco: DecorationInstance, worldX: number, worldY: number): void {
+        const cx = Math.floor(worldX / this.cellSize);
+        const cy = Math.floor(worldY / this.cellSize);
+        const k = this.key(cx, cy);
+        let bucket = this.cells.get(k);
+        if (!bucket) { bucket = []; this.cells.set(k, bucket); }
+        bucket.push(deco);
+    }
+
+    /**
+     * Returns decorations in cells overlapping [minX, minY] – [maxX, maxY].
+     * The same decoration may be reported once even if it spans multiple cells,
+     * because we only index by its anchor world position.
+     */
+    public query(minX: number, minY: number, maxX: number, maxY: number): DecorationInstance[] {
+        const startCX = Math.floor(minX / this.cellSize);
+        const endCX = Math.floor(maxX / this.cellSize);
+        const startCY = Math.floor(minY / this.cellSize);
+        const endCY = Math.floor(maxY / this.cellSize);
+        const out: DecorationInstance[] = [];
+        for (let cx = startCX; cx <= endCX; cx++) {
+            for (let cy = startCY; cy <= endCY; cy++) {
+                const bucket = this.cells.get(this.key(cx, cy));
+                if (bucket) {
+                    for (let i = 0; i < bucket.length; i++) out.push(bucket[i]);
+                }
+            }
+        }
+        this.lastQueryCount = out.length;
+        return out;
+    }
+}
+
 const defaultDecorationConfig: DecorationConfig = {
     tag: '',
     decorationType: DecorationType.Image,
@@ -168,6 +227,10 @@ class DecorationInstance {
     private animTargetB = 0;
     private animHasColor = false;
     private _isStaticWorld = true;
+
+    public get isStaticWorld(): boolean {
+        return this._isStaticWorld;
+    }
 
     constructor(config: Partial<DecorationConfig>) {
         this.config = { ...defaultDecorationConfig, ...config };
@@ -494,6 +557,9 @@ export class DecorationManager {
     private placeholderTexture: Texture | null = null;
     private _lastCamX = 0; private _lastCamY = 0; private _lastCamZoom = 0;
     private _timelineManager: TimelineManager | null = null;
+    private _staticGrid: DecorationSpatialGrid = new DecorationSpatialGrid(32);
+    private _staticDecos: DecorationInstance[] = [];
+    private _dynamicDecos: DecorationInstance[] = [];
 
     constructor(scene: Scene, levelData: any, tileStartTimes: number[], tileBPM: number[]) {
         this.scene = scene;
@@ -526,6 +592,11 @@ export class DecorationManager {
             }
         }
         this.buildDecorationEventsTimeline();
+        debugLog('[DecorationManager] Spatial grid Patch: enabled | total=' + this.decoList.length
+            + ' static=' + this._staticDecos.length
+            + ' dynamic=' + this._dynamicDecos.length
+            + ' cells=' + this._staticGrid.lastQueryCount
+            + ' cellSize=' + 32);
     }
 
     public buildTimelineKeyframes(tm: TimelineManager): void {
@@ -945,6 +1016,12 @@ export class DecorationManager {
         this.decorations.set(deco.config.id!, deco);
         this.decoList.push(deco);
         this.container.add(deco.container);
+        if (deco.isStaticWorld) {
+            this._staticDecos.push(deco);
+            this._staticGrid.insert(deco, deco.startPos.x, deco.startPos.y);
+        } else {
+            this._dynamicDecos.push(deco);
+        }
         if (deco.config.tag) {
             const tags = deco.config.tag.split(/\s+/).filter(Boolean);
             for (const t of tags) {
@@ -1100,8 +1177,44 @@ export class DecorationManager {
         const halfH = viewH * 0.5;
         const minX = camX - halfW, maxX = camX + halfW;
         const minY = camY - halfH, maxY = camY + halfH;
-        for (let i = 0; i < len; i++) {
-            const d = list[i];
+        // Spatial grid: query static decorations in cells overlapping the camera view.
+        // Static decorations have a fixed world position (startPos), so we can cull
+        // them purely by cell membership before computing their container transform.
+        const visibleStatic = this._staticGrid.query(minX, minY, maxX, maxY);
+        const visibleStaticSet = new Set<DecorationInstance>(visibleStatic);
+        // Always include any static decoration currently being animated / keyframed,
+        // even if its animated position has drifted outside the original cell.
+        const sLen = this._staticDecos.length;
+        for (let i = 0; i < sLen; i++) {
+            const d = this._staticDecos[i];
+            if ((d.config.animating || (this._timelineManager && d.config.tag)) && !visibleStaticSet.has(d)) {
+                visibleStatic.push(d);
+                visibleStaticSet.add(d);
+            }
+        }
+        const dLen = this._dynamicDecos.length;
+        // Dynamic decorations (parallax / locked / stickToFloor / planet follow) have a
+        // world position that depends on camera or planet state and cannot be safely
+        // indexed in a static grid; iterate all of them.
+        for (let i = 0; i < dLen; i++) {
+            const d = this._dynamicDecos[i];
+            d.updatePosition(cameraPosition, cameraRotation, camZ, tilePositions, adoZoom);
+            if (!d.config.visible) continue;
+            const p = d.container.position;
+            const csx = Math.abs(d.container.scale.x);
+            const csy = Math.abs(d.container.scale.y);
+            let hw = csx, hh = csy;
+            if (d.sprite) {
+                hw = Math.abs(d.sprite.scale.x) * csx * 0.5;
+                hh = Math.abs(d.sprite.scale.y) * csy * 0.5;
+            } else if (d.mesh) {
+                hw = hh = Math.max(csx, csy) * 0.5;
+            }
+            const vis = p.x + hw >= minX && p.x - hw <= maxX && p.y + hh >= minY && p.y - hh <= maxY;
+            if (d.container.visible !== vis) d.container.visible = vis;
+        }
+        for (let i = 0; i < visibleStatic.length; i++) {
+            const d = visibleStatic[i];
             d.updatePosition(cameraPosition, cameraRotation, camZ, tilePositions, adoZoom);
             if (!d.config.visible) continue;
             const p = d.container.position;
@@ -1324,14 +1437,21 @@ export class DecorationManager {
     }
 
     public clear(): void {
+        const hadDecos = this.decoList.length > 0;
         const list = this.decoList;
         for (let i = 0; i < list.length; i++) { list[i].dispose(); this.container.remove(list[i].container); }
         this.decorations.clear();
         this.decoList.length = 0;
+        this._staticDecos.length = 0;
+        this._dynamicDecos.length = 0;
+        this._staticGrid.clear();
         this.taggedDecorations.clear();
         this.floorGeoCache.clear();
         this.decorationEventsTimeline = [];
         this.lastDecorationEventIndex = -1;
+        if (hadDecos) {
+            debugLog('[DecorationManager] Spatial grid Patch: disabled (cleared)');
+        }
     }
 
     public dispose(): void {

@@ -90,6 +90,12 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
           description: t("settings.useOGGCompression.description"),
           type: "useOGGCompression",
         },
+        {
+          id: "disableTrackTexture",
+          title: t("settings.disableTrackTexture.title"),
+          description: t("settings.disableTrackTexture.description"),
+          type: "disableTrackTexture",
+        },
       ],
     },
   ]
@@ -398,6 +404,26 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                       </button>
                       <span className="text-sm text-slate-600 dark:text-slate-400">
                         {settings.useOGGCompression ? t("settings.useOGGCompression.enabled") : t("settings.useOGGCompression.disabled")}
+                      </span>
+                    </div>
+                  )}
+
+                  {setting.type === "disableTrackTexture" && (
+                    <div className="flex items-center gap-3">
+                      <button
+                        onClick={() => updateSettings({ disableTrackTexture: !settings.disableTrackTexture })}
+                        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                          settings.disableTrackTexture ? "bg-purple-500" : "bg-slate-300 dark:bg-slate-600"
+                        }`}
+                      >
+                        <span
+                          className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                            settings.disableTrackTexture ? "translate-x-6" : "translate-x-1"
+                          }`}
+                        />
+                      </button>
+                      <span className="text-sm text-slate-600 dark:text-slate-400">
+                        {settings.disableTrackTexture ? t("settings.disableTrackTexture.enabled") : t("settings.disableTrackTexture.disabled")}
                       </span>
                     </div>
                   )}

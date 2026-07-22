@@ -172,6 +172,12 @@ export const translations = {
         enabled: "已启用",
         disabled: "已禁用",
       },
+      disableTrackTexture: {
+        title: "禁用轨道纹理",
+        description: "对 Standard 轨道禁用纹理叠加（高砖块数谱面性能优化）",
+        enabled: "纹理已禁用",
+        disabled: "纹理默认",
+      },
       themePreview: {
         title: "主题预览",
       },
@@ -344,6 +350,12 @@ export const translations = {
         async: "Async (Recommended)",
         worker: "Worker (Background Thread)",
       },
+      disableTrackTexture: {
+        title: "Disable Track Texture",
+        description: "Disable texture overlay for Standard tracks (performance optimization for high tile count charts)",
+        enabled: "Texture Off",
+        disabled: "Texture Default",
+      },
       themePreview: {
         title: "Theme Preview",
       },
@@ -515,6 +527,12 @@ export const translations = {
         sync: "同期（UIをブロック）",
         async: "非同期（推奨）",
         worker: "ワーカー（バックグラウンドスレッド）",
+      },
+      disableTrackTexture: {
+        title: "トラックテクスチャを無効化",
+        description: "Standardトラックのテクスチャオーバーレイを無効にします（高タイル数譜面のパフォーマンス最適化）",
+        enabled: "テクスチャ無効",
+        disabled: "テクスチャ通常",
       },
       themePreview: {
         title: "テーマプレビュー",

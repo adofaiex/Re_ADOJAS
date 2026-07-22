@@ -89,6 +89,7 @@ export function useEditorState() {
       player.setTargetFramerate(settings.targetFramerate)
       player.setOGGCompression(settings.useOGGCompression)
       player.setStatsPanel(settings.showStats)
+      player.setDisableTrackTexture(settings.disableTrackTexture)
       
       previewerRef.current = player
     }
@@ -137,10 +138,20 @@ export function useEditorState() {
     }
 
     if (playMode === "preview") {
+      let startTime = startAtMs
+      if (startTime === undefined) {
+        const p = previewerRef.current
+        const selIdx = p?.selectedTileIndex
+        if (selIdx !== null && selIdx !== undefined) {
+          startTime = p!.getTileTimeMs(selIdx)
+        } else {
+          startTime = p?.currentTimeMs ?? 0
+        }
+      }
       setPlayMode("play")
       setPlayModeActive(true)
-      console.log('[EditorState] calling startPlay with:', startAtMs)
-      previewerRef.current?.startPlay(startAtMs ?? 0)
+      console.log('[EditorState] calling startPlay with:', startTime)
+      previewerRef.current?.startPlay(startTime)
     } else if (playMode === "play") {
       setPlayMode("pause")
       previewerRef.current?.pausePlay()
@@ -208,6 +219,7 @@ export function useEditorState() {
       player.setTargetFramerate(settings.targetFramerate)
       player.setOGGCompression(settings.useOGGCompression)
       player.setStatsPanel(settings.showStats)
+      player.setDisableTrackTexture(settings.disableTrackTexture)
     }
   }, [
     settings.renderer,
@@ -216,6 +228,7 @@ export function useEditorState() {
     settings.hitsoundEnabled,
     settings.targetFramerate,
     settings.showStats,
+    settings.disableTrackTexture,
   ])
 
   // 监听渲染器设置变化
@@ -309,6 +322,8 @@ export function useEditorState() {
             player.setHitsoundEnabled(settings.hitsoundEnabled)
             player.setTargetFramerate(settings.targetFramerate)
             player.setStatsPanel(settings.showStats)
+            
+            player.setDisableTrackTexture(settings.disableTrackTexture)
             
             // Synthesize hitsounds
             await player.preSynthesizeHitsoundsWithProgress()

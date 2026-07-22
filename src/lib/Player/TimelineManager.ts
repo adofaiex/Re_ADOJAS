@@ -14,6 +14,7 @@ export class TimelineManager {
     private _cameraEvents: { time: number; event: any; floor: number; angleOffset: number }[] = [];
     private lastTriggerIndex: number = -1;
 
+    private _animatedTileIndices: Set<number> = new Set();
     private tileStartTimes: number[];
     private tileBPM: number[];
     private totalTiles: number;
@@ -193,6 +194,12 @@ export class TimelineManager {
         });
         this.triggerEvents = triggerEntries;
 
+        this._cameraEvents.sort((a, b) => {
+            const dt = a.time - b.time;
+            if (Math.abs(dt) < 0.0001) return (a.event.id ?? Infinity) - (b.event.id ?? Infinity);
+            return dt > 0 ? 1 : -1;
+        });
+
         // Build MoveTrack keyframes FIRST, then AnimateTrack (appear/disappear)
         // SECOND so AnimateTrack wins on conflicts (matching C# priority).
         for (const [tileIdx, events] of perTileMoveTrack) {
@@ -206,6 +213,25 @@ export class TimelineManager {
 
         // Build Appear/Disappear keyframes AFTER MoveTrack so AnimateTrack wins on conflicts.
         this.buildAnimateTrackKeyframes(actions, basePositions, baseRotations, baseScales, baseOpacities, settings);
+
+        this._animatedTileIndices = this.computeAnimatedTileIndices();
+    }
+
+    private computeAnimatedTileIndices(): Set<number> {
+        const indices = new Set<number>();
+        for (const [entity, props] of this.timelines) {
+            if (!entity.startsWith('tile:')) continue;
+            const tileIdx = parseInt(entity.slice(5), 10);
+            if (isNaN(tileIdx)) continue;
+            for (const kfs of props.values()) {
+                const last = kfs[kfs.length - 1];
+                if (last && last.time > 1e-9) {
+                    indices.add(tileIdx);
+                    break;
+                }
+            }
+        }
+        return indices;
     }
 
     private buildTileMoveTrack(
@@ -460,6 +486,10 @@ export class TimelineManager {
             if (!isNaN(idx)) indices.add(idx);
         }
         return indices;
+    }
+
+    public getAnimatedTileIndices(): Set<number> {
+        return this._animatedTileIndices;
     }
 
     /**
@@ -735,19 +765,22 @@ export class TimelineManager {
             case 'Extend': {
                 const prevX = floor > 0 ? (basePositions[floor - 1]?.x ?? baseX) : baseX;
                 const prevY = floor > 0 ? (basePositions[floor - 1]?.y ?? baseY) : baseY;
-                // Initial state at time 0 (invisible until appear animation)
-                this.instantKeyframe(entity, 'positionX', 0, prevX);
-                this.instantKeyframe(entity, 'positionY', 0, prevY);
-                this.instantKeyframe(entity, 'scaleX', 0, 0);
-                this.instantKeyframe(entity, 'scaleY', 0, 0);
-                this.instantKeyframe(entity, 'positionX', appearStartTime, prevX);
-                this.instantKeyframe(entity, 'positionY', appearStartTime, prevY);
-                this.instantKeyframe(entity, 'scaleX', appearStartTime, 0);
-                this.instantKeyframe(entity, 'scaleY', appearStartTime, 0);
-                this.addTween(entity, 'positionX', appearStartTime, appearEndTime, prevX, baseX, ease);
-                this.addTween(entity, 'positionY', appearStartTime, appearEndTime, prevY, baseY, ease);
-                this.addTween(entity, 'scaleX', appearStartTime, appearEndTime, 0, baseSX, ease);
-                this.addTween(entity, 'scaleY', appearStartTime, appearEndTime, 0, baseSY, ease);
+                // Set initial state at time 0 and appearStartTime without removing
+                // subsequent keyframes — MoveTrack keyframes after the appear
+                // animation must be preserved (was: instantKeyframe + addTween
+                // wiped them out, so MoveTrack never took effect after appear).
+                this.addKeyframe(entity, 'positionX', 0, prevX, null);
+                this.addKeyframe(entity, 'positionY', 0, prevY, null);
+                this.addKeyframe(entity, 'scaleX', 0, 0, null);
+                this.addKeyframe(entity, 'scaleY', 0, 0, null);
+                this.addKeyframe(entity, 'positionX', appearStartTime, prevX, null);
+                this.addKeyframe(entity, 'positionY', appearStartTime, prevY, null);
+                this.addKeyframe(entity, 'scaleX', appearStartTime, 0, null);
+                this.addKeyframe(entity, 'scaleY', appearStartTime, 0, null);
+                this.pushTween(entity, 'positionX', appearStartTime, appearEndTime, baseX, ease);
+                this.pushTween(entity, 'positionY', appearStartTime, appearEndTime, baseY, ease);
+                this.pushTween(entity, 'scaleX', appearStartTime, appearEndTime, baseSX, ease);
+                this.pushTween(entity, 'scaleY', appearStartTime, appearEndTime, baseSY, ease);
                 break;
             }
             case 'Assemble':
@@ -758,68 +791,68 @@ export class TimelineManager {
                 const dx = this.seededRandom(seed) * range * 2 - range;
                 const dy = this.seededRandom(seed + 1) * range * 2 - range;
                 const dr = (this.seededRandom(seed + 2) * rotRange * 2 - rotRange) * Math.PI / 180;
-                this.instantKeyframe(entity, 'positionX', 0, baseX + dx);
-                this.instantKeyframe(entity, 'positionY', 0, baseY + dy);
-                this.instantKeyframe(entity, 'rotation', 0, baseRot + dr);
-                this.instantKeyframe(entity, 'positionX', appearStartTime, baseX + dx);
-                this.instantKeyframe(entity, 'positionY', appearStartTime, baseY + dy);
-                this.instantKeyframe(entity, 'rotation', appearStartTime, baseRot + dr);
-                this.addTween(entity, 'positionX', appearStartTime, appearEndTime, baseX + dx, baseX, ease);
-                this.addTween(entity, 'positionY', appearStartTime, appearEndTime, baseY + dy, baseY, ease);
-                this.addTween(entity, 'rotation', appearStartTime, appearEndTime, baseRot + dr, baseRot, ease);
+                this.addKeyframe(entity, 'positionX', 0, baseX + dx, null);
+                this.addKeyframe(entity, 'positionY', 0, baseY + dy, null);
+                this.addKeyframe(entity, 'rotation', 0, baseRot + dr, null);
+                this.addKeyframe(entity, 'positionX', appearStartTime, baseX + dx, null);
+                this.addKeyframe(entity, 'positionY', appearStartTime, baseY + dy, null);
+                this.addKeyframe(entity, 'rotation', appearStartTime, baseRot + dr, null);
+                this.pushTween(entity, 'positionX', appearStartTime, appearEndTime, baseX, ease);
+                this.pushTween(entity, 'positionY', appearStartTime, appearEndTime, baseY, ease);
+                this.pushTween(entity, 'rotation', appearStartTime, appearEndTime, baseRot, ease);
                 break;
             }
             case 'Grow': {
-                this.instantKeyframe(entity, 'scaleX', 0, 0);
-                this.instantKeyframe(entity, 'scaleY', 0, 0);
-                this.instantKeyframe(entity, 'scaleX', appearStartTime, 0);
-                this.instantKeyframe(entity, 'scaleY', appearStartTime, 0);
-                this.addTween(entity, 'scaleX', appearStartTime, appearEndTime, 0, baseSX, ease);
-                this.addTween(entity, 'scaleY', appearStartTime, appearEndTime, 0, baseSY, ease);
+                this.addKeyframe(entity, 'scaleX', 0, 0, null);
+                this.addKeyframe(entity, 'scaleY', 0, 0, null);
+                this.addKeyframe(entity, 'scaleX', appearStartTime, 0, null);
+                this.addKeyframe(entity, 'scaleY', appearStartTime, 0, null);
+                this.pushTween(entity, 'scaleX', appearStartTime, appearEndTime, baseSX, ease);
+                this.pushTween(entity, 'scaleY', appearStartTime, appearEndTime, baseSY, ease);
                 break;
             }
             case 'Grow_Spin': {
-                this.instantKeyframe(entity, 'scaleX', 0, 0);
-                this.instantKeyframe(entity, 'scaleY', 0, 0);
-                this.instantKeyframe(entity, 'rotation', 0, baseRot - Math.PI);
-                this.instantKeyframe(entity, 'scaleX', appearStartTime, 0);
-                this.instantKeyframe(entity, 'scaleY', appearStartTime, 0);
-                this.instantKeyframe(entity, 'rotation', appearStartTime, baseRot - Math.PI);
-                this.addTween(entity, 'scaleX', appearStartTime, appearEndTime, 0, baseSX, ease);
-                this.addTween(entity, 'scaleY', appearStartTime, appearEndTime, 0, baseSY, ease);
-                this.addTween(entity, 'rotation', appearStartTime, appearEndTime, baseRot - Math.PI, baseRot, ease);
+                this.addKeyframe(entity, 'scaleX', 0, 0, null);
+                this.addKeyframe(entity, 'scaleY', 0, 0, null);
+                this.addKeyframe(entity, 'rotation', 0, baseRot - Math.PI, null);
+                this.addKeyframe(entity, 'scaleX', appearStartTime, 0, null);
+                this.addKeyframe(entity, 'scaleY', appearStartTime, 0, null);
+                this.addKeyframe(entity, 'rotation', appearStartTime, baseRot - Math.PI, null);
+                this.pushTween(entity, 'scaleX', appearStartTime, appearEndTime, baseSX, ease);
+                this.pushTween(entity, 'scaleY', appearStartTime, appearEndTime, baseSY, ease);
+                this.pushTween(entity, 'rotation', appearStartTime, appearEndTime, baseRot, ease);
                 break;
             }
             case 'Fade': {
-                this.instantKeyframe(entity, 'opacity', 0, 0);
-                this.instantKeyframe(entity, 'opacity', appearStartTime, 0);
-                this.addTween(entity, 'opacity', appearStartTime, appearEndTime, 0, baseOp, ease);
+                this.addKeyframe(entity, 'opacity', 0, 0, null);
+                this.addKeyframe(entity, 'opacity', appearStartTime, 0, null);
+                this.pushTween(entity, 'opacity', appearStartTime, appearEndTime, baseOp, ease);
                 break;
             }
             case 'Drop': {
                 const scaleDur = appearDuration / 8;
-                this.instantKeyframe(entity, 'positionY', 0, baseY + 8);
-                this.instantKeyframe(entity, 'scaleX', 0, 0);
-                this.instantKeyframe(entity, 'scaleY', 0, 0);
-                this.instantKeyframe(entity, 'positionY', appearStartTime, baseY + 8);
-                this.instantKeyframe(entity, 'scaleX', appearStartTime, 0);
-                this.instantKeyframe(entity, 'scaleY', appearStartTime, 0);
-                this.addTween(entity, 'positionY', appearStartTime, appearEndTime, baseY + 8, baseY, ease);
-                this.addTween(entity, 'scaleX', appearStartTime, appearStartTime + scaleDur, 0, baseSX, 'Quad.easeOut');
-                this.addTween(entity, 'scaleY', appearStartTime, appearStartTime + scaleDur, 0, baseSY, 'Quad.easeOut');
+                this.addKeyframe(entity, 'positionY', 0, baseY + 8, null);
+                this.addKeyframe(entity, 'scaleX', 0, 0, null);
+                this.addKeyframe(entity, 'scaleY', 0, 0, null);
+                this.addKeyframe(entity, 'positionY', appearStartTime, baseY + 8, null);
+                this.addKeyframe(entity, 'scaleX', appearStartTime, 0, null);
+                this.addKeyframe(entity, 'scaleY', appearStartTime, 0, null);
+                this.pushTween(entity, 'positionY', appearStartTime, appearEndTime, baseY, ease);
+                this.pushTween(entity, 'scaleX', appearStartTime, appearStartTime + scaleDur, baseSX, 'Quad.easeOut');
+                this.pushTween(entity, 'scaleY', appearStartTime, appearStartTime + scaleDur, baseSY, 'Quad.easeOut');
                 break;
             }
             case 'Rise': {
                 const scaleDur = appearDuration / 8;
-                this.instantKeyframe(entity, 'positionY', 0, baseY - 8);
-                this.instantKeyframe(entity, 'scaleX', 0, 0);
-                this.instantKeyframe(entity, 'scaleY', 0, 0);
-                this.instantKeyframe(entity, 'positionY', appearStartTime, baseY - 8);
-                this.instantKeyframe(entity, 'scaleX', appearStartTime, 0);
-                this.instantKeyframe(entity, 'scaleY', appearStartTime, 0);
-                this.addTween(entity, 'positionY', appearStartTime, appearEndTime, baseY - 8, baseY, ease);
-                this.addTween(entity, 'scaleX', appearStartTime, appearStartTime + scaleDur, 0, baseSX, 'Quad.easeOut');
-                this.addTween(entity, 'scaleY', appearStartTime, appearStartTime + scaleDur, 0, baseSY, 'Quad.easeOut');
+                this.addKeyframe(entity, 'positionY', 0, baseY - 8, null);
+                this.addKeyframe(entity, 'scaleX', 0, 0, null);
+                this.addKeyframe(entity, 'scaleY', 0, 0, null);
+                this.addKeyframe(entity, 'positionY', appearStartTime, baseY - 8, null);
+                this.addKeyframe(entity, 'scaleX', appearStartTime, 0, null);
+                this.addKeyframe(entity, 'scaleY', appearStartTime, 0, null);
+                this.pushTween(entity, 'positionY', appearStartTime, appearEndTime, baseY, ease);
+                this.pushTween(entity, 'scaleX', appearStartTime, appearStartTime + scaleDur, baseSX, 'Quad.easeOut');
+                this.pushTween(entity, 'scaleY', appearStartTime, appearStartTime + scaleDur, baseSY, 'Quad.easeOut');
                 break;
             }
         }

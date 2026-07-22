@@ -142,12 +142,12 @@ export class MoveTrackManager {
 
     public fastForwardTo(targetTime: number): void {
         this.currentTime = targetTime;
-        const tiles = this.tiles;
-        if (!tiles) return;
+        if (!this.tiles) return;
 
-        for (const [tileId, mesh] of tiles) {
-            const tileIdx = parseInt(tileId, 10);
-            if (isNaN(tileIdx)) continue;
+        const animatedIndices = this.timelineManager.getAnimatedTileIndices();
+        for (const tileIdx of animatedIndices) {
+            const mesh = this.tiles.get(tileIdx.toString());
+            if (!mesh) continue;
             const dirty = this.timelineManager.applyToTileMesh(tileIdx, mesh, targetTime);
             if (dirty && this.tileTransformChanged) {
                 this.tileTransformChanged(
