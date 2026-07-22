@@ -105,6 +105,10 @@ src/
 - 桌面（可通过 Electron 等打包）
 - 移动端（响应式设计）
 
+## 字体说明
+
+本项目的谱面信息指示器及 FPS 显示采用 **Google Sans Code** 字体。该字体自 2025 年 11 月起以 **SIL Open Font License 1.1** 开放下载，详见 [Google Fonts 官方公告](https://fonts.google.com/)。
+
 ## 许可证
 
 本项目遵循相应的开源许可证。
