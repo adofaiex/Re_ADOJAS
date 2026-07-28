@@ -20,6 +20,18 @@ function parseDecoColor(hex: string | undefined, fallback: string = 'ffffff'): [
     return ['#' + raw.slice(0, 6), 1];
 }
 
+/**
+ * Parse event.visible matching official ADOFAI logic:
+ *   - Key missing → true
+ *   - Bool value → use it
+ *   - Non-bool (string, etc.) → true
+ */
+function parseEventVisible(val: any): boolean {
+    if (val === undefined || val === null) return true;
+    if (typeof val === 'boolean') return val;
+    return true;
+}
+
 function getBlendMode(mode: DecorationBlendMode): number {
     switch (mode) {
         case DecorationBlendMode.Additive: return AdditiveBlending;
@@ -205,6 +217,7 @@ const defaultDecorationConfig: DecorationConfig = {
 class DecorationInstance {
     public config: DecorationConfig;
     public container: Group;
+    public visualGroup: Group;
     public mesh: Mesh | null = null;
     public sprite: Sprite | null = null;
     public objectGroup: Group | null = null;
@@ -236,6 +249,10 @@ class DecorationInstance {
         this.config = { ...defaultDecorationConfig, ...config };
         this.container = new Group();
         this.container.name = `decoration_${this.config.tag || 'untagged'}`;
+        this.visualGroup = new Group();
+        this.visualGroup.name = 'visual';
+        this.visualGroup.position.set(this.config.pivotOffset[0], this.config.pivotOffset[1], 0);
+        this.container.add(this.visualGroup);
         this.currentScale.set(this.config.scale[0] / 100, this.config.scale[1] / 100);
         this.currentRotation = this.config.rotation + this.config.rotationOffset;
         // Parse color with alpha: #RRGGBBAA → color=#RRGGBB, alpha extracted
@@ -248,7 +265,7 @@ class DecorationInstance {
         this.originalVisible = this.config.visible;
         const c = this.config;
         this._isStaticWorld = c.relativeTo === DecPlacementType.Tile
-            && c.parallax[0] === 100 && c.parallax[1] === 100
+            && c.parallax[0] === 0 && c.parallax[1] === 0
             && c.parallaxOffset[0] === 0 && c.parallaxOffset[1] === 0
             && !c.lockRotation && !c.lockScale
             && !c.stickToFloor;
@@ -258,11 +275,12 @@ class DecorationInstance {
         this.clearVisual();
         if (this.config.decorationType === DecorationType.Object) return;
         const blend = getBlendMode(this.config.blendMode);
+        this.visualGroup.position.set(this.config.pivotOffset[0], this.config.pivotOffset[1], 0);
         if (!texture) {
             const g = new PlaneGeometry(1, 1);
             const m = new MeshBasicMaterial({ color: 0xff00ff, transparent: true, opacity: 0.5, side: DoubleSide, depthWrite: false });
             this.mesh = new Mesh(g, m);
-            this.container.add(this.mesh);
+            this.visualGroup.add(this.mesh);
         } else {
             if (this.config.imageSmoothing) {
                 texture.magFilter = LinearFilter;
@@ -274,57 +292,55 @@ class DecorationInstance {
                 blending: blend as Blending, depthWrite: false,
             });
             this.sprite = new Sprite(mat);
-            let ar = 1;
-            if (texture.image?.width && texture.image?.height) ar = texture.image.width / texture.image.height;
-            ar >= 1
-                ? this.sprite.scale.set(ar, 1, 1)
-                : this.sprite.scale.set(1, 1 / ar, 1);
+            const texW = texture.image?.width || 100;
+            const texH = texture.image?.height || 100;
+            this.sprite.scale.set(texW / 100, texH / 100, 1);
             this.sprite.center.set(0.5, 0.5);
             if (this.config.maskingType === MaskingType.Mask) {
                 (this.sprite as any).mask = null;
                 this.sprite.visible = false;
             }
-            this.container.add(this.sprite);
+            this.visualGroup.add(this.sprite);
         }
         this.updateTransform();
     }
 
     private clearVisual(): void {
-        if (this.mesh) { this.container.remove(this.mesh); this.mesh.geometry.dispose(); (this.mesh.material as Material).dispose(); this.mesh = null; }
-        if (this.sprite) { this.container.remove(this.sprite); (this.sprite.material as Material).dispose(); this.sprite = null; }
-        if (this.objectGroup) { this.container.remove(this.objectGroup); this.objectGroup = null; }
+        if (this.mesh) { this.visualGroup.remove(this.mesh); this.mesh.geometry.dispose(); (this.mesh.material as Material).dispose(); this.mesh = null; }
+        if (this.sprite) { this.visualGroup.remove(this.sprite); (this.sprite.material as Material).dispose(); this.sprite = null; }
+        if (this.objectGroup) { this.visualGroup.remove(this.objectGroup); this.objectGroup = null; }
         if (this.iconSprite) { (this.iconSprite.material as Material).dispose(); this.iconSprite = null; }
     }
 
     public updateTransform(): void {
         this.container.rotation.z = this.currentRotation * Math.PI / 180;
         const d = this.config.depth;
-        // C# sorting layers: "Default" (d<0, in front of tiles) | "Floor" (tiles) | "Bg" (d>=0, behind tiles)
-        // sortingOrder = -depth. Tiles use renderOrder = -index (range 0 to -N).
-        // Camera at z=10, looking toward -z. Larger z = closer to camera = in front.
+        // Unity sorting: depth<0 → layer "Default" (in front of tiles), sortingOrder = -d
+        // depth>=0 → layer "Bg" (behind tiles), sortingOrder = -d
+        // Tiles sit on Default with sortingOrder = -index (≤0).
+        // Camera at z=10 looking -Z; larger z = closer to camera.
         let z: number, ro: number;
         if (d < 0) {
-            z = 0.1 - d * 0.1;       // d=-5 → z=0.6 (closer to camera, in front of tiles)
-            ro = -d;                   // positive, in front of tile renderOrders (≤0)
+            z = 0.1 - d * 0.1;
+            ro = -d;
         } else if (d === 0) {
-            z = -0.1;                  // slightly behind tiles
-            ro = -10000;               // well behind all tiles
+            z = -0.01;
+            ro = 0;
         } else {
-            z = -0.1 - d * 0.1;       // d=5 → z=-0.6 (further from camera, behind tiles)
-            ro = -10000 - d;           // even more behind
+            z = -0.01 - d * 0.1;
+            ro = -d;
         }
         this.container.position.set(this.currentPosition.x, this.currentPosition.y, z);
         if (this.mesh) { this.mesh.renderOrder = ro; (this.mesh.material as MeshBasicMaterial).color.copy(this.currentColor); (this.mesh.material as MeshBasicMaterial).opacity = this.currentOpacity; }
-        if (this.sprite) { this.sprite.renderOrder = ro; (this.sprite.material as SpriteMaterial).opacity = this.currentOpacity; }
+        if (this.sprite) { this.sprite.renderOrder = ro; (this.sprite.material as SpriteMaterial).color.copy(this.currentColor); (this.sprite.material as SpriteMaterial).opacity = this.currentOpacity; }
         if (this.iconSprite) { this.iconSprite.renderOrder = ro + 1; (this.iconSprite.material as SpriteMaterial).opacity = this.currentOpacity; }
     }
 
     public updatePosition(camPos: Vector3, camRot: number, camZoom: number, tilePositions?: Map<number, Vector3>, adoZoom?: number): void {
         if (this._isStaticWorld) {
-            const px = camPos.x - this.pivotPos.x;
-            const py = camPos.y - this.pivotPos.y;
-            this.container.position.x = this.currentPosition.x + px;
-            this.container.position.y = this.currentPosition.y + py;
+            // Parallax=0 → world-fixed: no camera displacement
+            this.container.position.x = this.currentPosition.x;
+            this.container.position.y = this.currentPosition.y;
             let camScaleMul = 1;
             if (this.config.lockScale && adoZoom && adoZoom > 0) camScaleMul = 100 / adoZoom;
             camScaleMul *= this.config.scaleMultiplier;
@@ -346,9 +362,8 @@ class DecorationInstance {
             floorScaleMul = ts.z;
         }
         const totalScaleMul = camScaleMul * floorScaleMul;
-        // Parallax offset multiplier: WebADOFAI = scaleMultiplier/100 * (lockScale ? camScaleRaw : 1)
-        const camScaleRaw = (this.config.lockScale && adoZoom && adoZoom > 0) ? 100 / adoZoom : 1;
-        const parallaxOffsetMul = (this.config.scaleMultiplier / 100) * camScaleRaw;
+        // Parallax offset multiplier: official = decoration.camScaleMultiplier
+        const parallaxOffsetMul = camScaleMul;
         const ct = this.config.relativeTo;
         let posX = 0, posY = 0;
         if (ct === DecPlacementType.Camera || ct === DecPlacementType.CameraAspect) {
@@ -416,7 +431,7 @@ class DecorationInstance {
             if (pox !== undefined) this.currentParallaxOffset.x = pox;
             const poy = tm.sample(kv, 'parallaxOffsetY', now);
             if (poy !== undefined) this.currentParallaxOffset.y = poy;
-            if (px !== undefined || py !== undefined) this.updateTransform();
+            this.updateTransform();
             return;
         }
         if (!this.config.animating) return;
@@ -479,7 +494,7 @@ class DecorationInstance {
     }
 
     public startAnimation(targetValues: Partial<DecorationConfig>, duration: number, ease: string, startTime: number, movementType: DecPlacementType): void {
-        if (this.config.animating) { this.applyAnimationTarget(); this.config.animating = false; }
+        if (this.config.animating) { this.config.animating = false; }
         const animStartPos = movementType === DecPlacementType.LastPosition ? this.currentPosition : this.startPos;
         this.config.animationStartValues = {
             positionOffset: [this.currentPosition.x, this.currentPosition.y],
@@ -566,6 +581,8 @@ export class DecorationManager {
         this.levelData = levelData;
         this.tileStartTimes = tileStartTimes;
         this.tileBPM = tileBPM;
+        const s = levelData.settings || {};
+        this.tileSize = s.tileShape === 'Long' ? 1.5 : 1.0;
         this.container = new Group();
         this.container.name = 'DecorationContainer';
         this.scene.add(this.container);
@@ -816,7 +833,7 @@ export class DecorationManager {
             opacity: event.opacity !== undefined ? event.opacity : 100,
             lockScale: event.lockScale === true,
             lockRotation: event.lockRotation === true,
-            visible: event.visible !== undefined ? event.visible : true,
+            visible: parseEventVisible(event.visible),
             scaleMultiplier: event.scaleMultiplier !== undefined ? event.scaleMultiplier : 1,
             stickToFloor: event.stickToFloor === true,
             floor,
@@ -976,7 +993,7 @@ export class DecorationManager {
             g.add(bubble);
         }
         deco.objectGroup = g;
-        deco.container.add(g);
+        deco.visualGroup.add(g);
         return true;
     }
 
@@ -1198,38 +1215,43 @@ export class DecorationManager {
         // indexed in a static grid; iterate all of them.
         for (let i = 0; i < dLen; i++) {
             const d = this._dynamicDecos[i];
-            d.updatePosition(cameraPosition, cameraRotation, camZ, tilePositions, adoZoom);
-            if (!d.config.visible) continue;
-            const p = d.container.position;
-            const csx = Math.abs(d.container.scale.x);
-            const csy = Math.abs(d.container.scale.y);
-            let hw = csx, hh = csy;
-            if (d.sprite) {
-                hw = Math.abs(d.sprite.scale.x) * csx * 0.5;
-                hh = Math.abs(d.sprite.scale.y) * csy * 0.5;
-            } else if (d.mesh) {
-                hw = hh = Math.max(csx, csy) * 0.5;
+            if (d.config.visible !== false) {
+                d.updatePosition(cameraPosition, cameraRotation, camZ, tilePositions, adoZoom);
+                const p = d.container.position;
+                const csx = Math.abs(d.container.scale.x);
+                const csy = Math.abs(d.container.scale.y);
+                let hw = csx, hh = csy;
+                if (d.sprite) {
+                    hw = Math.abs(d.sprite.scale.x) * csx * 0.5;
+                    hh = Math.abs(d.sprite.scale.y) * csy * 0.5;
+                } else if (d.mesh) {
+                    hw = hh = Math.max(csx, csy) * 0.5;
+                }
+                const vis = p.x + hw >= minX && p.x - hw <= maxX && p.y + hh >= minY && p.y - hh <= maxY;
+                if (d.container.visible !== vis) d.container.visible = vis;
+            } else {
+                if (d.container.visible) d.container.visible = false;
             }
-            const vis = p.x + hw >= minX && p.x - hw <= maxX && p.y + hh >= minY && p.y - hh <= maxY;
-            if (d.container.visible !== vis) d.container.visible = vis;
         }
         for (let i = 0; i < visibleStatic.length; i++) {
             const d = visibleStatic[i];
-            d.updatePosition(cameraPosition, cameraRotation, camZ, tilePositions, adoZoom);
-            if (!d.config.visible) continue;
-            const p = d.container.position;
-            // Compute decoration half-size from sprite/mesh scale * container scale
-            const csx = Math.abs(d.container.scale.x);
-            const csy = Math.abs(d.container.scale.y);
-            let hw = csx, hh = csy;
-            if (d.sprite) {
-                hw = Math.abs(d.sprite.scale.x) * csx * 0.5;
-                hh = Math.abs(d.sprite.scale.y) * csy * 0.5;
-            } else if (d.mesh) {
-                hw = hh = Math.max(csx, csy) * 0.5;
+            if (d.config.visible !== false) {
+                d.updatePosition(cameraPosition, cameraRotation, camZ, tilePositions, adoZoom);
+                const p = d.container.position;
+                const csx = Math.abs(d.container.scale.x);
+                const csy = Math.abs(d.container.scale.y);
+                let hw = csx, hh = csy;
+                if (d.sprite) {
+                    hw = Math.abs(d.sprite.scale.x) * csx * 0.5;
+                    hh = Math.abs(d.sprite.scale.y) * csy * 0.5;
+                } else if (d.mesh) {
+                    hw = hh = Math.max(csx, csy) * 0.5;
+                }
+                const vis = p.x + hw >= minX && p.x - hw <= maxX && p.y + hh >= minY && p.y - hh <= maxY;
+                if (d.container.visible !== vis) d.container.visible = vis;
+            } else {
+                if (d.container.visible) d.container.visible = false;
             }
-            const vis = p.x + hw >= minX && p.x - hw <= maxX && p.y + hh >= minY && p.y - hh <= maxY;
-            if (d.container.visible !== vis) d.container.visible = vis;
         }
     }
 
@@ -1288,8 +1310,8 @@ export class DecorationManager {
                         deco.config.depth = event.depth;
                     }
                     if (event.visible !== undefined && !event.disabled?.visible) {
-                        deco.config.visible = event.visible;
-                        deco.container.visible = event.visible;
+                        deco.config.visible = parseEventVisible(event.visible);
+                        deco.container.visible = deco.config.visible;
                     }
                     if (event.pivotOffset !== undefined && !event.disabled?.pivotOffset) {
                         const piv = this.parseVec2(event.pivotOffset, [0, 0]);
@@ -1342,7 +1364,8 @@ export class DecorationManager {
                     target.depth = event.depth;
                 }
                 if (event.visible !== undefined && !event.disabled?.visible) {
-                    target.visible = event.visible;
+                    deco.config.visible = parseEventVisible(event.visible);
+                    deco.container.visible = deco.config.visible;
                 }
                 if (event.decorationImage !== undefined && !event.disabled?.decorationImage) {
                     target.decorationImage = event.decorationImage;
