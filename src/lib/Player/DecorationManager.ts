@@ -5,6 +5,7 @@ import createTrackMesh from '../Geo/mesh_reserve';
 import { isEventActive } from './EventUtils';
 import { getIconTexture, getIconTextureForCustomFloor, createIconSprite } from './IconLoader';
 import { debugLog } from './DebugLog';
+import { DecorationInstancedRenderer, DecoInstanceSlot } from './DecorationInstancedRenderer';
 
 /**
  * Parse ADOFAI hex color which may be #RRGGBBAA (8-digit with alpha).
@@ -54,6 +55,7 @@ export enum DecPlacementType {
     Tile = 'Tile',
     Camera = 'Camera',
     CameraAspect = 'CameraAspect',
+    Global = 'Global',
     LastPosition = 'LastPosition',
     RedPlanet = 'RedPlanet',
     BluePlanet = 'BluePlanet',
@@ -231,7 +233,13 @@ class DecorationInstance {
     public currentOpacity: number = 1;
     public currentParallax: Vector2 = new Vector2(1, 1);
     public currentParallaxOffset: Vector2 = new Vector2();
+    /** Base texture size in world units (texW/100, texH/100) for culling */
+    public baseSizeX = 1;
+    public baseSizeY = 1;
+    public instSlot: DecoInstanceSlot | null = null;
+    private instRenderer: DecorationInstancedRenderer | null = null;
     private originalVisible: boolean = true;
+    private originalDepth: number = 0;
     private animStartR = 0;
     private animStartG = 0;
     private animStartB = 0;
@@ -240,9 +248,17 @@ class DecorationInstance {
     private animTargetB = 0;
     private animHasColor = false;
     private _isStaticWorld = true;
+    private _instVisible = true;
 
     public get isStaticWorld(): boolean {
         return this._isStaticWorld;
+    }
+    public get isInstanced(): boolean {
+        return this.instSlot !== null;
+    }
+
+    public setInstancedRenderer(r: DecorationInstancedRenderer | null): void {
+        this.instRenderer = r;
     }
 
     constructor(config: Partial<DecorationConfig>) {
@@ -263,8 +279,11 @@ class DecorationInstance {
         this.currentParallax.set(this.config.parallax[0] / 100, this.config.parallax[1] / 100);
         this.currentParallaxOffset.set(this.config.parallaxOffset[0], this.config.parallaxOffset[1]);
         this.originalVisible = this.config.visible;
+        this.originalDepth = this.config.depth;
         const c = this.config;
-        this._isStaticWorld = c.relativeTo === DecPlacementType.Tile
+        this._isStaticWorld = (c.relativeTo === DecPlacementType.Tile
+            || c.relativeTo === DecPlacementType.Global
+            || c.relativeTo === DecPlacementType.LastPosition)
             && c.parallax[0] === 0 && c.parallax[1] === 0
             && c.parallaxOffset[0] === 0 && c.parallaxOffset[1] === 0
             && !c.lockRotation && !c.lockScale
@@ -281,62 +300,114 @@ class DecorationInstance {
             const m = new MeshBasicMaterial({ color: 0xff00ff, transparent: true, opacity: 0.5, side: DoubleSide, depthWrite: false });
             this.mesh = new Mesh(g, m);
             this.visualGroup.add(this.mesh);
+            this.baseSizeX = 1;
+            this.baseSizeY = 1;
         } else {
             if (this.config.imageSmoothing) {
                 texture.magFilter = LinearFilter;
                 texture.minFilter = LinearMipMapLinearFilter;
                 texture.needsUpdate = true;
             }
-            const mat = new SpriteMaterial({
-                map: texture, color: 0xffffff, transparent: true, opacity: this.currentOpacity,
-                blending: blend as Blending, depthWrite: false,
-            });
-            this.sprite = new Sprite(mat);
             const texW = texture.image?.width || 100;
             const texH = texture.image?.height || 100;
-            this.sprite.scale.set(texW / 100, texH / 100, 1);
-            this.sprite.center.set(0.5, 0.5);
-            if (this.config.maskingType === MaskingType.Mask) {
-                (this.sprite as any).mask = null;
-                this.sprite.visible = false;
+            this.baseSizeX = texW / 100;
+            this.baseSizeY = texH / 100;
+            // Instanced path for Image/Text (no masking). Mask decorations keep Sprite fallback.
+            // Batch by texture+blend+renderOrder(-depth) so layering matches original sprites.
+            const canInstance = this.instRenderer
+                && this.config.maskingType === MaskingType.None
+                && (this.config.decorationType === DecorationType.Image
+                    || this.config.decorationType === DecorationType.Text);
+            if (canInstance) {
+                const [, ro] = this.depthZ();
+                this.instSlot = this.instRenderer!.alloc(
+                    texture, blend as Blending, ro,
+                    this.baseSizeX, this.baseSizeY,
+                    this.config.pivotOffset[0], this.config.pivotOffset[1],
+                );
+            } else {
+                const mat = new SpriteMaterial({
+                    map: texture, color: 0xffffff, transparent: true, opacity: this.currentOpacity,
+                    blending: blend as Blending, depthWrite: false,
+                });
+                this.sprite = new Sprite(mat);
+                this.sprite.scale.set(this.baseSizeX, this.baseSizeY, 1);
+                this.sprite.center.set(0.5, 0.5);
+                if (this.config.maskingType === MaskingType.Mask) {
+                    (this.sprite as any).mask = null;
+                    this.sprite.visible = false;
+                }
+                this.visualGroup.add(this.sprite);
             }
-            this.visualGroup.add(this.sprite);
         }
         this.updateTransform();
     }
 
     private clearVisual(): void {
+        if (this.instSlot && this.instRenderer) {
+            this.instRenderer.free(this.instSlot);
+            this.instSlot = null;
+        }
         if (this.mesh) { this.visualGroup.remove(this.mesh); this.mesh.geometry.dispose(); (this.mesh.material as Material).dispose(); this.mesh = null; }
         if (this.sprite) { this.visualGroup.remove(this.sprite); (this.sprite.material as Material).dispose(); this.sprite = null; }
         if (this.objectGroup) { this.visualGroup.remove(this.objectGroup); this.objectGroup = null; }
         if (this.iconSprite) { (this.iconSprite.material as Material).dispose(); this.iconSprite = null; }
     }
 
+    /** Compute depth z + renderOrder from config.depth.
+     *  ADOFAI sorting layers: Bg (depth>=0) < Floor (tiles) < Default (depth<0).
+     *  Tiles use renderOrder = -tileIndex (0 to -N+1).
+     *  Background decorations get renderOrder << -N so they render behind ALL tiles.
+     *  Foreground decorations (depth<0) get positive renderOrder, on top of tiles. */
+    private depthZ(): [number, number] {
+        const d = this.config.depth;
+        if (d < 0) return [0.1 - d * 0.1, -d];
+        return [-0.01 - d * 0.1, -d - 2000];
+    }
+
+    private syncInstance(): void {
+        if (!this.instSlot || !this.instRenderer) return;
+        const [z, ro] = this.depthZ();
+        // depth changed (e.g. MoveDecorations) → migrate to correct renderOrder batch
+        if (this.instSlot.renderOrder !== ro) {
+            this.instSlot = this.instRenderer.ensureLayer(this.instSlot, ro);
+        }
+        const p = this.container.position;
+        // container.scale is set by updatePosition to currentScale * multipliers.
+        // Before the first updatePosition it stays at (1,1,1) — fall back to currentScale.
+        let sx = this.container.scale.x;
+        let sy = this.container.scale.y;
+        if (sx === 1 && sy === 1 && (this.currentScale.x !== 1 || this.currentScale.y !== 1)) {
+            sx = this.currentScale.x;
+            sy = this.currentScale.y;
+        }
+        const rot = this.container.rotation.z;
+        const vis = this._instVisible && (this.config.visible !== false);
+        this.instRenderer.write(
+            this.instSlot,
+            p.x, p.y, z,
+            rot,
+            sx, sy,
+            this.currentColor,
+            this.currentOpacity,
+            vis,
+        );
+    }
+
     public updateTransform(): void {
         this.container.rotation.z = this.currentRotation * Math.PI / 180;
-        const d = this.config.depth;
-        // Unity sorting: depth<0 → layer "Default" (in front of tiles), sortingOrder = -d
-        // depth>=0 → layer "Bg" (behind tiles), sortingOrder = -d
-        // Tiles sit on Default with sortingOrder = -index (≤0).
-        // Camera at z=10 looking -Z; larger z = closer to camera.
-        let z: number, ro: number;
-        if (d < 0) {
-            z = 0.1 - d * 0.1;
-            ro = -d;
-        } else if (d === 0) {
-            z = -0.01;
-            ro = 0;
-        } else {
-            z = -0.01 - d * 0.1;
-            ro = -d;
-        }
+        const [z, ro] = this.depthZ();
         this.container.position.set(this.currentPosition.x, this.currentPosition.y, z);
+        if (this.instSlot) {
+            this.syncInstance();
+            return;
+        }
         if (this.mesh) { this.mesh.renderOrder = ro; (this.mesh.material as MeshBasicMaterial).color.copy(this.currentColor); (this.mesh.material as MeshBasicMaterial).opacity = this.currentOpacity; }
         if (this.sprite) { this.sprite.renderOrder = ro; (this.sprite.material as SpriteMaterial).color.copy(this.currentColor); (this.sprite.material as SpriteMaterial).opacity = this.currentOpacity; }
         if (this.iconSprite) { this.iconSprite.renderOrder = ro + 1; (this.iconSprite.material as SpriteMaterial).opacity = this.currentOpacity; }
     }
 
-    public updatePosition(camPos: Vector3, camRot: number, camZoom: number, tilePositions?: Map<number, Vector3>, adoZoom?: number): void {
+    public updatePosition(camPos: Vector3, camRot: number, camZoom: number, tilePositions?: Map<number, { x: number; y: number; z: number; rotation: number }>, adoZoom?: number): void {
         if (this._isStaticWorld) {
             // Parallax=0 → world-fixed: no camera displacement
             this.container.position.x = this.currentPosition.x;
@@ -350,6 +421,7 @@ class DecorationInstance {
                 floorScaleMul = ts.z;
             }
             this.container.scale.set(this.currentScale.x * camScaleMul * floorScaleMul, this.currentScale.y * camScaleMul * floorScaleMul, 1);
+            if (this.instSlot) this.syncInstance();
             return;
         }
         // camScaleMultiplier: C# = orthoSize * 0.2 / (camZoom / 100), orthoSize=5 → 100/adoZoom
@@ -399,39 +471,53 @@ class DecorationInstance {
             const py = (camPos.y - this.pivotPos.y) * this.currentParallax.y;
             posX = this.currentPosition.x + px + this.currentParallaxOffset.x * parallaxOffsetMul + followOffsetX + stickOffsetX;
             posY = this.currentPosition.y + py + this.currentParallaxOffset.y * parallaxOffsetMul + followOffsetY + stickOffsetY;
-            this.container.rotation.z = this.config.lockRotation
-                ? camRot + this.currentRotation * Math.PI / 180
-                : this.currentRotation * Math.PI / 180;
+            // Rotation: official priority: stickToFloor (floor rot) > lockRotation (camera rot) > none
+            if (this.config.stickToFloor && tilePositions?.has(this.config.floor ?? -1)) {
+                const tp = tilePositions!.get(this.config.floor ?? -1)!;
+                this.container.rotation.z = tp.rotation + this.currentRotation * Math.PI / 180;
+            } else if (this.config.lockRotation) {
+                this.container.rotation.z = camRot + this.currentRotation * Math.PI / 180;
+            } else {
+                this.container.rotation.z = this.currentRotation * Math.PI / 180;
+            }
         }
         this.container.position.x = posX;
         this.container.position.y = posY;
         this.container.scale.set(this.currentScale.x * totalScaleMul, this.currentScale.y * totalScaleMul, 1);
+        if (this.instSlot) this.syncInstance();
+    }
+
+    public setCulledVisible(vis: boolean): void {
+        if (this.container.visible !== vis) this.container.visible = vis;
+        this._instVisible = vis;
+        if (this.instSlot) this.syncInstance();
     }
 
     public updateAnimation(now: number, tm?: TimelineManager): void {
         if (tm && this.config.tag) {
             const kv = `deco:${this.config.tag}`;
+            let dirty = false;
             const px = tm.sample(kv, 'positionX', now);
-            if (px !== undefined) { this.currentPosition.x = px; this.pivotPos.x = px; }
+            if (px !== undefined) { this.currentPosition.x = px; this.pivotPos.x = px; dirty = true; }
             const py = tm.sample(kv, 'positionY', now);
-            if (py !== undefined) { this.currentPosition.y = py; this.pivotPos.y = py; }
+            if (py !== undefined) { this.currentPosition.y = py; this.pivotPos.y = py; dirty = true; }
             const rot = tm.sample(kv, 'rotation', now);
-            if (rot !== undefined) this.currentRotation = this.config.rotation + rot;
+            if (rot !== undefined) { this.currentRotation = this.config.rotation + rot; dirty = true; }
             const sx = tm.sample(kv, 'scaleX', now);
-            if (sx !== undefined) this.currentScale.x = sx;
+            if (sx !== undefined) { this.currentScale.x = sx; dirty = true; }
             const sy = tm.sample(kv, 'scaleY', now);
-            if (sy !== undefined) this.currentScale.y = sy;
+            if (sy !== undefined) { this.currentScale.y = sy; dirty = true; }
             const op = tm.sample(kv, 'opacity', now);
-            if (op !== undefined) this.currentOpacity = op;
+            if (op !== undefined) { this.currentOpacity = op; dirty = true; }
             const parX = tm.sample(kv, 'parallaxX', now);
-            if (parX !== undefined) this.currentParallax.x = parX;
+            if (parX !== undefined) { this.currentParallax.x = parX; dirty = true; }
             const parY = tm.sample(kv, 'parallaxY', now);
-            if (parY !== undefined) this.currentParallax.y = parY;
+            if (parY !== undefined) { this.currentParallax.y = parY; dirty = true; }
             const pox = tm.sample(kv, 'parallaxOffsetX', now);
-            if (pox !== undefined) this.currentParallaxOffset.x = pox;
+            if (pox !== undefined) { this.currentParallaxOffset.x = pox; dirty = true; }
             const poy = tm.sample(kv, 'parallaxOffsetY', now);
-            if (poy !== undefined) this.currentParallaxOffset.y = poy;
-            this.updateTransform();
+            if (poy !== undefined) { this.currentParallaxOffset.y = poy; dirty = true; }
+            if (dirty) this.updateTransform();
             return;
         }
         if (!this.config.animating) return;
@@ -472,6 +558,11 @@ class DecorationInstance {
             this.currentParallaxOffset.x = s.parallaxOffset[0] + (t.parallaxOffset[0] - s.parallaxOffset[0]) * ep;
             this.currentParallaxOffset.y = s.parallaxOffset[1] + (t.parallaxOffset[1] - s.parallaxOffset[1]) * ep;
         }
+        if (s.pivotOffset && t.pivotOffset) {
+            const px = s.pivotOffset[0] + (t.pivotOffset[0] - s.pivotOffset[0]) * ep;
+            const py = s.pivotOffset[1] + (t.pivotOffset[1] - s.pivotOffset[1]) * ep;
+            this.visualGroup.position.set(px, py, 0);
+        }
         this.updateTransform();
     }
 
@@ -488,8 +579,13 @@ class DecorationInstance {
         }
         if (t.parallax) { this.currentParallax.x = t.parallax[0] / 100; this.currentParallax.y = t.parallax[1] / 100; }
         if (t.parallaxOffset) { this.currentParallaxOffset.set(t.parallaxOffset[0], t.parallaxOffset[1]); }
+        if (t.pivotOffset) {
+            this.config.pivotOffset = [t.pivotOffset[0], t.pivotOffset[1]];
+            this.visualGroup.position.set(t.pivotOffset[0], t.pivotOffset[1], 0);
+            if (this.instSlot && this.instRenderer) this.instRenderer.updatePivot(this.instSlot, t.pivotOffset[0], t.pivotOffset[1]);
+        }
         if (t.depth !== undefined) this.config.depth = t.depth;
-        if (t.visible !== undefined) { this.config.visible = t.visible; this.container.visible = t.visible; }
+        if (t.visible !== undefined) { this.config.visible = t.visible; this.container.visible = t.visible; this._instVisible = t.visible; }
         this.updateTransform();
     }
 
@@ -504,6 +600,7 @@ class DecorationInstance {
             opacity: this.currentOpacity * 100,
             parallax: [this.currentParallax.x * 100, this.currentParallax.y * 100],
             parallaxOffset: [this.currentParallaxOffset.x, this.currentParallaxOffset.y],
+            pivotOffset: [this.config.pivotOffset[0], this.config.pivotOffset[1]],
         };
         this.config.animationTargetValues = { ...targetValues };
         if (targetValues.positionOffset) {
@@ -532,6 +629,7 @@ class DecorationInstance {
         this.config.animationStartValues = {};
         this.config.animationTargetValues = {};
         this.config.visible = this.originalVisible;
+        this.config.depth = this.originalDepth;
         this.currentScale.set(this.config.scale[0] / 100, this.config.scale[1] / 100);
         this.currentRotation = this.config.rotation + this.config.rotationOffset;
         const [colorHex, colorAlpha] = parseDecoColor(this.config.color);
@@ -541,7 +639,12 @@ class DecorationInstance {
         this.pivotPos.copy(this.startPos);
         this.currentParallax.set(this.config.parallax[0] / 100, this.config.parallax[1] / 100);
         this.currentParallaxOffset.set(this.config.parallaxOffset[0], this.config.parallaxOffset[1]);
+        this.visualGroup.position.set(this.config.pivotOffset[0], this.config.pivotOffset[1], 0);
+        if (this.instSlot && this.instRenderer) {
+            this.instRenderer.updatePivot(this.instSlot, this.config.pivotOffset[0], this.config.pivotOffset[1]);
+        }
         this.container.visible = this.originalVisible;
+        this._instVisible = this.originalVisible;
         this.updateTransform();
     }
 
@@ -575,6 +678,9 @@ export class DecorationManager {
     private _staticGrid: DecorationSpatialGrid = new DecorationSpatialGrid(32);
     private _staticDecos: DecorationInstance[] = [];
     private _dynamicDecos: DecorationInstance[] = [];
+    private _tilePositions: Map<number, { x: number; y: number; z: number; rotation: number }> = new Map();
+    private _visibleStaticSet: Set<DecorationInstance> = new Set();
+    private instancedRenderer: DecorationInstancedRenderer;
 
     constructor(scene: Scene, levelData: any, tileStartTimes: number[], tileBPM: number[]) {
         this.scene = scene;
@@ -587,6 +693,7 @@ export class DecorationManager {
         this.container.name = 'DecorationContainer';
         this.scene.add(this.container);
         this.textureLoader = new TextureLoader();
+        this.instancedRenderer = new DecorationInstancedRenderer(this.container);
     }
 
     public init(): void {
@@ -707,7 +814,7 @@ export class DecorationManager {
                 }
 
                 if (event.rotationOffset !== undefined && !event.disabled?.rotationOffset) {
-                    const rotOff = event.rotationOffset * Math.PI / 180;
+                    const rotOff = event.rotationOffset; // keep in degrees to match keyframe unit
                     const startRot = tm.sample(kv, 'rotation', eventTime) ?? state.rot;
                     const endRot = isLastPos ? startRot + rotOff : rotOff;
                     if (hasDur) {
@@ -792,7 +899,7 @@ export class DecorationManager {
         } else if (relativeTo === DecPlacementType.Camera || relativeTo === DecPlacementType.CameraAspect) {
             pos.x /= ts; pos.y /= ts;
         }
-        // RedPlanet/BluePlanet/GreenPlanet: startPos = position * tileSize (no floor offset)
+        // Global/LastPosition/Planet: startPos = position * tileSize (no floor offset)
         return pos;
     }
 
@@ -853,6 +960,7 @@ export class DecorationManager {
         };
 
         const deco = new DecorationInstance(config);
+        deco.setInstancedRenderer(this.instancedRenderer);
         deco.startPos.copy(this.computeStartPos(rawPos, relativeTo, floor));
         deco.pivotPos.copy(deco.startPos);
         deco.currentPosition.copy(deco.startPos);
@@ -1001,20 +1109,25 @@ export class DecorationManager {
         const cached = this.textureCache.get(filename);
         if (cached) { deco.setupVisual(cached); return true; }
         const url = this.findImageUrl(filename);
-        if (url && !this.texturesLoading.has(filename)) {
-            this.texturesLoading.add(filename);
-            this.textureLoader.load(url, (tex) => {
-                tex.colorSpace = SRGBColorSpace;
-                this.textureCache.set(filename, tex);
-                this.texturesLoaded.add(filename);
-                this.texturesLoading.delete(filename);
-                deco.setupVisual(tex);
-            }, undefined, () => {
-                this.texturesLoading.delete(filename);
-            });
-            return true;
-        }
-        return false;
+        if (!url) return false;
+        // Already loading: keep deco alive; callback will setupVisual for all matching
+        if (this.texturesLoading.has(filename)) return true;
+        this.texturesLoading.add(filename);
+        this.textureLoader.load(url, (tex) => {
+            tex.colorSpace = SRGBColorSpace;
+            this.textureCache.set(filename, tex);
+            this.texturesLoaded.add(filename);
+            this.texturesLoading.delete(filename);
+            const apply = (d: DecorationInstance) => {
+                if (d.config.decorationImage === filename && !d.isInstanced && !d.sprite && !d.mesh) d.setupVisual(tex);
+            };
+            for (const d of this.decoList) apply(d);
+            if (!this.decoList.includes(deco)) apply(deco);
+            this.instancedRenderer.flush();
+        }, undefined, () => {
+            this.texturesLoading.delete(filename);
+        });
+        return true;
     }
 
     private findImageUrl(filename: string): string | undefined {
@@ -1030,8 +1143,10 @@ export class DecorationManager {
     }
 
     private registerDecoration(deco: DecorationInstance): void {
+        deco.setInstancedRenderer(this.instancedRenderer);
         this.decorations.set(deco.config.id!, deco);
         this.decoList.push(deco);
+        // Keep logical container for position tracking; instanced visuals live on InstancedMesh
         this.container.add(deco.container);
         if (deco.isStaticWorld) {
             this._staticDecos.push(deco);
@@ -1147,9 +1262,10 @@ export class DecorationManager {
         this.decoList.forEach(d => {
             if (d.config.decorationImage) {
                 const tex = this.textureCache.get(d.config.decorationImage);
-                if (tex) { d.setupVisual(tex); }
+                if (tex && !d.isInstanced && !d.sprite && !d.mesh) { d.setupVisual(tex); }
             }
         });
+        this.instancedRenderer.flush();
         return this.texturesLoaded.size;
     }
 
@@ -1175,19 +1291,29 @@ export class DecorationManager {
             }
         }
         // Build current tile positions for stickToFloor/followPlanet decorations
-        let tilePositions: Map<number, Vector3> | undefined;
-        if (needsTilePositions && timelineManager) {
-            tilePositions = new Map();
-            for (const [idx, pos] of timelineManager.sampleAllPosition(now)) {
-                const sx = timelineManager.sample(`tile:${idx}`, 'scaleX', now);
-                const sy = timelineManager.sample(`tile:${idx}`, 'scaleY', now);
-                const scale = sx !== undefined ? ((sx + (sy ?? sx)) / 2) : 1;
-                tilePositions.set(idx, new Vector3(pos.x, pos.y, scale));
+        let needsStickRotation = false;
+        if (needsTilePositions) {
+            for (let i = 0; i < len; i++) {
+                const d = list[i];
+                if (d.config.stickToFloor) { needsStickRotation = true; break; }
             }
         }
-        if (!camMoved && animCount === 0 && !tilePositions) return;
+        const tilePositions = needsTilePositions && timelineManager ? this._tilePositions : undefined;
+        if (tilePositions) {
+            this._tilePositions.clear();
+            for (const [idx, pos] of timelineManager!.sampleAllPosition(now)) {
+                const sx = timelineManager!.sample(`tile:${idx}`, 'scaleX', now);
+                const sy = timelineManager!.sample(`tile:${idx}`, 'scaleY', now);
+                const scale = sx !== undefined ? ((sx + (sy ?? sx)) / 2) : 1;
+                const rot = needsStickRotation ? (timelineManager!.sample(`tile:${idx}`, 'rotation', now) ?? 0) : 0;
+                this._tilePositions.set(idx, { x: pos.x, y: pos.y, z: scale, rotation: rot });
+            }
+        }
+        if (!camMoved && animCount === 0 && !tilePositions) {
+            this.instancedRenderer.flush();
+            return;
+        }
         // Compute camera visible area in world units
-        // Three.js ortho camera: top=4, bottom=-4, baseFrustumSize=8
         const viewH = 8 / camZ;
         const aspect = (typeof window !== 'undefined' && window.innerWidth > 0) ? window.innerWidth / window.innerHeight : 16 / 9;
         const halfW = viewH * aspect * 0.5;
@@ -1195,24 +1321,18 @@ export class DecorationManager {
         const minX = camX - halfW, maxX = camX + halfW;
         const minY = camY - halfH, maxY = camY + halfH;
         // Spatial grid: query static decorations in cells overlapping the camera view.
-        // Static decorations have a fixed world position (startPos), so we can cull
-        // them purely by cell membership before computing their container transform.
         const visibleStatic = this._staticGrid.query(minX, minY, maxX, maxY);
-        const visibleStaticSet = new Set<DecorationInstance>(visibleStatic);
-        // Always include any static decoration currently being animated / keyframed,
-        // even if its animated position has drifted outside the original cell.
+        this._visibleStaticSet.clear();
+        for (let i = 0; i < visibleStatic.length; i++) this._visibleStaticSet.add(visibleStatic[i]);
+        // Include animated statics even if outside original cell
         const sLen = this._staticDecos.length;
         for (let i = 0; i < sLen; i++) {
             const d = this._staticDecos[i];
-            if ((d.config.animating || (this._timelineManager && d.config.tag)) && !visibleStaticSet.has(d)) {
+            if ((d.config.animating || (this._timelineManager && d.config.tag)) && !this._visibleStaticSet.has(d)) {
                 visibleStatic.push(d);
-                visibleStaticSet.add(d);
             }
         }
         const dLen = this._dynamicDecos.length;
-        // Dynamic decorations (parallax / locked / stickToFloor / planet follow) have a
-        // world position that depends on camera or planet state and cannot be safely
-        // indexed in a static grid; iterate all of them.
         for (let i = 0; i < dLen; i++) {
             const d = this._dynamicDecos[i];
             if (d.config.visible !== false) {
@@ -1220,17 +1340,22 @@ export class DecorationManager {
                 const p = d.container.position;
                 const csx = Math.abs(d.container.scale.x);
                 const csy = Math.abs(d.container.scale.y);
-                let hw = csx, hh = csy;
-                if (d.sprite) {
+                let hw: number, hh: number;
+                if (d.isInstanced) {
+                    hw = d.baseSizeX * csx * 0.5;
+                    hh = d.baseSizeY * csy * 0.5;
+                } else if (d.sprite) {
                     hw = Math.abs(d.sprite.scale.x) * csx * 0.5;
                     hh = Math.abs(d.sprite.scale.y) * csy * 0.5;
                 } else if (d.mesh) {
                     hw = hh = Math.max(csx, csy) * 0.5;
+                } else {
+                    hw = csx * 0.5; hh = csy * 0.5;
                 }
                 const vis = p.x + hw >= minX && p.x - hw <= maxX && p.y + hh >= minY && p.y - hh <= maxY;
-                if (d.container.visible !== vis) d.container.visible = vis;
+                d.setCulledVisible(vis);
             } else {
-                if (d.container.visible) d.container.visible = false;
+                d.setCulledVisible(false);
             }
         }
         for (let i = 0; i < visibleStatic.length; i++) {
@@ -1240,19 +1365,25 @@ export class DecorationManager {
                 const p = d.container.position;
                 const csx = Math.abs(d.container.scale.x);
                 const csy = Math.abs(d.container.scale.y);
-                let hw = csx, hh = csy;
-                if (d.sprite) {
+                let hw: number, hh: number;
+                if (d.isInstanced) {
+                    hw = d.baseSizeX * csx * 0.5;
+                    hh = d.baseSizeY * csy * 0.5;
+                } else if (d.sprite) {
                     hw = Math.abs(d.sprite.scale.x) * csx * 0.5;
                     hh = Math.abs(d.sprite.scale.y) * csy * 0.5;
                 } else if (d.mesh) {
                     hw = hh = Math.max(csx, csy) * 0.5;
+                } else {
+                    hw = csx * 0.5; hh = csy * 0.5;
                 }
                 const vis = p.x + hw >= minX && p.x - hw <= maxX && p.y + hh >= minY && p.y - hh <= maxY;
-                if (d.container.visible !== vis) d.container.visible = vis;
+                d.setCulledVisible(vis);
             } else {
-                if (d.container.visible) d.container.visible = false;
+                d.setCulledVisible(false);
             }
         }
+        this.instancedRenderer.flush();
     }
 
     private processEvents(now: number): void {
@@ -1311,11 +1442,14 @@ export class DecorationManager {
                     }
                     if (event.visible !== undefined && !event.disabled?.visible) {
                         deco.config.visible = parseEventVisible(event.visible);
-                        deco.container.visible = deco.config.visible;
+                        deco.setCulledVisible(deco.config.visible);
                     }
                     if (event.pivotOffset !== undefined && !event.disabled?.pivotOffset) {
                         const piv = this.parseVec2(event.pivotOffset, [0, 0]);
                         deco.config.pivotOffset = [piv[0] * ts, piv[1] * ts];
+                        deco.visualGroup.position.set(deco.config.pivotOffset[0], deco.config.pivotOffset[1], 0);
+                        if (deco.instSlot) this.instancedRenderer.updatePivot(deco.instSlot, deco.config.pivotOffset[0], deco.config.pivotOffset[1]);
+                        deco.updateTransform();
                     }
                     // Color: only apply if no keyframe (color not yet in keyframe system)
                     if (event.color !== undefined && !event.disabled?.color) {
@@ -1323,6 +1457,7 @@ export class DecorationManager {
                         const [hex, alpha] = parseDecoColor(event.color);
                         deco.currentColor.set(hex);
                         deco.currentOpacity = (deco.config.opacity / 100) * alpha;
+                        deco.updateTransform();
                     }
                 }
                 continue;
@@ -1365,7 +1500,7 @@ export class DecorationManager {
                 }
                 if (event.visible !== undefined && !event.disabled?.visible) {
                     deco.config.visible = parseEventVisible(event.visible);
-                    deco.container.visible = deco.config.visible;
+                    deco.setCulledVisible(deco.config.visible);
                 }
                 if (event.decorationImage !== undefined && !event.disabled?.decorationImage) {
                     target.decorationImage = event.decorationImage;
@@ -1472,6 +1607,8 @@ export class DecorationManager {
         this.floorGeoCache.clear();
         this.decorationEventsTimeline = [];
         this.lastDecorationEventIndex = -1;
+        this._tilePositions.clear();
+        this.instancedRenderer.clear();
         if (hadDecos) {
             debugLog('[DecorationManager] Spatial grid Patch: disabled (cleared)');
         }
@@ -1479,6 +1616,7 @@ export class DecorationManager {
 
     public dispose(): void {
         this.clear();
+        this.instancedRenderer.dispose();
         this.textureCache.forEach(t => t.dispose());
         this.textureCache.clear();
         if (this.placeholderTexture) { this.placeholderTexture.dispose(); this.placeholderTexture = null; }
@@ -1494,6 +1632,9 @@ export class DecorationManager {
             case 'CameraAspect':
             case DecPlacementType.CameraAspect:
                 return DecPlacementType.CameraAspect;
+            case 'Global':
+            case DecPlacementType.Global:
+                return DecPlacementType.Global;
             case 'LastPosition':
             case DecPlacementType.LastPosition:
                 return DecPlacementType.LastPosition;

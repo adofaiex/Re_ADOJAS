@@ -192,7 +192,10 @@ export class Player implements IPlayer {
   constructor(levelData: Level, rendererType: 'webgl' | 'webgpu' = 'webgpu') {
     this.rendererType = rendererType;
     this.levelData = levelData;
-    
+
+    // Convert pathData to tiles if needed
+    this.convertPathDataToTiles();
+
     // Initialize camera from settings
     this.cameraController = new CameraController(levelData, [], []);
     this.cameraController.resetCameraState();
@@ -3778,6 +3781,58 @@ export class Player implements IPlayer {
             this.lastVideoSeekTime = now;
         }
     }
+  }
+
+  /**
+   * Convert pathData string to tiles and angleData arrays.
+   * pathData is a string where each character encodes a tile's direction angle.
+   * Maps characters to degrees using ADOFAI's convention (R=0°, U=90°, L=180°, D=270°, etc.).
+   */
+  private convertPathDataToTiles(): void {
+    const pathData: string | undefined = (this.levelData as any).pathData;
+    if (!pathData || typeof pathData !== 'string' || !pathData.length) return;
+    if ((this.levelData.tiles?.length ?? 0) > 0) return;
+
+    const angleMap: Record<string, number> = {
+      'R': 0,   'E': 45,  'U': 90,  'Q': 135, 'L': 180,
+      'Z': 225, 'D': 270, 'C': 315,
+      'T': 60,  'G': 120, 'F': 240, 'B': 300,
+      'J': 30,  'H': 150, 'N': 210, 'M': 330,
+      'p': 15,  'o': 75,  'q': 105, 'W': 165,
+      'x': 195, 'V': 255, 'Y': 285, 'A': 345,
+    };
+    const relativeMap: Record<string, number> = {
+      't': 60,   'y': 300,
+      'h': 120,  'j': -120,
+      '5': 72,   '6': -72,
+      '7': 52,   '8': -52,
+      '9': -30,
+    };
+
+    const angleData: number[] = [];
+    for (const ch of pathData) {
+      const abs = angleMap[ch];
+      if (abs !== undefined) {
+        angleData.push(abs);
+      } else if (ch === '!') {
+        angleData.push(999);
+      } else {
+        const prev = angleData.length > 0 ? angleData[angleData.length - 1] : 0;
+        const rel = relativeMap[ch];
+        angleData.push(rel !== undefined ? prev + rel : prev);
+      }
+    }
+
+    const tiles: any[] = [];
+    for (let i = 0; i < angleData.length; i++) {
+      tiles.push({
+        angle: 180,
+        direction: angleData[i],
+      });
+    }
+
+    (this.levelData as any).tiles = tiles;
+    (this.levelData as any).angleData = angleData;
   }
 
   /**

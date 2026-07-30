@@ -149,6 +149,7 @@ export function useFileHandlers({
 
         // Initialize player and synthesize hitsounds
         await initializePlayerWithHitsounds(loadedLevel, isVeryLargeFile)
+        await adojasAutoLoad(loadedLevel)
 
         setLoadingProgress(100)
         window.showNotification?.("success", t("editor.notifications.loadSuccess"))
