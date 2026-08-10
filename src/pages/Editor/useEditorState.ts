@@ -7,6 +7,7 @@ import * as ADOFAI from "adofai"
 import { Parsers, Structure } from "adofai"
 import { Player } from "@/lib/Player/Player"
 import { ILevelData } from "@/lib/Player/types"
+import type { Difficulty } from "@/lib/Player/Judge"
 import example from "@/lib/example/line.json"
 import { useFileHandlers } from "./useFileHandlers"
 
@@ -46,6 +47,8 @@ export function useEditorState() {
   // 手动游玩状态
   const [manualMode, setManualMode] = useState(false)
   const [noFail, setNoFail] = useState(false)
+  // 判定难度：宽（Lenient）/ 标（Normal）/ 严（Strict）
+  const [judgeDifficulty, setJudgeDifficultyState] = useState<Difficulty>("Normal")
   const audioInputRef = useRef<HTMLInputElement>(null)
   const videoInputRef = useRef<HTMLInputElement>(null)
   const decorationInputRef = useRef<HTMLInputElement>(null)
@@ -208,6 +211,12 @@ export function useEditorState() {
       previewerRef.current?.setManualNoFail(next)
       return next
     })
+  }, [])
+
+  // 切换判定难度
+  const handleSetJudgeDifficulty = useCallback((d: Difficulty): void => {
+    setJudgeDifficultyState(d)
+    previewerRef.current?.setJudgeDifficulty(d)
   }, [])
 
   // 返回主页处理
@@ -447,6 +456,7 @@ export function useEditorState() {
     playModeActive,
     manualMode,
     noFail,
+    judgeDifficulty,
     settingsOpen,
     showExitDialog,
     showVideoImportDialog,
@@ -468,6 +478,7 @@ export function useEditorState() {
     handleExitPlayMode,
     handleToggleManualPlay,
     handleToggleNoFail,
+    handleSetJudgeDifficulty,
     handleBackClick,
     handleConfirmExit,
     handleCancelExit,

@@ -32,6 +32,7 @@ export default function EditorPage() {
     playModeActive,
     manualMode,
     noFail,
+    judgeDifficulty,
     settingsOpen,
     showExitDialog,
     showVideoImportDialog,
@@ -53,6 +54,7 @@ export default function EditorPage() {
     handleExitPlayMode,
     handleToggleManualPlay,
     handleToggleNoFail,
+    handleSetJudgeDifficulty,
     handleBackClick,
     handleConfirmExit,
     handleCancelExit,
@@ -396,6 +398,26 @@ export default function EditorPage() {
 
       {/* Full-screen Canvas Area */}
       <div ref={containerRef} className="absolute inset-0">
+        {/* 判定难度切换（右下角）：宽 / 标 / 严 */}
+        <div className="absolute bottom-4 right-4 flex items-center gap-1">
+          {([
+            ["宽", "Lenient"],
+            ["标", "Normal"],
+            ["严", "Strict"],
+          ] as Array<[string, "Lenient" | "Normal" | "Strict"]>).map(([label, val]) => (
+            <button
+              key={val}
+              className={`px-2.5 h-7 rounded-full text-xs font-medium transition-colors shadow-lg backdrop-blur-sm ${isDark
+                  ? judgeDifficulty === val ? "bg-blue-600/90 text-white" : "bg-slate-700/70 text-slate-300 hover:bg-slate-600"
+                  : judgeDifficulty === val ? "bg-blue-500/90 text-white" : "bg-white/80 text-slate-600 hover:bg-slate-100"
+                }`}
+              title={`判定难度：${label}`}
+              onClick={() => handleSetJudgeDifficulty(val)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
         <div className="absolute bottom-4 left-4 flex items-end gap-4">
           <div className="relative inline-block">
             <button

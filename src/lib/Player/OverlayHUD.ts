@@ -11,6 +11,8 @@ export class OverlayHUD {
   private tileBPM: number[] = [];
   private tileStartTimes: number[] = [];
   private countdownText: string = '';
+  private marginCounts: number[] = [];
+  private xAcc: number = 1;
 
   private readonly p = 8;
   private readonly lh = 18;
@@ -48,6 +50,8 @@ export class OverlayHUD {
     tileStartTimes: number[];
     totalTiles: number;
     countdownText?: string;
+    marginCounts?: number[];
+    xAcc?: number;
   }): void {
     this.fps = stats.fps;
     this.time = stats.time;
@@ -56,6 +60,8 @@ export class OverlayHUD {
     this.tileBPM = stats.tileBPM;
     this.tileStartTimes = stats.tileStartTimes;
     this.countdownText = stats.countdownText ?? '';
+    this.marginCounts = stats.marginCounts ?? [];
+    this.xAcc = stats.xAcc ?? 1;
   }
 
   render(): void {
@@ -71,8 +77,43 @@ export class OverlayHUD {
     this.drawFPS(ctx, w, h);
     this.drawPanel(ctx, w, h, this.computeText());
     this.drawCountdown(ctx, w, h);
+    this.drawMargins(ctx, w, h);
 
     ctx.restore();
+  }
+
+  /** 判定统计：各判定等级计数 + XAcc（官方配色）。 */
+  private drawMargins(ctx: CanvasRenderingContext2D, w: number, h: number): void {
+    const c = this.marginCounts;
+    if (!c || c.length === 0) return;
+    const labels: Array<[string, number, string]> = [
+      ['Perfect', 3, '#5dde5d'],
+      ['EPerfect', 2, '#d4d648'],
+      ['LPerfect', 4, '#d4d648'],
+      ['Early', 1, '#ff4545'],
+      ['Late', 5, '#ff4545'],
+      ['TooEarly', 0, '#cf3030'],
+      ['TooLate', 6, '#cf3030'],
+      ['Miss', 8, '#b77ef2'],
+    ];
+    const px = 16;
+    let py = 64 + 18 + 10;
+    const lh = 16;
+    ctx.font = `${12}px "Google Sans Code"`;
+    ctx.textBaseline = 'top';
+    for (const [label, idx, color] of labels) {
+      const count = c[idx] ?? 0;
+      if (count === 0) continue;
+      ctx.fillStyle = color;
+      ctx.fillText(`${label}  ${count}`, px, py);
+      py += lh;
+    }
+    // XAcc
+    py += 4;
+    const xacc = (this.xAcc * 100).toFixed(2);
+    ctx.fillStyle = '#ffd700';
+    ctx.font = `bold ${14}px "Google Sans Code"`;
+    ctx.fillText(`XAcc  ${xacc}%`, px, py);
   }
 
   /** 倒计时居中大字（3 / 2 / 1 / GO）。 */
