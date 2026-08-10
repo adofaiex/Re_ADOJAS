@@ -81,19 +81,16 @@ export class MoveTrackManager {
         const time = this.currentTime;
         const newActiveIndices = new Set<number>();
 
-        for (const tileIdx of this.timelineManager.getAllTileIndices()) {
+        // Only process tiles whose animation time window covers the current time.
+        // Uses pre-computed sorted ranges + binary search — avoids iterating ALL
+        // animated tiles (which can be 180k+ for levels with global appear animations).
+        const activeNow = this.timelineManager.getActiveTileIndicesAt(time);
+        for (let ai = 0; ai < activeNow.length; ai++) {
+            const tileIdx = activeNow[ai];
             const mesh = this.tiles.get(tileIdx.toString());
             if (!mesh) continue;
 
-            const isActive = this.timelineManager.isTileActive(tileIdx, time);
-
-            if (isActive) {
-                newActiveIndices.add(tileIdx);
-            } else if (this.pendingFinalApply.has(tileIdx)) {
-                this.pendingFinalApply.delete(tileIdx);
-            } else {
-                continue;
-            }
+            newActiveIndices.add(tileIdx);
 
             const dirty = this.timelineManager.applyToTileMesh(tileIdx, mesh, time);
             if (dirty && this.tileTransformChanged) {

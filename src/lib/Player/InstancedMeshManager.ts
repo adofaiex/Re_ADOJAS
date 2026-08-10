@@ -27,6 +27,7 @@ interface ShapeInstancedMesh {
     instancedMesh: InstancedMesh;
     dummy: Object3D;
     instances: Map<number, number>; // tileIndex -> instanceIndex
+    tileIdsByPosition: number[]; // reverse lookup: bufferPosition -> tileIndex (avoids rebuilding Map on every insert)
     maxInstances: number;
     instanceCount: number;
     minTileIndex: number; // lowest tile ID in this mesh → highest render priority
@@ -186,6 +187,7 @@ export class InstancedMeshManager {
             instancedMesh,
             dummy,
             instances: new Map(),
+            tileIdsByPosition: [],
             maxInstances,
             instanceCount: 0,
             minTileIndex: Infinity // will be set when first tile is added
@@ -265,27 +267,23 @@ export class InstancedMeshManager {
 
             const { instancedMesh } = shapeData;
             const count = shapeData.instanceCount;
+            const idsByPos = shapeData.tileIdsByPosition;
 
-            // Find correct insertion position to maintain DESCENDING tile ID order
-            // In the instance buffer, higher tile IDs must come first (lower index)
-            // so they draw first/behind with depthWrite=false.
-            // Lower tile IDs come later (higher index) → draw last/on top.
+            // Find insertion position to maintain DESCENDING tile ID order using binary search
+            // tileIdsByPosition is sorted descending: [highestId, ..., lowestId]
+            // New tile with higher ID goes earlier (lower index)
             let insertAt = count;
             if (count > 0) {
-                // Build position→tileID map for existing instances
-                const posToTile = new Map<number, number>();
-                for (const [tIdx, instIdx] of shapeData.instances) {
-                    posToTile.set(instIdx, tIdx);
-                }
-                // Find first position where the tile ID is lower than the new tile
-                // The new tile (with higher ID) should go BEFORE that position
-                for (let pos = 0; pos < count; pos++) {
-                    const tIdxAtPos = posToTile.get(pos);
-                    if (tIdxAtPos !== undefined && tIdxAtPos < tileIndex) {
-                        insertAt = pos;
-                        break;
+                let lo = 0, hi = count;
+                while (lo < hi) {
+                    const mid = (lo + hi) >>> 1;
+                    if (idsByPos[mid] < tileIndex) {
+                        hi = mid;
+                    } else {
+                        lo = mid + 1;
                     }
                 }
+                insertAt = lo;
             }
 
             // Shift instances at positions >= insertAt up by 1
@@ -325,9 +323,13 @@ export class InstancedMeshManager {
                         shapeData.instances.set(tIdx, instIdx + 1);
                     }
                 }
+                // Shift tileIdsByPosition
+                for (let i = count - 1; i >= insertAt; i--) {
+                    idsByPos[i + 1] = idsByPos[i];
+                }
             }
 
-            instanceIndex = insertAt;
+            idsByPos[insertAt] = tileIndex;
             shapeData.instances.set(tileIndex, insertAt);
             shapeData.instanceCount++;
             shapeData.instancedMesh.count = shapeData.instanceCount;
@@ -338,6 +340,7 @@ export class InstancedMeshManager {
                 // Lower tile ID = higher layer = rendered last = higher renderOrder
                 shapeData.instancedMesh.renderOrder = -tileIndex;
             }
+            instanceIndex = insertAt;
         }
 
         // Update instance transform and color

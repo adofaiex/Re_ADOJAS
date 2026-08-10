@@ -10,6 +10,7 @@ export class OverlayHUD {
   private totalTiles: number = 0;
   private tileBPM: number[] = [];
   private tileStartTimes: number[] = [];
+  private countdownText: string = '';
 
   private readonly p = 8;
   private readonly lh = 18;
@@ -46,6 +47,7 @@ export class OverlayHUD {
     tileBPM: number[];
     tileStartTimes: number[];
     totalTiles: number;
+    countdownText?: string;
   }): void {
     this.fps = stats.fps;
     this.time = stats.time;
@@ -53,6 +55,7 @@ export class OverlayHUD {
     this.totalTiles = stats.totalTiles;
     this.tileBPM = stats.tileBPM;
     this.tileStartTimes = stats.tileStartTimes;
+    this.countdownText = stats.countdownText ?? '';
   }
 
   render(): void {
@@ -67,8 +70,26 @@ export class OverlayHUD {
 
     this.drawFPS(ctx, w, h);
     this.drawPanel(ctx, w, h, this.computeText());
+    this.drawCountdown(ctx, w, h);
 
     ctx.restore();
+  }
+
+  /** 倒计时居中大字（3 / 2 / 1 / GO）。 */
+  private drawCountdown(ctx: CanvasRenderingContext2D, w: number, h: number): void {
+    if (!this.countdownText) return;
+    const isGo = this.countdownText === 'GO';
+    const fontPx = Math.min(w, h) * (isGo ? 0.15 : 0.22);
+    ctx.font = `bold ${fontPx}px "Google Sans Code", sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.lineJoin = 'round';
+    ctx.lineWidth = fontPx * 0.12;
+    ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+    ctx.strokeText(this.countdownText, w / 2, h / 2);
+    ctx.fillStyle = isGo ? '#5dde5d' : '#ffffff';
+    ctx.fillText(this.countdownText, w / 2, h / 2);
+    ctx.textAlign = 'start';
   }
 
   private drawFPS(ctx: CanvasRenderingContext2D, w: number, h: number): void {

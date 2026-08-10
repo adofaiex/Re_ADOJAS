@@ -42,6 +42,10 @@ export function useEditorState() {
   // Refs
   const containerRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+
+  // 手动游玩状态
+  const [manualMode, setManualMode] = useState(false)
+  const [noFail, setNoFail] = useState(false)
   const audioInputRef = useRef<HTMLInputElement>(null)
   const videoInputRef = useRef<HTMLInputElement>(null)
   const decorationInputRef = useRef<HTMLInputElement>(null)
@@ -92,8 +96,13 @@ export function useEditorState() {
       player.setDisableTrackTexture(settings.disableTrackTexture)
       
       previewerRef.current = player
+      // 重新应用手动模式状态到新 Player
+      if (manualMode) {
+        player.enableManualPlay({ noFail })
+      }
+      player.setJudgmentI18n?.({ t })
     }
-  }, [settings])
+  }, [settings, manualMode, noFail, t])
 
   // File handlers
   const { handleFileLoad, handleAudioLoad, handleVideoLoad, handleDecorationLoad, handleBGImageLoad, handleExport } = useFileHandlers({
@@ -153,6 +162,12 @@ export function useEditorState() {
       console.log('[EditorState] calling startPlay with:', startTime)
       previewerRef.current?.startPlay(startTime)
     } else if (playMode === "play") {
+      const p = previewerRef.current
+      // 死亡后按播放键 → 完整重开
+      if (p?.isManualDead?.()) {
+        p.retryManual()
+        return
+      }
       setPlayMode("pause")
       previewerRef.current?.pausePlay()
     } else if (playMode === "pause") {
@@ -166,6 +181,33 @@ export function useEditorState() {
     setPlayMode("preview")
     setPlayModeActive(false)
     previewerRef.current?.stopPlay()
+  }, [])
+
+  // 切换手动游玩模式（关闭自动播放，用键盘判定）
+  const handleToggleManualPlay = useCallback((): void => {
+    setManualMode(prev => {
+      const next = !prev
+      const p = previewerRef.current
+      if (p) {
+        if (next) {
+          p.enableManualPlay({ noFail })
+          window.showNotification?.("success", "手动模式已开启")
+        } else {
+          p.disableManualPlay()
+          window.showNotification?.("success", "自动模式已恢复")
+        }
+      }
+      return next
+    })
+  }, [noFail])
+
+  // 切换不死模式
+  const handleToggleNoFail = useCallback((): void => {
+    setNoFail(prev => {
+      const next = !prev
+      previewerRef.current?.setManualNoFail(next)
+      return next
+    })
   }, [])
 
   // 返回主页处理
@@ -329,6 +371,11 @@ export function useEditorState() {
             await player.preSynthesizeHitsoundsWithProgress()
             
             previewerRef.current = player
+            // 重新应用手动模式状态到新 Player
+            if (manualMode) {
+              player.enableManualPlay({ noFail })
+            }
+            player.setJudgmentI18n?.({ t })
           }
           window.showNotification?.("success", t("editor.notifications.loadSuccess"))
         })
@@ -398,6 +445,8 @@ export function useEditorState() {
     themeReady,
     playMode,
     playModeActive,
+    manualMode,
+    noFail,
     settingsOpen,
     showExitDialog,
     showVideoImportDialog,
@@ -417,6 +466,8 @@ export function useEditorState() {
     handleExport,
     handlePlay,
     handleExitPlayMode,
+    handleToggleManualPlay,
+    handleToggleNoFail,
     handleBackClick,
     handleConfirmExit,
     handleCancelExit,

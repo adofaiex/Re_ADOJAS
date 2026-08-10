@@ -19,6 +19,12 @@ import { InstancedMeshManager } from './InstancedMeshManager';
 import { TimelineManager } from './TimelineManager';
 import { OverlayHUD } from './OverlayHUD';
 import { ShakeScreen } from './effects/ShakeScreen';
+import { AsyncInputManager } from './AsyncInputManager';
+import {
+  HitMargin, HitMarginLimit, Difficulty,
+  getHitMarginFromErrorMs, isValidHit, getBoundariesInDeg, JudgeConfig,
+} from './Judge';
+import { JudgmentDisplay } from './JudgmentDisplay';
 import { getIconTypeIndex, getTwirlTexture, getSetSpeedTexture, IconType, buildIconAtlas, ICON_ATLAS_SIZE } from './IconLoader';
 import Stats from 'three/examples/jsm/libs/stats.module.js';
 import type { Bloom, Flash, RecolorTrack } from 'adofai/event';
@@ -46,6 +52,10 @@ export class Player implements IPlayer {
   // Tile Management
   private tiles: Map<string, Mesh> = new Map();
   private visibleTiles: Set<string> = new Set();
+  private tileVisible: boolean[] = []; // O(1) visibility check, avoids string allocation
+  private lastAnimatedCamRotation: number = 0; // cache to skip sprite rotation when camera hasn't turned
+  private _tilesWithAnimatedColor: Set<number> | null = null; // tiles needing per-frame color update
+  private _anyTileHasSpriteChild: boolean = false; // fast skip when no tiles have sprites
   private tileLimit: number = 0;
 
   // Dirty tile tracking: only tiles in this set get their instanced mesh synced.
@@ -69,7 +79,26 @@ export class Player implements IPlayer {
   private audioDriftSynced: boolean = false; // whether one-shot audio sync has been applied
   
   private currentTileIndex: number = 0;
-  
+
+  // ── 手动游玩 / 判定 ──────────────────────────────────────────
+  private manualMode: boolean = false;          // false = autoplay
+  private noFail: boolean = false;              // 不死模式（miss 自动矫正）
+  private songPitch: number = 1;                // 歌曲 pitch（默认 1）
+  private judgeDifficulty: Difficulty = 'Normal';
+  private judgeSpeedTrial: number = 1;
+  private judgeHitMarginCounted: number = 60;
+  private judgeHitMarginLimit: HitMarginLimit = HitMarginLimit.None;
+  private asyncInput: AsyncInputManager = new AsyncInputManager();
+  private judgmentDisplay: JudgmentDisplay | null = new JudgmentDisplay();
+  private _judgeLastCorrectedTile: number = -1; // 防重复矫正
+  private _judgeHitsoundPlayed: number = -1;    // 防重复 hitsound
+  private _manualDead: boolean = false;         // 手动模式下玩家已死亡
+  private _consecMisses: number = 0;            // 连续空敲/太慢数（累计达阈值杀）
+  private _lastAutoJudgedTile: number = -1;     // 自动播放：已展示判定的砖块
+  private countdownText: string = '';           // 倒计时 HUD 文本（3/2/1/GO）
+  private _lastCountdownTick: number = -1;      // 已播 sndHat 的 tick 计数
+  private _countdownHatBuffer: AudioBuffer | null = null; // 缓存的 hihat 噪声 buffer
+
   // Camera settings
   private zoom: number = 1;
   private zoomMultiplier: number = 1.0;
@@ -128,8 +157,12 @@ export class Player implements IPlayer {
   // Tile position history cache for trail rendering (circular buffer)
   // Stores actual mesh positions per frame so trails can look up historical positions
   // without replaying MoveTrack events (which is slow and error-prone)
+  // Only records tiles in a window around currentTileIndex to avoid O(totalTiles) per frame
+  private static readonly TRAIL_CACHE_WINDOW = 500;
   private trailPositionCache: Float64Array[] = [];
   private trailTimeCache: number[] = [];
+  private trailWindowStart: number[] = [];
+  private trailWindowEnd: number[] = [];
   private trailCacheWriteIdx: number = 0;
   private static readonly TRAIL_CACHE_SIZE = 30; // ~0.5s at 60fps
   private trailCacheReady: boolean = false;
@@ -253,6 +286,7 @@ export class Player implements IPlayer {
 
     // Initialize Three.js components
     this.scene = new Scene();
+    this.judgmentDisplay?.setScene(this.scene);
 
     // Initialize InstancedMeshManager
     this.instancedMeshManager = new InstancedMeshManager(
@@ -295,6 +329,16 @@ export class Player implements IPlayer {
 
     // Initialize tile colors from settings (now after appendExtraTile)
     this.tileColorManager.initTileColors();
+
+    // Pre-compute which tiles have animated color types (avoids visibleTiles iteration)
+    this._tilesWithAnimatedColor = new Set<number>();
+    const animConfigs = this.tileColorManager.getTileRecolorConfigs();
+    for (let i = 0; i < animConfigs.length; i++) {
+      const c = animConfigs[i];
+      if (c && ['Glow', 'Blink', 'Rainbow', 'Volume'].includes(c.trackColorType)) {
+        this._tilesWithAnimatedColor.add(i);
+      }
+    }
 
     // Calculate cumulative rotations
     this.calculateCumulativeRotations();
@@ -394,6 +438,314 @@ export class Player implements IPlayer {
     this.applyBaseStateToAllTiles();
     
     // Hitsounds will be synthesized during loading process with progress display
+  }
+
+  // ── 手动游玩 API ──────────────────────────────────────────────
+
+  public enableManualPlay(config?: Partial<{
+    noFail: boolean;
+    difficulty: Difficulty;
+    speedTrial: number;
+    hitMarginCounted: number;
+    hitMarginLimit: HitMarginLimit;
+  }>): void {
+    this.manualMode = true;
+    if (config?.noFail !== undefined) this.noFail = config.noFail;
+    if (config?.difficulty) this.judgeDifficulty = config.difficulty;
+    if (config?.speedTrial) this.judgeSpeedTrial = config.speedTrial;
+    if (config?.hitMarginCounted) this.judgeHitMarginCounted = config.hitMarginCounted;
+    if (config?.hitMarginLimit !== undefined) this.judgeHitMarginLimit = config.hitMarginLimit;
+    this._manualDead = false;
+    this._consecMisses = 0;
+    this.asyncInput.attach();
+    this.judgmentDisplay?.clear();
+    // 手动模式：停止整关连续 hitsound（命中音效改由 playHitForTile 单发）
+    this.hitsoundManager?.stop();
+  }
+
+  public disableManualPlay(): void {
+    this.manualMode = false;
+    this._manualDead = false;
+    this._consecMisses = 0;
+    this.asyncInput.detach();
+    this.asyncInput.clear();
+    this.judgmentDisplay?.clear();
+  }
+
+  public setManualNoFail(noFail: boolean): void {
+    this.noFail = noFail;
+  }
+
+  public isManualDead(): boolean {
+    return this._manualDead;
+  }
+
+  /** 死亡后完整重开：清死亡状态、回到开头、音乐/打拍音重播。 */
+  public retryManual(): void {
+    this._manualDead = false;
+    this._consecMisses = 0;
+    this._judgeLastCorrectedTile = -1;
+    this._judgeHitsoundPlayed = -1;
+    this._lastAutoJudgedTile = -1;
+    this.judgmentDisplay?.clear();
+    this.currentTileIndex = 0;
+    this.isPaused = false;
+    this.audioDriftSynced = false;
+    this.useAudioContextTime = false;
+    this.elapsedTime = 0;
+    this.startTime = performance.now();
+    // 音乐从 0 重播
+    if (this.music.hasAudio) {
+      this.music.seek(0);
+      this.music.resume();
+    }
+    // 打拍音从 0 重播（独立时间线，死亡不影响其播放）
+    if (this.hitsoundManager && this.hitsoundManager.isSynthesized()) {
+      this.hitsoundManager.startAtOffset(0);
+    }
+  }
+
+  /** 注入 i18n 给判定文本使用。 */
+  public setJudgmentI18n(i18n: any): void {
+    this.judgmentDisplay?.setI18n(i18n);
+  }
+
+  public setSongPitch(pitch: number): void {
+    this.songPitch = Math.max(0.1, pitch);
+  }
+
+  public getManualMode(): boolean {
+    return this.manualMode;
+  }
+
+  private judgeConfig(): JudgeConfig {
+    return {
+      difficulty: this.judgeDifficulty,
+      speedTrial: this.judgeSpeedTrial,
+      hitMarginCounted: this.judgeHitMarginCounted,
+      hitMarginLimit: this.judgeHitMarginLimit,
+      mobile: false,
+    };
+  }
+
+  /** 该砖块当前的 marginScale（ScaleMargin 事件，暂默认 1）。 */
+  private getTileMarginScale(index: number): number {
+    return 1;
+  }
+
+  /**
+   * 把某个 performance.now() 时间戳换算成 elapsedTime（ms）。
+   * 与 elapsedTime 的计算方式保持一致，保证异步输入精度不受帧率影响。
+   */
+  private getElapsedTimeAt(perfTime: number): number {
+    if (this.useAudioContextTime) {
+      const ctx = getSharedAudioContext();
+      if (ctx) {
+        const ctxNow = ctx.currentTime;
+        const perfNow = performance.now();
+        const ctxAtPress = ctxNow - (perfNow - perfTime) / 1000;
+        return (ctxAtPress - this.audioContextStartOffset) * 1000;
+      }
+    }
+    return perfTime - this.startTime;
+  }
+
+  /**
+   * 处理异步输入队列中的按键事件（用按键时刻精确判定，而非处理帧时刻）。
+   */
+  private processAsyncInputs(): void {
+    if (!this.manualMode || this._manualDead) return;
+    const events = this.asyncInput.drain();
+    if (events.length === 0) return;
+
+    const settings = this.levelData.settings;
+    const bpm0 = settings.bpm || 100;
+    const cd0 = (settings.countdownTicks || 4) * (60 / bpm0);
+
+    for (let i = 0; i < events.length; i++) {
+      const ev = events[i];
+      if (ev.type !== 'down') continue;
+      const elapsedAtPress = this.getElapsedTimeAt(ev.perfTime);
+      const timeInLevel = elapsedAtPress / 1000 - cd0;
+      this.judgePress(timeInLevel);
+    }
+  }
+
+  /**
+   * 玩家死亡：停止推进、显示 FAIL、停音乐。
+   * 官方行为：TooEarly/TooLate/OverPress/慢速到界 → Die → 非不死即真死。
+   */
+  private manualDie(margin: HitMargin): void {
+    this._manualDead = true;
+    this._consecMisses = 0;
+    const tileIndex = this.currentTileIndex;
+    const tile = (this.tiles.get(String(tileIndex)) ?? this.tiles.get(String(Math.max(tileIndex - 1, 0)))) ?? null;
+    this.judgmentDisplay?.show(tile, margin === HitMargin.TooEarly ? HitMargin.TooEarly : HitMargin.FailMiss);
+    this.music.pause?.();
+    if (this.music.hasAudio) {
+      // 不 seek，保留位置便于回看
+    }
+  }
+
+  /**
+   * 手动模式判定：用按键时刻 vs 当前砖块出口时刻的误差。
+   * 有效命中 → 推进到下一砖块并展示判定；miss → noFail 矫正 / 否则累计/死亡。
+   */
+  private judgePress(timeInLevel: number): void {
+    if (this._manualDead) return;
+    const n = this.levelData.tiles.length;
+    const tileIndex = this.currentTileIndex;
+    if (tileIndex >= n - 1) return;
+
+    const perfectTime = (this.tileStartTimes[tileIndex] || 0) + (this.tileDurations[tileIndex] || 0);
+    const errorMs = (timeInLevel - perfectTime) * 1000;
+    const bpmTimesSpeed = this.tileBPM[tileIndex] || 100;
+    const pitch = this.songPitch;
+    const marginScale = this.getTileMarginScale(tileIndex);
+    const margin = getHitMarginFromErrorMs(errorMs, bpmTimesSpeed, pitch, marginScale, this.judgeConfig());
+
+    const landingTile = this.tiles.get(String(tileIndex + 1)) ?? null;
+    if (isValidHit(margin, this.judgeHitMarginLimit)) {
+      this.currentTileIndex++;
+      this._judgeLastCorrectedTile = -1;
+      this._consecMisses = 0;
+      this.judgmentDisplay?.show(landingTile, margin);
+      this.playHitForTile(tileIndex + 1);
+    } else if (this.noFail) {
+      this.currentTileIndex++;
+      this._judgeLastCorrectedTile = -1;
+      this.judgmentDisplay?.show(landingTile, HitMargin.FailMiss);
+      this.playHitForTile(tileIndex + 1);
+    } else {
+      // 太早太晚等无效命中：累积失误，达阈值即死
+      this._consecMisses++;
+      this.judgmentDisplay?.show(this.tiles.get(String(tileIndex)) ?? null, margin);
+      if (this._consecMisses >= 8) {
+        this.manualDie(margin);
+      }
+    }
+  }
+
+  /**
+   * 手动模式超时未按：超过 Counted 边界 → 紫判矫正（noFail）或死亡（非 noFail）。
+   * 用 while 快速追赶，避免一帧只补一个砖块。
+   */
+  private checkManualTooLate(timeInLevel: number): void {
+    if (!this.manualMode || this._manualDead) return;
+    const n = this.levelData.tiles.length;
+    let guard = 0;
+    while (guard < 64) {
+      guard++;
+      if (this._manualDead) return;
+      const tileIndex = this.currentTileIndex;
+      if (tileIndex >= n - 1) return;
+      const perfectTime = (this.tileStartTimes[tileIndex] || 0) + (this.tileDurations[tileIndex] || 0);
+      if (timeInLevel <= perfectTime) return;
+
+      const bpmTimesSpeed = this.tileBPM[tileIndex] || 100;
+      const pitch = this.songPitch;
+      const marginScale = this.getTileMarginScale(tileIndex);
+      const bounds = getBoundariesInDeg(bpmTimesSpeed, pitch, marginScale, this.judgeConfig());
+      // 官方：默认宽容 max(π, 2×Counted) 后才死；不死模式只过 Counted 即矫正
+      const tooLateThreshold = this.noFail ? bounds.countedDeg : Math.max(Math.PI / 3 * 57.29578, bounds.countedDeg * 2);
+      const errDeg = (timeInLevel - perfectTime) * 3 * bpmTimesSpeed * pitch;
+      if (errDeg <= tooLateThreshold) return;
+
+      if (this.noFail) {
+        this.currentTileIndex++;
+        this._judgeLastCorrectedTile = tileIndex;
+        this.judgmentDisplay?.show(this.tiles.get(String(tileIndex + 1)) ?? null, HitMargin.FailMiss);
+        this.playHitForTile(tileIndex + 1);
+      } else {
+        // 未开不死：超界直接死
+        this.manualDie(HitMargin.TooLate);
+        return;
+      }
+    }
+  }
+
+  /**
+   * 播放某个砖块的 hitsound（判定命中/矫正时）。
+   * 当前 hitsound 是整关合成的连续 buffer，手动模式下不适用；
+   * 预留此处，未来可接入单发音效。
+   */
+  private playHitForTile(index: number): void {
+    if (this._judgeHitsoundPlayed === index) return;
+    this._judgeHitsoundPlayed = index;
+    // TODO: 手动模式单发 hitsound
+  }
+
+  /**
+   * 倒计时 HUD + sndHat tick（对齐官方 scrCountdown/scrConductor）。
+   * elapsedTime=0 为倒计时开始，elapsedTime=countdownDuration 为游戏开始（tile0 开始转）。
+   * 显示：3（tick0）/2（tick1）/1（tick2）/GO（tick countdownTicks-1），每个 tick 播一次 sndHat。
+   */
+  private updateCountdown(): void {
+    const settings = this.levelData.settings;
+    const bpm0 = settings.bpm || 100;
+    const spb0 = 60 / bpm0;
+    const ct = settings.countdownTicks || 4;
+    const cd = ct * spb0;
+    const t = this.elapsedTime / 1000; // 0 = countdown 开始
+
+    if (t >= cd) {
+      if (this.countdownText !== '') this.countdownText = '';
+      this._lastCountdownTick = -1;
+      return;
+    }
+    if (t < 0) {
+      this.countdownText = '';
+      return;
+    }
+
+    const tickIdx = Math.floor(t / spb0); // 已过的 tick 数（0..ct-1）
+
+    // 每个 tick 播一次 sndHat（含 tick0 开始瞬间）
+    if (tickIdx > this._lastCountdownTick) {
+      const end = Math.min(tickIdx, ct - 1);
+      for (let k = this._lastCountdownTick + 1; k <= end; k++) {
+        this.playCountdownHat();
+      }
+      this._lastCountdownTick = tickIdx;
+    }
+
+    // HUD 文本：3/2/1 → GO
+    if (tickIdx >= ct - 1) {
+      this.countdownText = 'GO';
+    } else if (tickIdx >= 0) {
+      this.countdownText = String(ct - 1 - tickIdx);
+    } else {
+      this.countdownText = '';
+    }
+  }
+
+  /** 播放一次 hihat（sndHat）：白噪声 + 高通 + 短包络。 */
+  private playCountdownHat(): void {
+    const ctx = getSharedAudioContext();
+    if (!ctx || ctx.state === 'suspended') return;
+
+    if (!this._countdownHatBuffer) {
+      const dur = 0.06;
+      const sr = ctx.sampleRate;
+      const buf = ctx.createBuffer(1, Math.ceil(sr * dur), sr);
+      const data = buf.getChannelData(0);
+      for (let i = 0; i < data.length; i++) {
+        data[i] = (Math.random() * 2 - 1) * (1 - i / data.length);
+      }
+      this._countdownHatBuffer = buf;
+    }
+
+    const now = ctx.currentTime;
+    const src = ctx.createBufferSource();
+    src.buffer = this._countdownHatBuffer;
+    const hp = ctx.createBiquadFilter();
+    hp.type = 'highpass';
+    hp.frequency.value = 6000;
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.45, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.06);
+    src.connect(hp).connect(gain).connect(ctx.destination);
+    src.start(now);
   }
 
   private formatHexColor(hex: string): string {
@@ -1390,13 +1742,13 @@ export class Player implements IPlayer {
       const delta = (time - lastTime) / 1000;
       lastTime = time;
       
-      if (this.isPlaying && !this.isPaused) {
+      if (this.isPlaying && !this.isPaused && !this._manualDead) {
         this.updatePlayer(delta);
         this.syncVideo();
       }
-      
+
       this.renderPlayer(delta);
-      
+
       // FPS calculation (update every 500ms)
       frameCount++;
       if (time - fpsTime >= 500) {
@@ -1425,7 +1777,8 @@ export class Player implements IPlayer {
           tileIndex: this.currentTileIndex,
           tileBPM: this.tileBPM,
           tileStartTimes: this.tileStartTimes,
-          totalTiles: this.levelData.tiles.length
+          totalTiles: this.levelData.tiles.length,
+          countdownText: this.countdownText
         });
         this.overlayHUD.render();
       }
@@ -1579,6 +1932,9 @@ export class Player implements IPlayer {
       this.tiles?.forEach((_, id) => this.updateTileMeshColor(parseInt(id)));
     }
 
+    // 倒计时 HUD + sndHat tick
+    this.updateCountdown();
+
     const triggeredEvents = this.timelineManager.getTriggered(t0);
     for (const ev of triggeredEvents) {
       switch (ev.eventType) {
@@ -1588,6 +1944,13 @@ export class Player implements IPlayer {
         case 'SetCustomBG': this.processCustomBGEvent(ev); break;
         case 'RecolorTrack': this.processRecolorEvent(ev); break;
       }
+    }
+
+    // 手动模式：先用异步输入时刻判定 + 超时矫正（推进 currentTileIndex），
+    // 再更新行星位置，避免 1 帧滞后
+    if (this.manualMode) {
+      this.processAsyncInputs();
+      this.checkManualTooLate(t0);
     }
 
     this.updatePlanetsPosition();
@@ -1677,12 +2040,18 @@ export class Player implements IPlayer {
   }
 
   private initTrailCache(): void {
-    const n = this.levelData.tiles.length;
+    // Window covers up to (2*W+1) tiles, 2 floats per tile.
+    // Must be big enough for the FULL window: (2*W+1)*2 floats.
+    const windowSize = (Player.TRAIL_CACHE_WINDOW * 2 + 1) * 2;
     this.trailPositionCache = [];
     this.trailTimeCache = [];
+    this.trailWindowStart = [];
+    this.trailWindowEnd = [];
     for (let i = 0; i < Player.TRAIL_CACHE_SIZE; i++) {
-      this.trailPositionCache.push(new Float64Array(n * 2));
+      this.trailPositionCache.push(new Float64Array(windowSize));
       this.trailTimeCache.push(-999);
+      this.trailWindowStart.push(0);
+      this.trailWindowEnd.push(0);
     }
     this.trailCacheWriteIdx = 0;
     this.trailCacheReady = false;
@@ -1695,19 +2064,27 @@ export class Player implements IPlayer {
     const tiles = this.levelData.tiles;
     const n = tiles.length;
 
-    for (let i = 0; i < n; i++) {
+    const W = Player.TRAIL_CACHE_WINDOW;
+    const start = Math.max(0, this.currentTileIndex - W);
+    const end = Math.min(n, this.currentTileIndex + W + 1);
+
+    this.trailWindowStart[this.trailCacheWriteIdx] = start;
+    this.trailWindowEnd[this.trailCacheWriteIdx] = end;
+
+    for (let i = start; i < end; i++) {
+      const localIdx = (i - start) * 2;
       if (this.tileStickToFloors[i] !== false) {
         const mesh = this.tiles.get(i.toString());
         if (mesh) {
-          entry[i * 2] = mesh.position.x;
-          entry[i * 2 + 1] = mesh.position.y;
+          entry[localIdx] = mesh.position.x;
+          entry[localIdx + 1] = mesh.position.y;
         } else {
-          entry[i * 2] = tiles[i].position[0];
-          entry[i * 2 + 1] = tiles[i].position[1];
+          entry[localIdx] = tiles[i].position[0];
+          entry[localIdx + 1] = tiles[i].position[1];
         }
       } else {
-        entry[i * 2] = tiles[i].position[0];
-        entry[i * 2 + 1] = tiles[i].position[1];
+        entry[localIdx] = tiles[i].position[0];
+        entry[localIdx + 1] = tiles[i].position[1];
       }
     }
 
@@ -1720,12 +2097,11 @@ export class Player implements IPlayer {
 
   /**
    * Look up a tile's cached position at the given timeInLevel using linear interpolation.
-   * Returns null if time is outside cached range.
+   * Returns null if time is outside cached range or tile is outside cached window.
    */
   private getCachedTilePos(tileIndex: number, queryTime: number): { x: number; y: number } | null {
     if (!this.trailCacheReady || this.trailTimeCache.length === 0) return null;
 
-    // Find the two nearest cached frames (one before, one after queryTime)
     let prevIdx = -1;
     let nextIdx = -1;
     let prevTime = -Infinity;
@@ -1733,7 +2109,8 @@ export class Player implements IPlayer {
 
     for (let i = 0; i < Player.TRAIL_CACHE_SIZE; i++) {
       const t = this.trailTimeCache[i];
-      if (t < -900) continue; // unwritten slot
+      if (t < -900) continue;
+      if (tileIndex < this.trailWindowStart[i] || tileIndex >= this.trailWindowEnd[i]) continue;
       if (t <= queryTime && t > prevTime) {
         prevTime = t;
         prevIdx = i;
@@ -1744,67 +2121,77 @@ export class Player implements IPlayer {
       }
     }
 
-    // If no valid entries found
     if (prevIdx < 0 && nextIdx < 0) return null;
 
-    // If only one side is available (query near buffer edges), use nearest within 20ms
+    // Guard: if the tile falls outside the frame's actual stored window bounds,
+    // bail out so the caller falls back to the base tile position instead of (0,0).
+    const readEntry = (idx: number, ti: number): { x: number; y: number } | null => {
+      const entry = this.trailPositionCache[idx];
+      const localIdx = (ti - this.trailWindowStart[idx]) * 2;
+      if (localIdx < 0 || localIdx + 1 >= entry.length) return null;
+      return { x: entry[localIdx], y: entry[localIdx + 1] };
+    };
+
     if (prevIdx < 0) {
       if (nextTime - queryTime > 0.02) return null;
-      const entry = this.trailPositionCache[nextIdx];
-      return { x: entry[tileIndex * 2], y: entry[tileIndex * 2 + 1] };
+      return readEntry(nextIdx, tileIndex);
     }
     if (nextIdx < 0) {
       if (queryTime - prevTime > 0.02) return null;
-      const entry = this.trailPositionCache[prevIdx];
-      return { x: entry[tileIndex * 2], y: entry[tileIndex * 2 + 1] };
+      return readEntry(prevIdx, tileIndex);
     }
 
-    // Both sides available: linearly interpolate
     const range = nextTime - prevTime;
     if (range < 0.000001) {
-      // Same time, just use either
-      const entry = this.trailPositionCache[prevIdx];
-      return { x: entry[tileIndex * 2], y: entry[tileIndex * 2 + 1] };
+      return readEntry(prevIdx, tileIndex);
     }
 
     const t = (queryTime - prevTime) / range;
-    // Clamp query to [prevTime, nextTime] — both within 20ms, so this is bounded
     const frac = Math.max(0, Math.min(1, t));
 
-    const prevEntry = this.trailPositionCache[prevIdx];
-    const nextEntry = this.trailPositionCache[nextIdx];
+    const prevPos = readEntry(prevIdx, tileIndex);
+    const nextPos = readEntry(nextIdx, tileIndex);
+    if (!prevPos || !nextPos) return null;
     return {
-      x: prevEntry[tileIndex * 2] + (nextEntry[tileIndex * 2] - prevEntry[tileIndex * 2]) * frac,
-      y: prevEntry[tileIndex * 2 + 1] + (nextEntry[tileIndex * 2 + 1] - prevEntry[tileIndex * 2 + 1]) * frac,
+      x: prevPos.x + (nextPos.x - prevPos.x) * frac,
+      y: prevPos.y + (nextPos.y - prevPos.y) * frac,
     };
   }
 
   private updateAnimatedTiles(): void {
     const time = this.elapsedTime / 1000;
     const cameraRotation = this.camera.rotation.z;
+    const rotChanged = Math.abs(cameraRotation - this.lastAnimatedCamRotation) > 0.0001;
+    if (rotChanged) this.lastAnimatedCamRotation = cameraRotation;
 
-    this.visibleTiles.forEach(id => {
-        const index = parseInt(id);
-        const mesh = this.tiles.get(id);
-        
-        // Update sprite rotations to follow camera
-        if (mesh) {
-            this.updateTileChildSpriteRotations(mesh, cameraRotation);
-        }
+    // Only iterate visibleTiles when camera rotation actually changes
+    if (rotChanged) {
+        this.visibleTiles.forEach(id => {
+            const mesh = this.tiles.get(id);
+            if (mesh) {
+                this.updateTileChildSpriteRotations(mesh, cameraRotation);
+            }
+        });
+    }
 
-        const config = this.tileColorManager.getTileRecolorConfig(index);
-
-        if (config && ['Glow', 'Blink', 'Rainbow', 'Volume'].includes(config.trackColorType)) {
+    // Only iterate animated-color tiles (avoids scanning all visible tiles)
+    if (this._tilesWithAnimatedColor && this._tilesWithAnimatedColor.size > 0) {
+        for (const index of this._tilesWithAnimatedColor) {
+            if (!this.tileVisible[index]) continue;
+            const config = this.tileColorManager.getTileRecolorConfig(index);
+            if (!config) continue;
             const rendered = this.tileColorManager.getTileRenderer(index, time, config, this.music.amplitude);
-            // Skip if color hasn't changed (avoids unnecessary GPU uploads, especially for slow animations)
             const current = this.tileColorManager.getTileColor(index);
-            if (current && current.color === rendered.color && current.secondaryColor === rendered.bgcolor) return;
+            if (current && current.color === rendered.color && current.secondaryColor === rendered.bgcolor) continue;
             this.applyTileColor(index, rendered.color, rendered.bgcolor, rendered.opacity);
         }
-    });
+    }
   }
 
   public renderPlayer(delta: number): void {
+    // 判定文本淡出（播放/暂停/预览均执行）
+    this.judgmentDisplay?.update(delta);
+
     // Sync camera/visibleTiles/instanced from CameraController (non-play + paused)
     if ((!this.isPlaying || this.isPaused) && this.cameraController) {
       const interp = this.cameraController.getInterpolatedValues(this.elapsedTime);
@@ -1936,6 +2323,15 @@ export class Player implements IPlayer {
     this.startTime = performance.now(); // elapsedTime = 0 when startPlay is called
     this.elapsedTime = 0;
     this.currentTileIndex = 0;
+    this._manualDead = false;
+    this._consecMisses = 0;
+    this._judgeLastCorrectedTile = -1;
+    this._judgeHitsoundPlayed = -1;
+    this._lastAutoJudgedTile = -1;
+    this.countdownText = '';
+    this._lastCountdownTick = -1;
+    this.judgmentDisplay?.clear();
+    this.asyncInput.clear();
     this.deselectTile();
     this.useAudioContextTime = false;
     this.audioDriftSynced = false;
@@ -2054,6 +2450,7 @@ export class Player implements IPlayer {
     // Start pre-synthesized hitsound track
     const synthesized = this.hitsoundManager.isSynthesized();
     console.log('[Player] startPlay - hitsound synthesized:', synthesized, 'hitsoundStartDelay:', hitsoundStartDelay);
+    // 打拍音按时间线独立播放，与手动/自动模式无关（官方死亡也不停打拍音）
     if (synthesized && startAtMs <= 0) {
         this.hitsoundManager.start(hitsoundStartDelay);
     }
@@ -2230,6 +2627,8 @@ export class Player implements IPlayer {
   public stopPlay(): void {
     this.isPlaying = false;
     this.isPaused = false;
+    this._manualDead = false;
+    this._consecMisses = 0;
     this.deselectTile();
     this.elapsedTime = 0;
     this.audioDriftSynced = false;
@@ -2353,6 +2752,15 @@ export class Player implements IPlayer {
     const ct0 = s.countdownTicks || 4;
     const cd0 = ct0 * spb0;
     const timeInLevel = timeMs / 1000 - cd0;
+
+    // 手动模式：seek 后把当前砖块重置到该时间点，避免从错误的砖块继续判定
+    if (this.manualMode) {
+      this.currentTileIndex = this.getTileIndexAtLevelTime(timeInLevel);
+      this._judgeLastCorrectedTile = -1;
+      this._judgeHitsoundPlayed = -1;
+      this.judgmentDisplay?.clear();
+    }
+    this._lastAutoJudgedTile = this.getTileIndexAtLevelTime(timeInLevel);
 
     this.elapsedTime = timeMs;
     this.startTime = performance.now() - timeMs;
@@ -2944,6 +3352,31 @@ export class Player implements IPlayer {
     }
   }
 
+  // Pre-allocated buffers for trail computation to avoid per-frame GC
+  private _trailRedArr: Float64Array | null = null;
+  private _trailBlueArr: Float64Array | null = null;
+  private _trailMaxSteps: number = 0;
+  private _trailRefRed: Float64Array = new Float64Array(2);
+  private _trailRefBlue: Float64Array = new Float64Array(2);
+
+  // Binary search tile index for a given timeInLevel (seconds). Avoids O(n) linear scans.
+  private getTileIndexAtLevelTime(timeInLevel: number): number {
+    const times = this.tileStartTimes;
+    if (times.length === 0) return 0;
+    if (timeInLevel <= times[0]) return 0;
+    let lo = 0, hi = times.length - 1, idx = 0;
+    while (lo <= hi) {
+      const mid = (lo + hi) >>> 1;
+      if (times[mid] <= timeInLevel) {
+        idx = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    return idx;
+  }
+
   /**
    * Compute trail positions for both planets for the time window [timeInLevel - 0.4, timeInLevel].
    * Feeds results to planet trails.
@@ -2953,18 +3386,22 @@ export class Player implements IPlayer {
     if (this.tileStartTimes.length < 2) return;
 
     const TRAIL_DURATION = 0.4;
-    const INV_INTERVAL = 200; // 5ms = 200 samples/sec
+    const INV_INTERVAL = 100; // 10ms = 100 samples/sec (was 200, reduced for performance)
     const startTime = timeInLevel - TRAIL_DURATION;
-    const numSteps = Math.ceil(TRAIL_DURATION * INV_INTERVAL); // ~80
+    const numSteps = Math.ceil(TRAIL_DURATION * INV_INTERVAL); // ~40
 
-    // Find starting tile index
-    let tileIndex = 0;
-    for (let i = this.tileStartTimes.length - 1; i >= 0; i--) {
-      if (startTime >= this.tileStartTimes[i]) { tileIndex = i; break; }
+    // Reuse pre-allocated buffers to avoid GC
+    if (!this._trailRedArr || this._trailMaxSteps < numSteps) {
+      this._trailMaxSteps = numSteps;
+      this._trailRedArr = new Float64Array(numSteps * 2);
+      this._trailBlueArr = new Float64Array(numSteps * 2);
     }
+    const redArr = this._trailRedArr!;
+    const blueArr = this._trailBlueArr!;
 
-    const redArr = new Float64Array(numSteps * 2);
-    const blueArr = new Float64Array(numSteps * 2);
+    // Find starting tile index via binary search (was O(n) backward scan)
+    let tileIndex = this.getTileIndexAtLevelTime(startTime);
+
     let written = 0;
 
     for (let s = 0; s < numSteps; s++) {
@@ -2985,13 +3422,10 @@ export class Player implements IPlayer {
       const trimBlue = new Float64Array(blueArr.buffer, 0, written * 2);
       this.planetRed.setTrailPoints(trimRed);
       this.planetBlue.setTrailPoints(trimBlue);
-      // Compute reference position at exactly timeInLevel (avoids 5ms sample alignment jitter)
-      let refTileIdx = 0;
-      for (let i = this.tileStartTimes.length - 1; i >= 0; i--) {
-        if (timeInLevel >= this.tileStartTimes[i]) { refTileIdx = i; break; }
-      }
-      const refRed = new Float64Array(2);
-      const refBlue = new Float64Array(2);
+      // Compute reference position at exactly timeInLevel (avoids sample alignment jitter)
+      const refTileIdx = this.getTileIndexAtLevelTime(timeInLevel);
+      const refRed = this._trailRefRed;
+      const refBlue = this._trailRefBlue;
       this.computePositionsAtTime(timeInLevel, refTileIdx, refRed, refBlue, 0);
 
       const redOffX = this.planetRed.position.x - refRed[0];
@@ -3046,6 +3480,12 @@ export class Player implements IPlayer {
     this.lastVisibleCheckPos.copy(this.cameraPosition);
     this.lastVisibleCheckZoom = zoom;
 
+    // Lazily initialize tileVisible array
+    const totalTiles = this.levelData.tiles.length;
+    if (this.tileVisible.length !== totalTiles) {
+        this.tileVisible = new Array(totalTiles).fill(false);
+    }
+
     const left = this.cameraPosition.x + this.camera.left / zoom;
     const right = this.cameraPosition.x + this.camera.right / zoom;
     const bottom = this.cameraPosition.y + this.camera.bottom / zoom;
@@ -3070,7 +3510,12 @@ export class Player implements IPlayer {
       }
     }
 
-    // Remove tiles no longer visible — iterate visibleTiles directly instead of Array.from()
+    // Fast path: if sizes match, sets are equivalent (same tiles visible)
+    if (this.visibleTiles.size === newVisibleSet.size) {
+        return;
+    }
+
+    // Remove tiles no longer visible
     for (const id of this.visibleTiles) {
         const idx = parseInt(id);
         if (!newVisibleSet.has(idx)) {
@@ -3081,28 +3526,28 @@ export class Player implements IPlayer {
             if (this.instancedMeshManager) {
                 this.instancedMeshManager.setTileVisibility(idx, false);
             }
+            this.tileVisible[idx] = false;
             this.dirtyTiles.add(idx);
             this.visibleTiles.delete(id);
         }
     }
 
-    // Add newly visible tiles
+    // Add newly visible tiles — use tileVisible array to avoid string allocation
     for (const idx of newVisibleSet) {
-      const id = idx.toString();
-      if (!this.visibleTiles.has(id)) {
-        const tileMesh = this.getOrCreateTileMesh(idx);
-        if (tileMesh) {
-          if (!this.instancedMeshManager) {
-            this.scene.add(tileMesh);
-          } else {
-            this.scene.add(tileMesh);
-            this.instancedMeshManager.setTileVisibility(idx, true);
-            this.instancedMeshManager.setFloorIconType(idx, tileMesh.userData.floorIconType ?? 0);
-            this.instancedMeshManager.setFloorIconAngle(idx, tileMesh.userData.floorIconAngle ?? 0);
-          }
-          this.visibleTiles.add(id);
-          this.dirtyTiles.add(idx);
+      if (this.tileVisible[idx]) continue;
+      const tileMesh = this.getOrCreateTileMesh(idx);
+      if (tileMesh) {
+        if (!this.instancedMeshManager) {
+          this.scene.add(tileMesh);
+        } else {
+          this.scene.add(tileMesh);
+          this.instancedMeshManager.setTileVisibility(idx, true);
+          this.instancedMeshManager.setFloorIconType(idx, tileMesh.userData.floorIconType ?? 0);
+          this.instancedMeshManager.setFloorIconAngle(idx, tileMesh.userData.floorIconAngle ?? 0);
         }
+        this.tileVisible[idx] = true;
+        this.visibleTiles.add(idx.toString());
+        this.dirtyTiles.add(idx);
       }
     }
 
@@ -3112,6 +3557,8 @@ export class Player implements IPlayer {
   }
 
   private cleanupTileCache(): void {
+    if (this.tiles.size === this.visibleTiles.size) return; // no non-visible tiles to remove
+
     const tileEntries = Array.from(this.tiles.entries());
     
     tileEntries.sort((a, b) => {
@@ -3133,6 +3580,9 @@ export class Player implements IPlayer {
                 mesh.material.dispose();
             }
             this.tiles.delete(id);
+            if (this.tileVisible.length > parseInt(id)) {
+                this.tileVisible[parseInt(id)] = false;
+            }
             removed++;
         }
     }
@@ -3350,7 +3800,8 @@ export class Player implements IPlayer {
     }
     
     // Playing Phase
-    if (this.tileStartTimes.length > 0) {
+    // 手动模式：currentTileIndex 只由判定命中推进，不由时间自动推进
+    if (!this.manualMode && this.tileStartTimes.length > 0) {
         if (timeInLevel < this.tileStartTimes[this.currentTileIndex]) {
             let low = 0, high = this.tileStartTimes.length - 1;
             while (low <= high) {
@@ -3367,6 +3818,12 @@ export class Player implements IPlayer {
                    this.tileStartTimes[this.currentTileIndex + 1] <= timeInLevel) {
                 this.currentTileIndex++;
             }
+        }
+        // 自动播放：球落到的新砖块展示"完美！"判定（官方 autoplay 显示 Perfect）
+        if (this.currentTileIndex !== this._lastAutoJudgedTile && this.currentTileIndex > 0) {
+            this._lastAutoJudgedTile = this.currentTileIndex;
+            const landedTile = this.tiles.get(String(this.currentTileIndex)) ?? null;
+            this.judgmentDisplay?.show(landedTile, HitMargin.Auto);
         }
     }
     
@@ -3872,6 +4329,9 @@ export class Player implements IPlayer {
       cancelAnimationFrame(this.animationId);
     }
     this.removeEventListeners();
+    this.asyncInput.detach();
+    this.judgmentDisplay?.dispose();
+    this.judgmentDisplay = null;
     
     // Cleanup video
     if (this.videoElement) {

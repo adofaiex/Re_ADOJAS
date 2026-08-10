@@ -15,6 +15,8 @@ export class TimelineManager {
     private lastTriggerIndex: number = -1;
 
     private _animatedTileIndices: Set<number> = new Set();
+    private _tileRanges: { tileIdx: number; start: number; end: number }[] = [];
+    private _tileRangesSorted: boolean = false;
     private tileStartTimes: number[];
     private tileBPM: number[];
     private totalTiles: number;
@@ -215,6 +217,7 @@ export class TimelineManager {
         this.buildAnimateTrackKeyframes(actions, basePositions, baseRotations, baseScales, baseOpacities, settings);
 
         this._animatedTileIndices = this.computeAnimatedTileIndices();
+        this.buildTileRanges();
     }
 
     private computeAnimatedTileIndices(): Set<number> {
@@ -232,6 +235,63 @@ export class TimelineManager {
             }
         }
         return indices;
+    }
+
+    /**
+     * Pre-compute time ranges for each animated tile.
+     * Used to avoid iterating ALL animated tiles per frame — we only process tiles
+     * whose animation time window covers the current game time.
+     */
+    private buildTileRanges(): void {
+        this._tileRanges = [];
+        for (const tileIdx of this._animatedTileIndices) {
+            const props = this.timelines.get(`tile:${tileIdx}`);
+            if (!props) continue;
+            let start = Infinity, end = -Infinity;
+            for (const kfs of props.values()) {
+                if (kfs.length > 0) {
+                    if (kfs[0].time < start) start = kfs[0].time;
+                    if (kfs[kfs.length - 1].time > end) end = kfs[kfs.length - 1].time;
+                }
+            }
+            if (end >= start) {
+                this._tileRanges.push({ tileIdx, start, end });
+            }
+        }
+        this._tileRanges.sort((a, b) => a.start - b.start);
+        this._tileRangesSorted = true;
+    }
+
+    /**
+     * Returns tile indices whose last keyframe is after the given time.
+     * Matches the original isTileActive semantics: tile is "active" if
+     * time < last keyframe time (animation hasn't fully finished yet).
+     * Uses binary search on the sorted _tileRanges array — O(log n) to find
+     * the first unfinished tile, then O(k) linear scan for k unfinished tiles.
+     *
+     * Tiles whose animation finished (end <= time) are excluded, which
+     * eliminates the O(n) scan of ALL animated tiles every frame.
+     */
+    public getActiveTileIndicesAt(time: number): number[] {
+        if (!this._tileRangesSorted || this._tileRanges.length === 0) {
+            return Array.from(this._animatedTileIndices);
+        }
+        const ranges = this._tileRanges;
+        let lo = 0, hi = ranges.length;
+        while (lo < hi) {
+            const mid = (lo + hi) >>> 1;
+            if (ranges[mid].end > time) {
+                hi = mid;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        // lo = first index with end > time (animation unfinished)
+        const result: number[] = [];
+        for (let i = lo; i < ranges.length; i++) {
+            result.push(ranges[i].tileIdx);
+        }
+        return result;
     }
 
     private buildTileMoveTrack(

@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react"
 import { Button } from "@/components/ui/button"
-import { ArrowLeft, Settings, Save, Upload, Download, Music, Video, Image, Maximize, Minimize } from "lucide-react"
+import { ArrowLeft, Settings, Save, Upload, Download, Music, Video, Image, Maximize, Minimize, Gamepad2, ShieldCheck } from "lucide-react"
 import { SettingsModal } from "@/components/SettingsModal"
 import { LoadingModal } from "@/components/LoadingModal"
 import { NotificationSystem } from "./NotificationSystem"
@@ -30,6 +30,8 @@ export default function EditorPage() {
     themeReady,
     playMode,
     playModeActive,
+    manualMode,
+    noFail,
     settingsOpen,
     showExitDialog,
     showVideoImportDialog,
@@ -49,6 +51,8 @@ export default function EditorPage() {
     handleExport,
     handlePlay,
     handleExitPlayMode,
+    handleToggleManualPlay,
+    handleToggleNoFail,
     handleBackClick,
     handleConfirmExit,
     handleCancelExit,
@@ -424,6 +428,28 @@ export default function EditorPage() {
           </div>
 
           <div className="flex items-center gap-1">
+            <button
+              className={`w-7 h-7 rounded-full flex items-center justify-center transition-colors shrink-0 ${isDark
+                  ? manualMode ? "bg-green-600/80 text-white hover:bg-green-500" : "bg-slate-700/80 text-slate-300 hover:bg-slate-600"
+                  : manualMode ? "bg-green-500/80 text-white hover:bg-green-400" : "bg-white/80 text-slate-600 hover:bg-slate-100"
+                } shadow-lg backdrop-blur-sm`}
+              title={manualMode ? "手动模式开启（按任意键判定）" : "开启手动模式"}
+              onClick={handleToggleManualPlay}
+            >
+              <Gamepad2 className="w-3.5 h-3.5" />
+            </button>
+            {manualMode && (
+              <button
+                className={`w-7 h-7 rounded-full flex items-center justify-center transition-colors shrink-0 ${isDark
+                    ? noFail ? "bg-blue-600/80 text-white hover:bg-blue-500" : "bg-slate-700/80 text-slate-300 hover:bg-slate-600"
+                    : noFail ? "bg-blue-500/80 text-white hover:bg-blue-400" : "bg-white/80 text-slate-600 hover:bg-slate-100"
+                  } shadow-lg backdrop-blur-sm`}
+                title={noFail ? "不死模式开启（miss 自动矫正）" : "开启不死模式"}
+                onClick={handleToggleNoFail}
+              >
+                <ShieldCheck className="w-3.5 h-3.5" />
+              </button>
+            )}
             <button
               className={`w-7 h-7 rounded-full flex items-center justify-center transition-colors shrink-0 ${isDark
                   ? "bg-slate-700/80 text-slate-300 hover:bg-slate-600"
