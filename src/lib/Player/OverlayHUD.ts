@@ -13,6 +13,9 @@ export class OverlayHUD {
   private countdownText: string = '';
   private marginCounts: number[] = [];
   private xAcc: number = 1;
+  private dead: boolean = false;
+  private percentComplete: number = 0;
+  private deaths: number = 0;
 
   private readonly p = 8;
   private readonly lh = 18;
@@ -52,6 +55,9 @@ export class OverlayHUD {
     countdownText?: string;
     marginCounts?: number[];
     xAcc?: number;
+    dead?: boolean;
+    percentComplete?: number;
+    deaths?: number;
   }): void {
     this.fps = stats.fps;
     this.time = stats.time;
@@ -62,6 +68,9 @@ export class OverlayHUD {
     this.countdownText = stats.countdownText ?? '';
     this.marginCounts = stats.marginCounts ?? [];
     this.xAcc = stats.xAcc ?? 1;
+    this.dead = stats.dead ?? false;
+    this.percentComplete = stats.percentComplete ?? 0;
+    this.deaths = stats.deaths ?? 0;
   }
 
   render(): void {
@@ -78,8 +87,35 @@ export class OverlayHUD {
     this.drawPanel(ctx, w, h, this.computeText());
     this.drawCountdown(ctx, w, h);
     this.drawMargins(ctx, w, h);
+    if (this.dead) this.drawDeath(ctx, w, h);
 
     ctx.restore();
+  }
+
+  /** 死亡界面：完成度 / 死亡次数 / XAcc（官方 Fail2Action 显示 txtPercent + deaths）。 */
+  private drawDeath(ctx: CanvasRenderingContext2D, w: number, h: number): void {
+    const pct = (this.percentComplete * 100).toFixed(2);
+    const xacc = (this.xAcc * 100).toFixed(2);
+    const lines = [
+      `完成度  ${pct}%`,
+      `死亡  ${this.deaths}`,
+      `XAcc  ${xacc}%`,
+    ];
+    const fs = 20;
+    ctx.font = `bold ${fs}px "Google Sans Code", sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    let y = h / 2 - 30;
+    for (const line of lines) {
+      ctx.lineJoin = 'round';
+      ctx.lineWidth = 5;
+      ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+      ctx.strokeText(line, w / 2, y);
+      ctx.fillStyle = line.startsWith('完成度') ? '#ffd700' : line.startsWith('XAcc') ? '#ffd700' : '#ffffff';
+      ctx.fillText(line, w / 2, y);
+      y += fs + 12;
+    }
+    ctx.textAlign = 'start';
   }
 
   /** 判定统计：各判定等级计数 + XAcc（官方配色）。 */

@@ -25,6 +25,7 @@ import {
   getHitMarginFromErrorMs, isValidHit, getBoundariesInDeg, JudgeConfig,
 } from './Judge';
 import { JudgmentDisplay } from './JudgmentDisplay';
+import { HitErrorMeter } from './HitErrorMeter';
 import { getIconTypeIndex, getTwirlTexture, getSetSpeedTexture, IconType, buildIconAtlas, ICON_ATLAS_SIZE } from './IconLoader';
 import Stats from 'three/examples/jsm/libs/stats.module.js';
 import type { Bloom, Flash, RecolorTrack } from 'adofai/event';
@@ -92,6 +93,7 @@ export class Player implements IPlayer {
   private judgeHitMarginLimit: HitMarginLimit = HitMarginLimit.None;
   private asyncInput: AsyncInputManager = new AsyncInputManager();
   private judgmentDisplay: JudgmentDisplay | null = new JudgmentDisplay();
+  private hitErrorMeter: HitErrorMeter | null = null; // 准度条
   private _judgeLastCorrectedTile: number = -1; // 防重复矫正
   private _judgeHitsoundPlayed: number = -1;    // 防重复 hitsound
   private _manualDead: boolean = false;         // 手动模式下玩家已死亡
@@ -102,6 +104,7 @@ export class Player implements IPlayer {
   private _countdownHatBuffer: AudioBuffer | null = null; // 缓存的 hihat 噪声 buffer
   private marginCounts: number[] = new Array(12).fill(0); // 各判定等级计数（按 HitMargin 索引）
   private judgeDeadTiles: number = 0;           // 死亡次数（XAcc 权重）
+  private deaths: number = 0;                   // 死亡次数（HUD 显示）
   private tileMarginScales: number[] = [];       // 各砖块判定窗口倍率（ScaleMargin 事件）
 
   // Camera settings
@@ -158,6 +161,8 @@ export class Player implements IPlayer {
   // Per-tile hitsound overrides (from SetHitsound events)
   // Each entry: {type, volume} to override the default hitsound for that tile
   private setHitsoundOverrides: Map<number, {type: HitsoundType, volume: number}> = new Map();
+  // 每个砖块的有效 hitsound（SetHitsound 从事件 floor 起继承到所有后续砖块，可被下一个覆盖）
+  private tileHitsounds: Array<{ type: HitsoundType; volume: number } | null> = [];
 
   // Tile position history cache for trail rendering (circular buffer)
   // Stores actual mesh positions per frame so trails can look up historical positions
@@ -502,6 +507,7 @@ export class Player implements IPlayer {
   public retryManual(): void {
     this._manualDead = false;
     this._consecMisses = 0;
+    this.deaths = 0;
     this._judgeLastCorrectedTile = -1;
     this._judgeHitsoundPlayed = -1;
     this._lastAutoJudgedTile = -1;
@@ -657,9 +663,15 @@ export class Player implements IPlayer {
    * 处理异步输入队列中的按键事件（用按键时刻精确判定，而非处理帧时刻）。
    */
   private processAsyncInputs(): void {
-    if (!this.manualMode || this._manualDead) return;
+    if (!this.manualMode) return;
     const events = this.asyncInput.drain();
     if (events.length === 0) return;
+
+    // 死亡后按任意键 → 从开头重开（官方死亡后按键重试）
+    if (this._manualDead) {
+      this.retryManual();
+      return;
+    }
 
     const settings = this.levelData.settings;
     const bpm0 = settings.bpm || 100;
@@ -683,6 +695,7 @@ export class Player implements IPlayer {
     this._manualDead = true;
     this._consecMisses = 0;
     this.judgeDeadTiles++;
+    this.deaths++;
     this.recordMargin(margin === HitMargin.TooEarly ? HitMargin.TooEarly : HitMargin.FailMiss);
     const tileIndex = this.currentTileIndex;
     const tile = (this.tiles.get(String(tileIndex)) ?? this.tiles.get(String(Math.max(tileIndex - 1, 0)))) ?? null;
@@ -743,21 +756,19 @@ export class Player implements IPlayer {
       console.log('[judge][midspin] pressT=', timeInLevel.toFixed(4), 'curIdx=', this.currentTileIndex, 'judgeIdx=', tileIndex, 'curPerfect=', curPerfectTime.toFixed(4), 'nextIsMidspin=', nextIsMidspin);
     }
     if (isMidspin) {
-      const skip = Math.min(2, n - 1 - tileIndex);
-      this.currentTileIndex = tileIndex + skip;
+      // midspin 判定 = 同时判定 midspin（Perfect，无限 margin）与它后一个砖块（自动完美 Auto）。
+      // 玩家落在 midspin 后一个砖块上（+1，不是 +2），下一拍在该砖块上正常按键。
+      this.currentTileIndex = tileIndex + 1;
       this._judgeLastCorrectedTile = -1;
       this._consecMisses = 0;
       this.recordMargin(HitMargin.Perfect);
-      const landingTile = this.tiles.get(String(tileIndex + 1)) ?? null;
-      this.judgmentDisplay?.show(landingTile, HitMargin.Perfect);
-      if (skip === 2) {
-        const autoTile = this.tiles.get(String(tileIndex + 2)) ?? null;
-        this.recordMargin(HitMargin.Auto);
-        this.judgmentDisplay?.show(autoTile, HitMargin.Auto);
-        this.playHitForTile(tileIndex + 2);
-      } else {
-        this.playHitForTile(tileIndex + 1);
-      }
+      this.recordMargin(HitMargin.Auto);
+      // midspin 砖块本身展示 Perfect，后一个砖块展示 Auto（自动完美）
+      this.judgmentDisplay?.show(this.tiles.get(String(tileIndex)) ?? null, HitMargin.Perfect);
+      this.judgmentDisplay?.show(this.tiles.get(String(tileIndex + 1)) ?? null, HitMargin.Auto);
+      this.playHitForTile(tileIndex + 1);
+      // 准度条：midspin 无限 margin → 0 误差
+      this.hitErrorMeter?.addHit(0, this.tileBPM[tileIndex] || 100, this.songPitch, this.getTileMarginScale(tileIndex), this.judgeConfig());
       return;
     }
 
@@ -777,6 +788,9 @@ export class Player implements IPlayer {
       this.recordMargin(margin);
       this.judgmentDisplay?.show(landingTile, margin);
       this.playHitForTile(tileIndex + 1);
+      // 准度条：有效命中按误差角度画线（正=晚 → 条上偏右）
+      const errAngleDeg = (errorMs / 1000) * 3 * bpmTimesSpeed * pitch;
+      this.hitErrorMeter?.addHit(errAngleDeg, bpmTimesSpeed, pitch, marginScale, this.judgeConfig());
     } else if (this.noFail) {
       this.currentTileIndex++;
       this._judgeLastCorrectedTile = -1;
@@ -822,20 +836,18 @@ export class Player implements IPlayer {
       if (errDeg <= tooLateThreshold) return;
 
       if (this.noFail) {
-        // midspin：矫正时同时跳过其后一个方块（自动完美）
+        // midspin：矫正时落在其后一个砖块（+1），该砖块自动完美（Auto）
         const isMidspin = (this.levelData.tiles[tileIndex]?.direction === 999);
         if (isMidspin) {
           console.log('[tooLate][midspin] corrected tile', tileIndex, 'at t=', timeInLevel.toFixed(4), 'perfect=', perfectTime.toFixed(4));
         }
         if (isMidspin && tileIndex + 1 < n - 1) {
-          this.currentTileIndex += 2;
+          this.currentTileIndex += 1;
           this._judgeLastCorrectedTile = tileIndex;
           this.recordMargin(HitMargin.FailMiss);
-          this.judgmentDisplay?.show(this.tiles.get(String(tileIndex + 1)) ?? null, HitMargin.FailMiss);
-          const autoTile = this.tiles.get(String(tileIndex + 2)) ?? null;
           this.recordMargin(HitMargin.Auto);
-          this.judgmentDisplay?.show(autoTile, HitMargin.Auto);
-          this.playHitForTile(tileIndex + 2);
+          this.judgmentDisplay?.show(this.tiles.get(String(tileIndex + 1)) ?? null, HitMargin.FailMiss);
+          this.playHitForTile(tileIndex + 1);
         } else {
           this.currentTileIndex++;
           this._judgeLastCorrectedTile = tileIndex;
@@ -943,6 +955,44 @@ export class Player implements IPlayer {
   private formatHexColor(hex: string): string {
     return this.tileColorManager.formatHexColor(hex);
   }
+
+  /**
+   * 构建每个砖块的有效 hitsound：SetHitsound 事件从 floor 起作用于所有后续砖块，
+   * 可被下一个 SetHitsound 覆盖（官方语义）。
+   */
+  private buildTileHitsounds(): void {
+    const n = this.levelData.tiles?.length ?? 0;
+    this.tileHitsounds = new Array(n).fill(null);
+    if (!this.tileSetHitsoundEvents || this.tileSetHitsoundEvents.size === 0) return;
+
+    const events: Array<{ floor: number; type: HitsoundType; volume: number }> = [];
+    for (const [floor, list] of this.tileSetHitsoundEvents) {
+      for (let k = 0; k < list.length; k++) {
+        const ev = list[k];
+        const hsType = (ev.hitsound || 'Kick') as HitsoundType;
+        const hsVol = ev.hitsoundVolume != null ? ev.hitsoundVolume : 100;
+        events.push({ floor, type: hsType, volume: hsVol });
+      }
+    }
+    if (events.length === 0) return;
+    events.sort((a, b) => a.floor - b.floor);
+
+    let current: { type: HitsoundType; volume: number } | null = null;
+    let idx = 0;
+    for (const ev of events) {
+      for (; idx < n && idx < ev.floor; idx++) {
+        this.tileHitsounds[idx] = current;
+      }
+      if (idx < n) {
+        current = { type: ev.type, volume: ev.volume };
+        this.tileHitsounds[idx] = current;
+        idx++;
+      }
+    }
+    for (; idx < n; idx++) {
+      this.tileHitsounds[idx] = current;
+    }
+  }
   
   /**
    * Resolve a tile's absolute direction using the same convention as
@@ -1009,6 +1059,7 @@ export class Player implements IPlayer {
       console.log('[Player] No tileStartTimes, skipping hitsound synthesis');
       return;
     }
+    this.buildTileHitsounds();
 
     const lastTileTime = this.tileStartTimes[this.tileStartTimes.length - 1] || 0;
     const totalDuration = lastTileTime + 10;
@@ -1029,7 +1080,7 @@ export class Player implements IPlayer {
       const t = this.tileStartTimes[i];
       const tile = this.levelData.tiles[i];
       if (tile && tile.angle !== 0) {
-        const override = this.setHitsoundOverrides.get(i);
+        const override = this.tileHitsounds[i];
         if (override) {
           const key = `${override.type}_${override.volume}`;
           let group = overrideGroups.get(key);
@@ -1095,6 +1146,7 @@ export class Player implements IPlayer {
       if (onProgress) onProgress(100);
       return;
     }
+    this.buildTileHitsounds();
 
     const lastTileTime = this.tileStartTimes[this.tileStartTimes.length - 1] || 0;
     const totalDuration = lastTileTime + 10;
@@ -1110,7 +1162,7 @@ export class Player implements IPlayer {
       const t = this.tileStartTimes[i];
       const tile = this.levelData.tiles[i];
       if (tile && tile.angle !== 0) {
-        const override = this.setHitsoundOverrides.get(i);
+        const override = this.tileHitsounds[i];
         if (override) {
           const key = `${override.type}_${override.volume}`;
           let group = overrideGroups.get(key);
@@ -1588,6 +1640,10 @@ export class Player implements IPlayer {
     
     // Create overlay HUD (2D canvas on top of WebGL)
     this.overlayHUD = new OverlayHUD(container);
+
+    // 准度条（判定误差显示，底部中央）
+    this.hitErrorMeter = new HitErrorMeter(container);
+    this.hitErrorMeter.setVisible(false);
     
     this.onWindowResize();
     
@@ -1972,7 +2028,12 @@ export class Player implements IPlayer {
           totalTiles: this.levelData.tiles.length,
           countdownText: this.countdownText,
           marginCounts: this.marginCounts,
-          xAcc: this.getXAcc()
+          xAcc: this.getXAcc(),
+          dead: this._manualDead,
+          percentComplete: this.levelData.tiles.length > 0
+            ? Math.min(1, (this.currentTileIndex + 1) / this.levelData.tiles.length)
+            : 0,
+          deaths: this.deaths
         });
         this.overlayHUD.render();
       }
@@ -2360,6 +2421,8 @@ export class Player implements IPlayer {
   public renderPlayer(delta: number): void {
     // 判定文本淡出（播放/暂停/预览均执行）
     this.judgmentDisplay?.update(delta);
+    // 准度条指针平滑 + tick 淡出
+    this.hitErrorMeter?.update(delta);
 
     // Sync camera/visibleTiles/instanced from CameraController (non-play + paused)
     if ((!this.isPlaying || this.isPaused) && this.cameraController) {
@@ -2495,6 +2558,7 @@ export class Player implements IPlayer {
     this.currentTileIndex = 0;
     this._manualDead = false;
     this._consecMisses = 0;
+    this.deaths = 0;
     this._judgeLastCorrectedTile = -1;
     this._judgeHitsoundPlayed = -1;
     this._lastAutoJudgedTile = -1;
@@ -2805,10 +2869,16 @@ export class Player implements IPlayer {
     this.isPaused = false;
     this._manualDead = false;
     this._consecMisses = 0;
+    this.deaths = 0;
     this.deselectTile();
     this.elapsedTime = 0;
     this.audioDriftSynced = false;
     this._musicScheduled = false;
+    // 清除 HUD：倒计时、判定文字、准度条
+    this.countdownText = '';
+    this._lastCountdownTick = -1;
+    this.judgmentDisplay?.clear();
+    this.hitErrorMeter?.clear();
     this.removePlanets();
     
     if (this.music && (this.music as any).hasAudio ? this.music.hasAudio : false) {
@@ -3340,6 +3410,7 @@ export class Player implements IPlayer {
     this.renderer.setSize(width, height);
     
     if (this.overlayHUD) this.overlayHUD.resize();
+    if (this.hitErrorMeter) this.hitErrorMeter.resize();
     
     if (this.renderTarget) {
       this.renderTarget.setSize(width, height);
@@ -3992,6 +4063,9 @@ export class Player implements IPlayer {
             this.recordMargin(HitMargin.Auto);
             const landedTile = this.tiles.get(String(this.currentTileIndex)) ?? null;
             this.judgmentDisplay?.show(landedTile, HitMargin.Auto);
+            // 准度条：autoplay 0 误差（官方 auto → AddHit(0)）
+            const ti = this.currentTileIndex - 1;
+            this.hitErrorMeter?.addHit(0, this.tileBPM[ti] || 100, this.songPitch, this.getTileMarginScale(ti), this.judgeConfig());
         }
     }
     
@@ -4583,6 +4657,10 @@ export class Player implements IPlayer {
     if (this.overlayHUD) {
       this.overlayHUD.dispose();
       this.overlayHUD = null;
+    }
+    if (this.hitErrorMeter) {
+      this.hitErrorMeter.dispose();
+      this.hitErrorMeter = null;
     }
 
     if (this.music) {

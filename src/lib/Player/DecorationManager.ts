@@ -1,36 +1,72 @@
 import { Group, Mesh, Sprite, Vector2, Color, Texture, MeshBasicMaterial, SpriteMaterial, Material, CanvasTexture, CircleGeometry, RingGeometry, BufferGeometry, BufferAttribute, SRGBColorSpace, DoubleSide, Scene, TextureLoader, PlaneGeometry, Vector3, WebGLRenderTarget, Float32BufferAttribute, NormalBlending, AdditiveBlending, MultiplyBlending, CustomBlending, AddEquation, ReverseSubtractEquation, LinearFilter, LinearMipMapLinearFilter, Blending } from 'three';
-import { EasingFunctions } from './Easing';
 import { TimelineManager } from './TimelineManager';
 import createTrackMesh from '../Geo/mesh_reserve';
-import { isEventActive } from './EventUtils';
+import { isEventActive, isEnabled } from './EventUtils';
 import { getIconTexture, getIconTextureForCustomFloor, createIconSprite } from './IconLoader';
 import { debugLog } from './DebugLog';
 import { DecorationInstancedRenderer, DecoInstanceSlot } from './DecorationInstancedRenderer';
+import { ParticleDecorationSystem } from './ParticleDecoration';
+import type { ParticleConfig } from './ParticleDecoration';
 
 /**
  * Parse ADOFAI hex color which may be #RRGGBBAA (8-digit with alpha).
  * Returns [rgbString, alpha01] where rgbString is #RRGGBB and alpha01 is 0..1.
  * Color only accepts #RRGGBB, so alpha must be split out.
  */
-function parseDecoColor(hex: string | undefined, fallback: string = 'ffffff'): [string, number] {
-    const raw = (hex || fallback).replace(/^#/, '');
-    if (raw.length >= 8) {
-        const alpha = parseInt(raw.slice(6, 8), 16) / 255;
-        return ['#' + raw.slice(0, 6), alpha];
+function parseDecoColor(hex: any, fallback: string = 'ffffff'): [string, number] {
+    if (typeof hex === 'string') {
+        const raw = hex.replace(/^#/, '');
+        if (raw.length >= 8) {
+            const alpha = parseInt(raw.slice(6, 8), 16) / 255;
+            return ['#' + raw.slice(0, 6), alpha];
+        }
+        return ['#' + raw.slice(0, 6), 1];
     }
-    return ['#' + raw.slice(0, 6), 1];
+    if (typeof hex === 'number') {
+        // 0xRRGGBB / 0xRRGGBBAA
+        const n = hex >>> 0;
+        if (n > 0xffffff) {
+            const alpha = ((n >>> 24) & 0xff) / 255;
+            return ['#' + ((n >>> 16) & 0xff).toString(16).padStart(2, '0')
+                + ((n >>> 8) & 0xff).toString(16).padStart(2, '0')
+                + (n & 0xff).toString(16).padStart(2, '0'), alpha];
+        }
+        return ['#' + (n & 0xff).toString(16).padStart(2, '0') + ((n >>> 8) & 0xff).toString(16).padStart(2, '0') + ((n >>> 16) & 0xff).toString(16).padStart(2, '0'), 1];
+    }
+    if (Array.isArray(hex)) {
+        // [r, g, b] 或 [r, g, b, a]（0..1）
+        const toHex = (v: number) => Math.round(Math.min(1, Math.max(0, v)) * 255).toString(16).padStart(2, '0');
+        const alpha = hex.length >= 4 && typeof hex[3] === 'number' ? hex[3] : 1;
+        return ['#' + toHex(hex[0]) + toHex(hex[1]) + toHex(hex[2]), alpha];
+    }
+    if (hex && typeof hex === 'object' && typeof (hex as any).r === 'number') {
+        // {r, g, b} / {r, g, b, a}（0..1）
+        const o = hex as any;
+        const toHex = (v: number) => Math.round(Math.min(1, Math.max(0, v)) * 255).toString(16).padStart(2, '0');
+        return ['#' + toHex(o.r) + toHex(o.g) + toHex(o.b), typeof o.a === 'number' ? o.a : 1];
+    }
+    // 粒子等特殊对象 → 默认白
+    return ['#' + fallback.replace(/^#/, '').slice(0, 6), 1];
+}
+
+/** 将 #RRGGBB 解析为 [r,g,b]（0..1）。 */
+function hexToRGB01(hex: string): [number, number, number] {
+    const h = hex.replace(/^#/, '');
+    return [
+        parseInt(h.slice(0, 2), 16) / 255,
+        parseInt(h.slice(2, 4), 16) / 255,
+        parseInt(h.slice(4, 6), 16) / 255,
+    ];
 }
 
 /**
- * Parse event.visible matching official ADOFAI logic:
- *   - Key missing → true
- *   - Bool value → use it
- *   - Non-bool (string, etc.) → true
+ * Parse event.visible matching ADOFAI-JS isEnabled semantics:
+ *   - Key missing → true（默认可见）
+ *   - Bool → 原样
+ *   - "Enabled"/"true"（字符串）→ true；"Disabled"/"false"/其他 → false
  */
 function parseEventVisible(val: any): boolean {
-    if (val === undefined || val === null) return true;
-    if (typeof val === 'boolean') return val;
-    return true;
+    return isEnabled(val, true);
 }
 
 function getBlendMode(mode: DecorationBlendMode): number {
@@ -103,12 +139,6 @@ export interface DecorationConfig {
     scaleMultiplier: number;
     stickToFloor: boolean;
     floor?: number;
-    animating: boolean;
-    animationStart: number;
-    animationDuration: number;
-    animationStartValues: Partial<DecorationConfig>;
-    animationTargetValues: Partial<DecorationConfig>;
-    animationEase: string;
     objectType?: string;
     planetColorType?: string;
     planetColor?: string;
@@ -208,12 +238,6 @@ const defaultDecorationConfig: DecorationConfig = {
     maskingType: MaskingType.None,
     maskingTarget: '',
     imageSmoothing: false,
-    animating: false,
-    animationStart: 0,
-    animationDuration: 0,
-    animationStartValues: {},
-    animationTargetValues: {},
-    animationEase: 'Linear'
 };
 
 class DecorationInstance {
@@ -237,18 +261,24 @@ class DecorationInstance {
     public baseSizeX = 1;
     public baseSizeY = 1;
     public instSlot: DecoInstanceSlot | null = null;
+    public particles: ParticleDecorationSystem | null = null;
+    public sourceEvent: any = null;
     private instRenderer: DecorationInstancedRenderer | null = null;
     private originalVisible: boolean = true;
     private originalDepth: number = 0;
-    private animStartR = 0;
-    private animStartG = 0;
-    private animStartB = 0;
-    private animTargetR = 0;
-    private animTargetG = 0;
-    private animTargetB = 0;
-    private animHasColor = false;
     private _isStaticWorld = true;
+    // 真正生效的可见性 = culling 视锥可见 && 用户/事件 visible
     private _instVisible = true;
+    private _culledVisible = true;
+    // 时间轴采样缓存：避免每帧重复触发 image load 或相同值导致的 transform 重算
+    public _manager: any = null;
+    private _lastImage: string | null = null;
+    private _lastText: string | null = null;
+    private _lastPlanetColor: string | null = null;
+    private _lastPlanetTailColor: string | null = null;
+    private _lastTrackColor: string | null = null;
+    private _lastTrackOpacity: number | null = null;
+    private _lastTrackIcon: string | null = null;
 
     public get isStaticWorld(): boolean {
         return this._isStaticWorld;
@@ -270,6 +300,10 @@ class DecorationInstance {
         this.visualGroup.position.set(this.config.pivotOffset[0], this.config.pivotOffset[1], 0);
         this.container.add(this.visualGroup);
         this.currentScale.set(this.config.scale[0] / 100, this.config.scale[1] / 100);
+        // 粒子装饰：scale 只控制发射区域（shape.scale），transform 不缩放（官方 SetScale 仅设 shape）
+        if (this.config.decorationType === DecorationType.Particle) {
+            this.currentScale.set(1, 1);
+        }
         this.currentRotation = this.config.rotation + this.config.rotationOffset;
         // Parse color with alpha: #RRGGBBAA → color=#RRGGBB, alpha extracted
         const [colorHex, colorAlpha] = parseDecoColor(this.config.color);
@@ -352,6 +386,7 @@ class DecorationInstance {
         if (this.sprite) { this.visualGroup.remove(this.sprite); (this.sprite.material as Material).dispose(); this.sprite = null; }
         if (this.objectGroup) { this.visualGroup.remove(this.objectGroup); this.objectGroup = null; }
         if (this.iconSprite) { (this.iconSprite.material as Material).dispose(); this.iconSprite = null; }
+        if (this.particles) { this.particles.dispose(); this.particles = null; }
     }
 
     /** Compute depth z + renderOrder from config.depth.
@@ -488,149 +523,147 @@ class DecorationInstance {
     }
 
     public setCulledVisible(vis: boolean): void {
-        if (this.container.visible !== vis) this.container.visible = vis;
-        this._instVisible = vis;
+        this._culledVisible = vis;
+        const effective = vis && (this.config.visible !== false);
+        if (this._instVisible !== effective) {
+            this._instVisible = effective;
+            this.container.visible = effective;
+        }
         if (this.instSlot) this.syncInstance();
     }
 
     public updateAnimation(now: number, tm?: TimelineManager): void {
-        if (tm && this.config.tag) {
-            const kv = `deco:${this.config.tag}`;
-            let dirty = false;
-            const px = tm.sample(kv, 'positionX', now);
-            if (px !== undefined) { this.currentPosition.x = px; this.pivotPos.x = px; dirty = true; }
-            const py = tm.sample(kv, 'positionY', now);
-            if (py !== undefined) { this.currentPosition.y = py; this.pivotPos.y = py; dirty = true; }
-            const rot = tm.sample(kv, 'rotation', now);
-            if (rot !== undefined) { this.currentRotation = this.config.rotation + rot; dirty = true; }
-            const sx = tm.sample(kv, 'scaleX', now);
-            if (sx !== undefined) { this.currentScale.x = sx; dirty = true; }
-            const sy = tm.sample(kv, 'scaleY', now);
-            if (sy !== undefined) { this.currentScale.y = sy; dirty = true; }
-            const op = tm.sample(kv, 'opacity', now);
-            if (op !== undefined) { this.currentOpacity = op; dirty = true; }
-            const parX = tm.sample(kv, 'parallaxX', now);
-            if (parX !== undefined) { this.currentParallax.x = parX; dirty = true; }
-            const parY = tm.sample(kv, 'parallaxY', now);
-            if (parY !== undefined) { this.currentParallax.y = parY; dirty = true; }
-            const pox = tm.sample(kv, 'parallaxOffsetX', now);
-            if (pox !== undefined) { this.currentParallaxOffset.x = pox; dirty = true; }
-            const poy = tm.sample(kv, 'parallaxOffsetY', now);
-            if (poy !== undefined) { this.currentParallaxOffset.y = poy; dirty = true; }
-            if (dirty) this.updateTransform();
-            return;
+        if (!tm || !this.config.tag) return;
+        try {
+            this.updateAnimationInner(now, tm);
+        } catch (err) {
+            // 单个装饰物采样异常不影响整体
+            console.error('[Decoration] updateAnimation error', this.config.tag, err);
         }
-        if (!this.config.animating) return;
-        const el = now - this.config.animationStart;
-        const dur = this.config.animationDuration;
-        if (dur <= 0) { this.config.animating = false; this.applyAnimationTarget(); return; }
-        if (el >= dur) { this.config.animating = false; this.applyAnimationTarget(); return; }
-        const p = Math.max(0, Math.min(1, el / dur));
-        const ease = (EasingFunctions as any)[this.config.animationEase] || EasingFunctions.Linear;
-        const ep = ease(p);
-        const s = this.config.animationStartValues;
-        const t = this.config.animationTargetValues;
-        if (s.positionOffset && t.positionOffset) {
-            this.currentPosition.x = s.positionOffset[0] + (t.positionOffset[0] - s.positionOffset[0]) * ep;
-            this.currentPosition.y = s.positionOffset[1] + (t.positionOffset[1] - s.positionOffset[1]) * ep;
-            this.pivotPos.copy(this.currentPosition);
-        }
-        if (s.rotationOffset !== undefined && t.rotationOffset !== undefined) {
-            this.currentRotation = this.config.rotation + s.rotationOffset + (t.rotationOffset - s.rotationOffset) * ep;
-        }
-        if (s.scale && t.scale) {
-            this.currentScale.x = (s.scale[0] + (t.scale[0] - s.scale[0]) * ep) / 100;
-            this.currentScale.y = (s.scale[1] + (t.scale[1] - s.scale[1]) * ep) / 100;
-        }
-        if (s.opacity !== undefined && t.opacity !== undefined) {
-            this.currentOpacity = (s.opacity + (t.opacity - s.opacity) * ep) / 100;
-        }
-        if (this.animHasColor) {
-            this.currentColor.r = this.animStartR + (this.animTargetR - this.animStartR) * ep;
-            this.currentColor.g = this.animStartG + (this.animTargetG - this.animStartG) * ep;
-            this.currentColor.b = this.animStartB + (this.animTargetB - this.animStartB) * ep;
-        }
-        if (s.parallax && t.parallax) {
-            this.currentParallax.x = (s.parallax[0] + (t.parallax[0] - s.parallax[0]) * ep) / 100;
-            this.currentParallax.y = (s.parallax[1] + (t.parallax[1] - s.parallax[1]) * ep) / 100;
-        }
-        if (s.parallaxOffset && t.parallaxOffset) {
-            this.currentParallaxOffset.x = s.parallaxOffset[0] + (t.parallaxOffset[0] - s.parallaxOffset[0]) * ep;
-            this.currentParallaxOffset.y = s.parallaxOffset[1] + (t.parallaxOffset[1] - s.parallaxOffset[1]) * ep;
-        }
-        if (s.pivotOffset && t.pivotOffset) {
-            const px = s.pivotOffset[0] + (t.pivotOffset[0] - s.pivotOffset[0]) * ep;
-            const py = s.pivotOffset[1] + (t.pivotOffset[1] - s.pivotOffset[1]) * ep;
-            this.visualGroup.position.set(px, py, 0);
-        }
-        this.updateTransform();
     }
 
-    private applyAnimationTarget(): void {
-        const t = this.config.animationTargetValues;
-        if (t.positionOffset) { this.currentPosition.set(t.positionOffset[0], t.positionOffset[1]); this.pivotPos.copy(this.currentPosition); }
-        if (t.rotationOffset !== undefined) this.currentRotation = this.config.rotation + t.rotationOffset;
-        if (t.scale) { this.currentScale.x = t.scale[0] / 100; this.currentScale.y = t.scale[1] / 100; }
-        if (t.opacity !== undefined) this.currentOpacity = t.opacity / 100;
-        if (t.color) {
-            const [hex, alpha] = parseDecoColor(t.color);
-            this.currentColor.set(hex);
-            this.currentOpacity *= alpha;
-        }
-        if (t.parallax) { this.currentParallax.x = t.parallax[0] / 100; this.currentParallax.y = t.parallax[1] / 100; }
-        if (t.parallaxOffset) { this.currentParallaxOffset.set(t.parallaxOffset[0], t.parallaxOffset[1]); }
-        if (t.pivotOffset) {
-            this.config.pivotOffset = [t.pivotOffset[0], t.pivotOffset[1]];
-            this.visualGroup.position.set(t.pivotOffset[0], t.pivotOffset[1], 0);
-            if (this.instSlot && this.instRenderer) this.instRenderer.updatePivot(this.instSlot, t.pivotOffset[0], t.pivotOffset[1]);
-        }
-        if (t.depth !== undefined) this.config.depth = t.depth;
-        if (t.visible !== undefined) { this.config.visible = t.visible; this.container.visible = t.visible; this._instVisible = t.visible; }
-        this.updateTransform();
-    }
+    private updateAnimationInner(now: number, tm: TimelineManager): void {
+        // 每装饰独立时间轴：deco:{id}
+        const kv = this.config.id ? `deco:${this.config.id}` : '';
+        if (!kv) return;
+        let dirty = false;
 
-    public startAnimation(targetValues: Partial<DecorationConfig>, duration: number, ease: string, startTime: number, movementType: DecPlacementType): void {
-        if (this.config.animating) { this.config.animating = false; }
-        const animStartPos = movementType === DecPlacementType.LastPosition ? this.currentPosition : this.startPos;
-        this.config.animationStartValues = {
-            positionOffset: [this.currentPosition.x, this.currentPosition.y],
-            rotationOffset: this.currentRotation - this.config.rotation,
-            scale: [this.currentScale.x * 100, this.currentScale.y * 100],
-            color: '#' + this.currentColor.getHexString(),
-            opacity: this.currentOpacity * 100,
-            parallax: [this.currentParallax.x * 100, this.currentParallax.y * 100],
-            parallaxOffset: [this.currentParallaxOffset.x, this.currentParallaxOffset.y],
-            pivotOffset: [this.config.pivotOffset[0], this.config.pivotOffset[1]],
-        };
-        this.config.animationTargetValues = { ...targetValues };
-        if (targetValues.positionOffset) {
-            this.config.animationTargetValues.positionOffset = [
-                animStartPos.x + targetValues.positionOffset[0],
-                animStartPos.y + targetValues.positionOffset[1]
-            ];
+        const sampleAny = (prop: string): number | undefined => tm.sample(kv, prop, now);
+        const sampleAnyDiscrete = (prop: string): string | boolean | number | undefined => tm.sampleDiscrete(kv, prop, now);
+
+        // 数值动画属性
+        const px = sampleAny('positionX');
+        if (px !== undefined) { this.currentPosition.x = px; this.pivotPos.x = px; dirty = true; }
+        const py = sampleAny('positionY');
+        if (py !== undefined) { this.currentPosition.y = py; this.pivotPos.y = py; dirty = true; }
+        const rot = sampleAny('rotation');
+        if (rot !== undefined) { this.currentRotation = this.config.rotation + rot; dirty = true; }
+        const sx = sampleAny('scaleX');
+        if (sx !== undefined && this.config.decorationType !== DecorationType.Particle) { this.currentScale.x = sx; dirty = true; }
+        const sy = sampleAny('scaleY');
+        if (sy !== undefined && this.config.decorationType !== DecorationType.Particle) { this.currentScale.y = sy; dirty = true; }
+        const op = sampleAny('opacity');
+        if (op !== undefined) { this.currentOpacity = op; dirty = true; }
+        const parX = sampleAny('parallaxX');
+        if (parX !== undefined) { this.currentParallax.x = parX; dirty = true; }
+        const parY = sampleAny('parallaxY');
+        if (parY !== undefined) { this.currentParallax.y = parY; dirty = true; }
+        const pox = sampleAny('parallaxOffsetX');
+        if (pox !== undefined) { this.currentParallaxOffset.x = pox; dirty = true; }
+        const poy = sampleAny('parallaxOffsetY');
+        if (poy !== undefined) { this.currentParallaxOffset.y = poy; dirty = true; }
+
+        // color (RGB)
+        const cr = sampleAny('colorR');
+        const cg = sampleAny('colorG');
+        const cb = sampleAny('colorB');
+        if (cr !== undefined) { this.currentColor.r = cr; dirty = true; }
+        if (cg !== undefined) { this.currentColor.g = cg; dirty = true; }
+        if (cb !== undefined) { this.currentColor.b = cb; dirty = true; }
+
+        // pivot offset（视觉支点，决定 visualGroup 的偏移）
+        const pvx = sampleAny('pivotOffsetX');
+        const pvy = sampleAny('pivotOffsetY');
+        if (pvx !== undefined) { this.visualGroup.position.x = pvx; dirty = true; }
+        if (pvy !== undefined) { this.visualGroup.position.y = pvy; dirty = true; }
+        if ((pvx !== undefined || pvy !== undefined) && this.instSlot && this.instRenderer) {
+            this.instRenderer.updatePivot(this.instSlot, this.visualGroup.position.x, this.visualGroup.position.y);
         }
-        if (targetValues.rotationOffset !== undefined) {
-            this.config.animationTargetValues.rotationOffset = (this.currentRotation - this.config.rotation) + targetValues.rotationOffset;
+
+        // 离散即时属性
+        const img = sampleAnyDiscrete('image');
+        if (typeof img === 'string' && img !== this._lastImage) {
+            this._lastImage = img;
+            this.config.decorationImage = img;
+            if (this._manager && (this.config.decorationType === DecorationType.Image
+                || this.config.decorationType === DecorationType.Particle
+                || this.config.decorationType === DecorationType.Text)) {
+                this._manager.applyImageTo(this, img);
+            }
         }
-        const sc = this.config.animationStartValues.color;
-        if (sc) { this.animStartR = parseInt(sc.slice(1, 3), 16) / 255; this.animStartG = parseInt(sc.slice(3, 5), 16) / 255; this.animStartB = parseInt(sc.slice(5, 7), 16) / 255; }
-        const tc = targetValues.color;
-        if (tc) { const tr = tc.replace(/^#/,'').slice(0,6); this.animTargetR = parseInt(tr.slice(0, 2), 16) / 255; this.animTargetG = parseInt(tr.slice(2, 4), 16) / 255; this.animTargetB = parseInt(tr.slice(4, 6), 16) / 255; }
-        this.animHasColor = !!(sc && tc);
-        this.config.animating = true;
-        this.config.animationStart = startTime;
-        this.config.animationDuration = duration;
-        this.config.animationEase = ease;
+        const dpt = sampleAnyDiscrete('depth');
+        if (typeof dpt === 'number' && dpt !== this.config.depth) {
+            this.config.depth = dpt;
+            dirty = true;
+        }
+        const vis = sampleAnyDiscrete('visible');
+        if (typeof vis === 'boolean' && vis !== this.config.visible) {
+            this.config.visible = vis;
+            // 重新合成可见性（culling && user-visible）
+            this.setCulledVisible(this._culledVisible);
+            if (this.particles) {
+                this.particles.setVisible(vis);
+                if (vis) { this.particles.play(); }
+                else { this.particles.stop(); }
+            }
+        }
+        const mT = sampleAnyDiscrete('maskingType');
+        if (typeof mT === 'string') { this.config.maskingType = mT as any; }
+        const mTgt = sampleAnyDiscrete('maskingTarget');
+        if (typeof mTgt === 'string') { this.config.maskingTarget = mTgt; }
+
+        // SetText / SetObject 离散属性
+        const txt = sampleAnyDiscrete('text');
+        if (typeof txt === 'string' && txt !== this._lastText) {
+            this._lastText = txt;
+            if (this._manager && this.config.decorationType === DecorationType.Text) {
+                this._manager.applyTextTo(this, txt);
+            }
+        }
+        const pCol = sampleAnyDiscrete('planetColor');
+        if (typeof pCol === 'string' && pCol !== this._lastPlanetColor) {
+            this._lastPlanetColor = pCol;
+            if (this._manager) this._manager.applyObjectPropsTo(this, { planetColor: pCol });
+        }
+        const pTail = sampleAnyDiscrete('planetTailColor');
+        if (typeof pTail === 'string' && pTail !== this._lastPlanetTailColor) {
+            this._lastPlanetTailColor = pTail;
+            if (this._manager) this._manager.applyObjectPropsTo(this, { planetTailColor: pTail });
+        }
+        const tCol = sampleAnyDiscrete('trackColor');
+        if (typeof tCol === 'string' && tCol !== this._lastTrackColor) {
+            this._lastTrackColor = tCol;
+            if (this._manager) this._manager.applyObjectPropsTo(this, { trackColor: tCol });
+        }
+        const tOp = sampleAnyDiscrete('trackOpacity');
+        if (typeof tOp === 'number' && tOp !== this._lastTrackOpacity) {
+            this._lastTrackOpacity = tOp;
+            if (this._manager) this._manager.applyObjectPropsTo(this, { trackOpacity: tOp });
+        }
+        const tIcon = sampleAnyDiscrete('trackIcon');
+        if (typeof tIcon === 'string' && tIcon !== this._lastTrackIcon) {
+            this._lastTrackIcon = tIcon;
+            if (this._manager) this._manager.applyObjectPropsTo(this, { trackIcon: tIcon });
+        }
+
+        if (dirty) this.updateTransform();
     }
 
     public reset(): void {
-        this.config.animating = false;
-        this.animHasColor = false;
-        this.config.animationStartValues = {};
-        this.config.animationTargetValues = {};
         this.config.visible = this.originalVisible;
         this.config.depth = this.originalDepth;
         this.currentScale.set(this.config.scale[0] / 100, this.config.scale[1] / 100);
+        if (this.config.decorationType === DecorationType.Particle) this.currentScale.set(1, 1);
         this.currentRotation = this.config.rotation + this.config.rotationOffset;
         const [colorHex, colorAlpha] = parseDecoColor(this.config.color);
         this.currentColor.set(colorHex);
@@ -643,6 +676,14 @@ class DecorationInstance {
         if (this.instSlot && this.instRenderer) {
             this.instRenderer.updatePivot(this.instSlot, this.config.pivotOffset[0], this.config.pivotOffset[1]);
         }
+        // 清采样缓存：重置后下一帧 updateAnimation 会重新采样应用到当前状态
+        this._lastImage = null;
+        this._lastText = null;
+        this._lastPlanetColor = null;
+        this._lastPlanetTailColor = null;
+        this._lastTrackColor = null;
+        this._lastTrackOpacity = null;
+        this._lastTrackIcon = null;
         this.container.visible = this.originalVisible;
         this._instVisible = this.originalVisible;
         this.updateTransform();
@@ -663,7 +704,6 @@ export class DecorationManager {
     private decoList: DecorationInstance[] = [];
     private taggedDecorations: Map<string, DecorationInstance[]> = new Map();
     private decorationEventsTimeline: { time: number; event: any }[] = [];
-    private lastDecorationEventIndex: number = -1;
     private pendingDecorationEvents: any[] = [];
     private tileSize: number = 1.0;
     private textureLoader: TextureLoader;
@@ -674,6 +714,8 @@ export class DecorationManager {
     private texturesLoaded: Set<string> = new Set();
     private placeholderTexture: Texture | null = null;
     private _lastCamX = 0; private _lastCamY = 0; private _lastCamZoom = 0;
+    private _lastNow = 0;
+    private _particlesStarted: Set<DecorationInstance> = new Set();
     private _timelineManager: TimelineManager | null = null;
     private _staticGrid: DecorationSpatialGrid = new DecorationSpatialGrid(32);
     private _staticDecos: DecorationInstance[] = [];
@@ -702,14 +744,14 @@ export class DecorationManager {
         const tiles = this.levelData.tiles || [];
 
         for (const dec of rootDecos) {
-            if (dec.eventType === 'AddDecoration' || dec.eventType === 'AddText' || dec.eventType === 'AddObject') {
+            if (dec.eventType === 'AddDecoration' || dec.eventType === 'AddText' || dec.eventType === 'AddObject' || dec.eventType === 'AddParticle') {
                 this.tryCreateDecoration(dec);
             }
         }
         for (const tile of tiles) {
             if (tile.addDecorations) {
                 for (const dec of tile.addDecorations) {
-                    if (dec.eventType === 'AddDecoration' || dec.eventType === 'AddText' || dec.eventType === 'AddObject') {
+                    if (dec.eventType === 'AddDecoration' || dec.eventType === 'AddText' || dec.eventType === 'AddObject' || dec.eventType === 'AddParticle') {
                         this.tryCreateDecoration({ ...dec, floor: dec.floor ?? tile.seqID ?? tiles.indexOf(tile) });
                     }
                 }
@@ -724,72 +766,58 @@ export class DecorationManager {
     }
 
     public buildTimelineKeyframes(tm: TimelineManager): void {
-        const initState = new Map<string, {
-            posX: number; posY: number;
-            rot: number;
-            scX: number; scY: number;
-            op: number;
-            parX: number; parY: number;
-            parOffX: number; parOffY: number;
-        }>();
-
-        for (const [tag, list] of this.taggedDecorations) {
-            if (list.length === 0) continue;
-            const d = list[0];
-
-            const startX = d.startPos.x;
-            const startY = d.startPos.y;
-            const baseRot = d.config.rotation;
-            const baseScX = d.config.scale[0];
-            const baseScY = d.config.scale[1];
-            const baseOp = d.config.opacity;
-            const baseParX = d.config.parallax[0];
-            const baseParY = d.config.parallax[1];
-            const baseParOffX = d.config.parallaxOffset[0];
-            const baseParOffY = d.config.parallaxOffset[1];
-
-            tm.addKeyframe(`deco:${tag}`, 'positionX', 0, startX, null);
-            tm.addKeyframe(`deco:${tag}`, 'positionY', 0, startY, null);
-            tm.addKeyframe(`deco:${tag}`, 'rotation', 0, d.currentRotation - baseRot, null);
-            tm.addKeyframe(`deco:${tag}`, 'scaleX', 0, baseScX / 100, null);
-            tm.addKeyframe(`deco:${tag}`, 'scaleY', 0, baseScY / 100, null);
-            tm.addKeyframe(`deco:${tag}`, 'opacity', 0, baseOp / 100, null);
-            tm.addKeyframe(`deco:${tag}`, 'parallaxX', 0, baseParX / 100, null);
-            tm.addKeyframe(`deco:${tag}`, 'parallaxY', 0, baseParY / 100, null);
-            tm.addKeyframe(`deco:${tag}`, 'parallaxOffsetX', 0, baseParOffX, null);
-            tm.addKeyframe(`deco:${tag}`, 'parallaxOffsetY', 0, baseParOffY, null);
-
-            initState.set(tag, {
-                posX: startX, posY: startY,
-                rot: 0,
-                scX: baseScX / 100, scY: baseScY / 100,
-                op: baseOp / 100,
-                parX: baseParX / 100, parY: baseParY / 100,
-                parOffX: baseParOffX, parOffY: baseParOffY,
-            });
-        }
-
         const ts = this.tileSize;
-        for (const entry of this.decorationEventsTimeline) {
-            const { time: eventTime, event } = entry;
-            if (event.eventType !== 'MoveDecorations') continue;
-            if (!isEventActive(event)) continue;
+        const entries = this.decorationEventsTimeline;
 
-            const tagStr = event.tag || '';
-            if (!tagStr) continue;
-            const tags = tagStr.split(/\s+/).filter(Boolean);
-            const floor = event.floor ?? 0;
-            const bpm = this.tileBPM[floor] || 100;
-            const duration = (event.duration || 0) * 60 / bpm;
-            const ease = event.ease || 'Linear';
-            const movementType = this.parsePlacement(event.relativeTo);
-            const isLastPos = movementType === DecPlacementType.LastPosition;
+        // 每个装饰独立时间轴（deco:{id}），事件按 tag 匹配展开到各装饰，
+        // 目标值基于装饰自身初始值计算——同 tag 不同 scale/position 的装饰互不影响。
+        for (const deco of this.decoList) {
+            const kv = `deco:${deco.config.id}`;
+            const decoTags = (deco.config.tag || '').split(/\s+/).filter(Boolean);
 
-            for (const tag of tags) {
-                const kv = `deco:${tag}`;
-                const state = initState.get(tag);
-                if (!state) continue;
+            const [baseColorHex] = parseDecoColor(deco.config.color, 'ffffff');
+            const [baseCR, baseCG, baseCB] = hexToRGB01(baseColorHex);
+            const baseOp0 = (deco.config.opacity / 100) * parseDecoColor(deco.config.color, 'ffffff')[1];
+            const basePosX = deco.startPos.x;
+            const basePosY = deco.startPos.y;
 
+            for (const entry of entries) {
+                const { time: eventTime, event } = entry;
+                if (!isEventActive(event)) continue;
+                const eventTags = (event.tag || '').split(/\s+/).filter(Boolean);
+                if (!decoTags.some(t => eventTags.includes(t))) continue;
+
+                // SetText / SetObject：离散轨（decText / 物体属性）
+                if (event.eventType === 'SetText') {
+                    tm.addDiscreteKeyframe(kv, 'text', eventTime, String(event.decText ?? ''));
+                    continue;
+                }
+                if (event.eventType === 'SetObject') {
+                    if (event.planetColor !== undefined && !event.disabled?.planetColor) {
+                        tm.addDiscreteKeyframe(kv, 'planetColor', eventTime, String(event.planetColor));
+                    }
+                    if (event.planetTailColor !== undefined && !event.disabled?.planetTailColor) {
+                        tm.addDiscreteKeyframe(kv, 'planetTailColor', eventTime, String(event.planetTailColor));
+                    }
+                    if (event.trackColor !== undefined && !event.disabled?.trackColor) {
+                        tm.addDiscreteKeyframe(kv, 'trackColor', eventTime, String(event.trackColor));
+                    }
+                    if (event.trackOpacity !== undefined && !event.disabled?.opacity) {
+                        tm.addDiscreteKeyframe(kv, 'trackOpacity', eventTime, event.trackOpacity);
+                    }
+                    if (event.trackIcon !== undefined && !event.disabled?.trackIcon) {
+                        tm.addDiscreteKeyframe(kv, 'trackIcon', eventTime, String(event.trackIcon));
+                    }
+                    continue;
+                }
+                if (event.eventType !== 'MoveDecorations') continue;
+
+                const floor = event.floor ?? 0;
+                const bpm = this.tileBPM[floor] || 100;
+                const duration = (event.duration || 0) * 60 / bpm;
+                const ease = event.ease || 'Linear';
+                const movementType = this.parsePlacement(event.relativeTo);
+                const isLastPos = movementType === DecPlacementType.LastPosition;
                 const endTime = eventTime + duration;
                 const hasDur = duration > 0;
 
@@ -797,13 +825,10 @@ export class DecorationManager {
                     const pos = this.parseVec2(event.positionOffset, [0, 0]);
                     const offX = pos[0] * ts;
                     const offY = pos[1] * ts;
-                    const startX = tm.sample(kv, 'positionX', eventTime) ?? state.posX;
-                    const startY = tm.sample(kv, 'positionY', eventTime) ?? state.posY;
-                    const endX = isLastPos ? startX + offX : (state.posX - 0) + offX;
-                    const endY = isLastPos ? startY + offY : (state.posY - 0) + offY;
-                    // Actually for non-LastPosition, the target is startPos (from AddObject) + offset.
-                    // state stores the initial position. But after events, posX/posY are stale.
-                    // For keyframes, we let addTween handle the interpolation.
+                    const startX = tm.sample(kv, 'positionX', eventTime) ?? basePosX;
+                    const startY = tm.sample(kv, 'positionY', eventTime) ?? basePosY;
+                    const endX = isLastPos ? startX + offX : basePosX + offX;
+                    const endY = isLastPos ? startY + offY : basePosY + offY;
                     if (hasDur) {
                         tm.addTween(kv, 'positionX', eventTime, endTime, startX, endX, ease);
                         tm.addTween(kv, 'positionY', eventTime, endTime, startY, endY, ease);
@@ -814,9 +839,8 @@ export class DecorationManager {
                 }
 
                 if (event.rotationOffset !== undefined && !event.disabled?.rotationOffset) {
-                    const rotOff = event.rotationOffset; // keep in degrees to match keyframe unit
-                    const startRot = tm.sample(kv, 'rotation', eventTime) ?? state.rot;
-                    const endRot = isLastPos ? startRot + rotOff : rotOff;
+                    const endRot = event.rotationOffset;
+                    const startRot = tm.sample(kv, 'rotation', eventTime) ?? 0;
                     if (hasDur) {
                         tm.addTween(kv, 'rotation', eventTime, endTime, startRot, endRot, ease);
                     } else {
@@ -828,8 +852,8 @@ export class DecorationManager {
                     const s = this.parseVec2(event.scale, [100, 100]);
                     const endSX = s[0] / 100;
                     const endSY = s[1] / 100;
-                    const startSX = tm.sample(kv, 'scaleX', eventTime) ?? state.scX;
-                    const startSY = tm.sample(kv, 'scaleY', eventTime) ?? state.scY;
+                    const startSX = tm.sample(kv, 'scaleX', eventTime) ?? (deco.config.scale[0] / 100);
+                    const startSY = tm.sample(kv, 'scaleY', eventTime) ?? (deco.config.scale[1] / 100);
                     if (hasDur) {
                         tm.addTween(kv, 'scaleX', eventTime, endTime, startSX, endSX, ease);
                         tm.addTween(kv, 'scaleY', eventTime, endTime, startSY, endSY, ease);
@@ -841,7 +865,7 @@ export class DecorationManager {
 
                 if (event.opacity !== undefined && !event.disabled?.opacity) {
                     const endOp = event.opacity / 100;
-                    const startOp = tm.sample(kv, 'opacity', eventTime) ?? state.op;
+                    const startOp = tm.sample(kv, 'opacity', eventTime) ?? baseOp0;
                     if (hasDur) {
                         tm.addTween(kv, 'opacity', eventTime, endTime, startOp, endOp, ease);
                     } else {
@@ -853,8 +877,8 @@ export class DecorationManager {
                     const p = this.parseVec2(event.parallax, [100, 100]);
                     const endParX = p[0] / 100;
                     const endParY = p[1] / 100;
-                    const startParX = tm.sample(kv, 'parallaxX', eventTime) ?? state.parX;
-                    const startParY = tm.sample(kv, 'parallaxY', eventTime) ?? state.parY;
+                    const startParX = tm.sample(kv, 'parallaxX', eventTime) ?? (deco.config.parallax[0] / 100);
+                    const startParY = tm.sample(kv, 'parallaxY', eventTime) ?? (deco.config.parallax[1] / 100);
                     if (hasDur) {
                         tm.addTween(kv, 'parallaxX', eventTime, endTime, startParX, endParX, ease);
                         tm.addTween(kv, 'parallaxY', eventTime, endTime, startParY, endParY, ease);
@@ -868,8 +892,8 @@ export class DecorationManager {
                     const po = this.parseVec2(event.parallaxOffset, [0, 0]);
                     const endPOX = po[0] * ts;
                     const endPOY = po[1] * ts;
-                    const startPOX = tm.sample(kv, 'parallaxOffsetX', eventTime) ?? state.parOffX;
-                    const startPOY = tm.sample(kv, 'parallaxOffsetY', eventTime) ?? state.parOffY;
+                    const startPOX = tm.sample(kv, 'parallaxOffsetX', eventTime) ?? deco.config.parallaxOffset[0];
+                    const startPOY = tm.sample(kv, 'parallaxOffsetY', eventTime) ?? deco.config.parallaxOffset[1];
                     if (hasDur) {
                         tm.addTween(kv, 'parallaxOffsetX', eventTime, endTime, startPOX, endPOX, ease);
                         tm.addTween(kv, 'parallaxOffsetY', eventTime, endTime, startPOY, endPOY, ease);
@@ -878,9 +902,59 @@ export class DecorationManager {
                         tm.addKeyframe(kv, 'parallaxOffsetY', eventTime, endPOY, null);
                     }
                 }
+
+                if (event.pivotOffset !== undefined && !event.disabled?.pivotOffset) {
+                    const pv = this.parseVec2(event.pivotOffset, [0, 0]);
+                    const endPVX = pv[0] * ts;
+                    const endPVY = pv[1] * ts;
+                    const startPVX = tm.sample(kv, 'pivotOffsetX', eventTime) ?? deco.config.pivotOffset[0];
+                    const startPVY = tm.sample(kv, 'pivotOffsetY', eventTime) ?? deco.config.pivotOffset[1];
+                    if (hasDur) {
+                        tm.addTween(kv, 'pivotOffsetX', eventTime, endTime, startPVX, endPVX, ease);
+                        tm.addTween(kv, 'pivotOffsetY', eventTime, endTime, startPVY, endPVY, ease);
+                    } else {
+                        tm.addKeyframe(kv, 'pivotOffsetX', eventTime, endPVX, null);
+                        tm.addKeyframe(kv, 'pivotOffsetY', eventTime, endPVY, null);
+                    }
+                }
+
+                if (event.color !== undefined && !event.disabled?.color) {
+                    const [cHex, cAlpha] = parseDecoColor(event.color, 'ffffff');
+                    const [eR, eG, eB] = hexToRGB01(cHex);
+                    const sR = tm.sample(kv, 'colorR', eventTime) ?? baseCR;
+                    const sG = tm.sample(kv, 'colorG', eventTime) ?? baseCG;
+                    const sB = tm.sample(kv, 'colorB', eventTime) ?? baseCB;
+                    if (hasDur) {
+                        tm.addTween(kv, 'colorR', eventTime, endTime, sR, eR, ease);
+                        tm.addTween(kv, 'colorG', eventTime, endTime, sG, eG, ease);
+                        tm.addTween(kv, 'colorB', eventTime, endTime, sB, eB, ease);
+                    } else {
+                        tm.addKeyframe(kv, 'colorR', eventTime, eR, null);
+                        tm.addKeyframe(kv, 'colorG', eventTime, eG, null);
+                        tm.addKeyframe(kv, 'colorB', eventTime, eB, null);
+                    }
+                }
+
+                // 离散即时属性
+                if (event.decorationImage !== undefined && !event.disabled?.decorationImage) {
+                    tm.addDiscreteKeyframe(kv, 'image', eventTime, String(event.decorationImage));
+                }
+                if (event.depth !== undefined && !event.disabled?.depth) {
+                    tm.addDiscreteKeyframe(kv, 'depth', eventTime, event.depth);
+                }
+                if (event.visible !== undefined && !event.disabled?.visible) {
+                    tm.addDiscreteKeyframe(kv, 'visible', eventTime, parseEventVisible(event.visible));
+                }
+                if (event.maskingType !== undefined && !event.disabled?.maskingType) {
+                    tm.addDiscreteKeyframe(kv, 'maskingType', eventTime, String(event.maskingType));
+                }
+                if (event.maskingTarget !== undefined && !event.disabled?.maskingTarget) {
+                    tm.addDiscreteKeyframe(kv, 'maskingTarget', eventTime, String(event.maskingTarget));
+                }
             }
         }
     }
+
 
     private tryCreateDecoration(event: any): DecorationInstance | null {
         if (!isEventActive(event)) return null;
@@ -918,7 +992,8 @@ export class DecorationManager {
                 : 0;
         const decoType = event.eventType === 'AddText' ? DecorationType.Text
             : event.eventType === 'AddObject' ? DecorationType.Object
-                : DecorationType.Image;
+                : event.eventType === 'AddParticle' ? DecorationType.Particle
+                    : DecorationType.Image;
 
         const config: Partial<DecorationConfig> = {
             decorationType: decoType,
@@ -936,7 +1011,18 @@ export class DecorationManager {
             parallaxOffset: [rawParallaxOffset[0] * ts, rawParallaxOffset[1] * ts],
             pivotOffset: [rawPivotOffset[0] * (isCam ? 1 : ts), rawPivotOffset[1] * (isCam ? 1 : ts)],
             depth: event.depth || 0,
-            color: event.color || 'ffffff',
+            color: (() => {
+                // v15 某些事件（如 AddParticle）的 color 是对象/数组结构 → 归一化为字符串
+                const c = event.color;
+                if (typeof c === 'string') return c;
+                if (c && typeof c === 'object' && typeof (c as any).color1 === 'string') return (c as any).color1;
+                if (typeof c === 'number') return '#' + (c >>> 0).toString(16).padStart(8, '0').slice(0, 6);
+                if (Array.isArray(c) || (c && typeof c === 'object' && typeof (c as any).r === 'number')) {
+                    const [h, a] = parseDecoColor(c, 'ffffff');
+                    return a >= 1 ? h : h + Math.round(a * 255).toString(16).padStart(2, '0');
+                }
+                return 'ffffff';
+            })(),
             opacity: event.opacity !== undefined ? event.opacity : 100,
             lockScale: event.lockScale === true,
             lockRotation: event.lockRotation === true,
@@ -970,6 +1056,9 @@ export class DecorationManager {
         } else if (decoType === DecorationType.Object) {
             if (!this.setupObjectVisual(deco, event)) { deco.dispose(); return null; }
             deco.updateTransform();
+        } else if (decoType === DecorationType.Particle) {
+            if (!config.decorationImage) { deco.dispose(); return null; }
+            this.setupParticle(deco, event);
         } else {
             if (!config.decorationImage) { deco.dispose(); return null; }
             if (!this.loadDecoTexture(config.decorationImage, deco)) { deco.dispose(); return null; }
@@ -1105,29 +1194,122 @@ export class DecorationManager {
         return true;
     }
 
+    /** AddParticle：创建 CPU 粒子系统（纹理可能未加载，异步创建）。 */
+    private setupParticle(deco: DecorationInstance, event: any): void {
+        deco.sourceEvent = event;
+        const filename = deco.config.decorationImage;
+        const cached = this.textureCache.get(filename);
+        if (cached) {
+            this.createParticleSystem(deco, event, cached);
+            return;
+        }
+        const url = this.findImageUrl(filename);
+        if (!url) {
+            this.pendingDecorationEvents.push(event);
+            return;
+        }
+        // 走全局纹理队列（限并发），加载完成后 afterTextureLoaded 创建粒子系统
+        this.enqueueTextureLoad(filename, url);
+    }
+
+    private parseVelocity(v: any): [[number, number], [number, number]] {
+        if (Array.isArray(v) && Array.isArray(v[0]) && Array.isArray(v[1])) {
+            return [
+                [Number(v[0][0]) || 0, Number(v[0][1]) || 0],
+                [Number(v[1][0]) || 0, Number(v[1][1]) || 0],
+            ];
+        }
+        return [[0, 0], [0, 0]];
+    }
+
+    private createParticleSystem(deco: DecorationInstance, event: any, tex: Texture): void {
+        const cfg: ParticleConfig = {
+            decorationImage: deco.config.decorationImage,
+            scale: [deco.config.scale[0], deco.config.scale[1]],
+            shapeType: event.shapeType || 'Rectangle',
+            shapeRadius: event.shapeRadius ?? 1,
+            arc: event.arc ?? 360,
+            arcMode: event.arcMode || 'Random',
+            emissionRate: this.parseVec2(event.emissionRate, [10, 10]),
+            particleLifetime: this.parseVec2(event.particleLifetime, [1, 2]),
+            particleSize: this.parseVec2(event.particleSize, [1, 1]),
+            velocity: this.parseVelocity(event.velocity),
+            velocityLimitOverLifetime: this.parseVec2(event.velocityLimitOverLifetime, [0, 0]),
+            sizeOverLifetime: this.parseVec2(event.sizeOverLifetime, [1, 1]),
+            colorOverLifetime: event.colorOverLifetime,
+            startRotation: this.parseVec2(event.startRotation, [0, 0]),
+            rotationOverTime: this.parseVec2(event.rotationOverTime, [0, 0]),
+            randomTextureTiling: this.parseVec2(event.randomTextureTiling, [1, 1]),
+            maxParticles: event.maxParticles ?? 100,
+            loop: event.loop === true,
+            playDuration: event.playDuration ?? 5,
+            simulationSpeed: event.simulationSpeed ?? 100,
+            randomSeed: event.randomSeed ?? 0,
+            autoPlay: event.autoPlay !== false,
+            simulationSpace: event.simulationSpace || 'Local',
+            tileSize: this.tileSize,
+            camScaleMultiplier: deco.config.lockScale ? (100 / Math.max(0.001, this._lastCamZoom || 250)) * (deco.config.scaleMultiplier ?? 1) : (deco.config.scaleMultiplier ?? 1),
+        };
+        const sys = new ParticleDecorationSystem(deco.visualGroup, cfg, tex);
+        deco.particles = sys;
+        if (deco.config.visible === false) sys.setVisible(false);
+    }
+
     private loadDecoTexture(filename: string, deco: DecorationInstance): boolean {
         const cached = this.textureCache.get(filename);
         if (cached) { deco.setupVisual(cached); return true; }
         const url = this.findImageUrl(filename);
         if (!url) return false;
-        // Already loading: keep deco alive; callback will setupVisual for all matching
-        if (this.texturesLoading.has(filename)) return true;
-        this.texturesLoading.add(filename);
-        this.textureLoader.load(url, (tex) => {
-            tex.colorSpace = SRGBColorSpace;
-            this.textureCache.set(filename, tex);
-            this.texturesLoaded.add(filename);
-            this.texturesLoading.delete(filename);
-            const apply = (d: DecorationInstance) => {
-                if (d.config.decorationImage === filename && !d.isInstanced && !d.sprite && !d.mesh) d.setupVisual(tex);
-            };
-            for (const d of this.decoList) apply(d);
-            if (!this.decoList.includes(deco)) apply(deco);
-            this.instancedRenderer.flush();
-        }, undefined, () => {
-            this.texturesLoading.delete(filename);
-        });
+        this.enqueueTextureLoad(filename, url);
         return true;
+    }
+
+    /**
+     * 全局纹理加载队列（限并发，防止大图同时解码导致 OOM）。
+     * 加载完成后自动回调 setupVisual / createParticleSystem。
+     */
+    private textureQueue: { filename: string; url: string }[] = [];
+    private textureLoadingCount = 0;
+    private static readonly MAX_TEX_CONCURRENT = 4;
+
+    private enqueueTextureLoad(filename: string, url: string): void {
+        if (this.textureCache.has(filename) || this.texturesLoading.has(filename)) return;
+        this.textureQueue.push({ filename, url });
+        this.pumpTextureQueue();
+    }
+
+    private pumpTextureQueue(): void {
+        while (this.textureLoadingCount < DecorationManager.MAX_TEX_CONCURRENT && this.textureQueue.length > 0) {
+            const job = this.textureQueue.shift()!;
+            if (this.textureCache.has(job.filename) || this.texturesLoading.has(job.filename)) continue;
+            this.texturesLoading.add(job.filename);
+            this.textureLoadingCount++;
+            this.textureLoader.load(job.url, (tex) => {
+                tex.colorSpace = SRGBColorSpace;
+                this.textureCache.set(job.filename, tex);
+                this.texturesLoaded.add(job.filename);
+                this.texturesLoading.delete(job.filename);
+                this.textureLoadingCount--;
+                this.afterTextureLoaded(job.filename, tex);
+                this.pumpTextureQueue();
+            }, undefined, () => {
+                this.texturesLoading.delete(job.filename);
+                this.textureLoadingCount--;
+                this.pumpTextureQueue();
+            });
+        }
+    }
+
+    private afterTextureLoaded(filename: string, tex: Texture): void {
+        for (const d of this.decoList) {
+            if (d.config.decorationImage !== filename) continue;
+            if (d.config.decorationType === DecorationType.Particle) {
+                if (!d.particles && d.sourceEvent) this.createParticleSystem(d, d.sourceEvent, tex);
+            } else if (!d.isInstanced && !d.sprite && !d.mesh) {
+                d.setupVisual(tex);
+            }
+        }
+        this.instancedRenderer.flush();
     }
 
     private findImageUrl(filename: string): string | undefined {
@@ -1144,6 +1326,7 @@ export class DecorationManager {
 
     private registerDecoration(deco: DecorationInstance): void {
         deco.setInstancedRenderer(this.instancedRenderer);
+        deco._manager = this;
         this.decorations.set(deco.config.id!, deco);
         this.decoList.push(deco);
         // Keep logical container for position tracking; instanced visuals live on InstancedMesh
@@ -1219,12 +1402,17 @@ export class DecorationManager {
         const existing = this.textureCache.get(filename);
         if (existing) { existing.dispose(); this.textureCache.delete(filename); }
         this.texturesLoaded.delete(filename);
+        // 图片可用后立即触发相关装饰的纹理加载（不再等 preloadTextures）
+        this.enqueueTextureLoad(filename, url);
         this.retryPending();
     }
 
     private retryPending(): void {
         const remaining: any[] = [];
         for (const event of this.pendingDecorationEvents) {
+            // 避免重复创建：若已有同 eventType+decorationImage 的装饰则跳过
+            const dup = this.decoList.find(d => d.sourceEvent === event);
+            if (dup) continue;
             const deco = this.createDecoration(event);
             if (!deco) remaining.push(event);
         }
@@ -1236,31 +1424,19 @@ export class DecorationManager {
         this.decoList.forEach(d => { if (d.config.decorationImage) filenames.add(d.config.decorationImage); });
         this.pendingDecorationEvents.forEach((e: any) => { if (e.decorationImage) filenames.add(e.decorationImage); });
         if (filenames.size === 0) return 0;
-        const MAX_CONCURRENT = 4;
-        const queue = [...filenames];
-        let resolved = 0;
-        const loadNext = (): Promise<void> => {
-            if (resolved >= queue.length) return Promise.resolve();
-            const batch = queue.slice(resolved, resolved + MAX_CONCURRENT);
-            resolved += batch.length;
-            return Promise.all(batch.map(fn => new Promise<void>((resolve) => {
-                if (this.textureCache.has(fn)) { resolve(); return; }
-                const url = this.findImageUrl(fn);
-                if (!url) { resolve(); return; }
-                this.texturesLoading.add(fn);
-                this.textureLoader.load(url, (tex) => {
-                    tex.colorSpace = SRGBColorSpace;
-                    this.textureCache.set(fn, tex);
-                    this.texturesLoaded.add(fn);
-                    this.texturesLoading.delete(fn);
-                    resolve();
-                }, undefined, () => { this.texturesLoading.delete(fn); resolve(); });
-            }))).then(loadNext);
-        };
-        await loadNext();
+        // 走全局纹理队列（限并发）
+        for (const fn of filenames) {
+            const url = this.findImageUrl(fn);
+            if (url) this.enqueueTextureLoad(fn, url);
+        }
+        // 等待队列排空（轮询）
+        while (this.textureQueue.length > 0 || this.textureLoadingCount > 0) {
+            this.pumpTextureQueue();
+            await new Promise(r => setTimeout(r, 16));
+        }
         this.retryPending();
         this.decoList.forEach(d => {
-            if (d.config.decorationImage) {
+            if (d.config.decorationImage && d.config.decorationType !== DecorationType.Particle) {
                 const tex = this.textureCache.get(d.config.decorationImage);
                 if (tex && !d.isInstanced && !d.sprite && !d.mesh) { d.setupVisual(tex); }
             }
@@ -1271,10 +1447,38 @@ export class DecorationManager {
 
     public update(elapsedTime: number, cameraPosition: Vector3, cameraRotation: number, cameraZoom: number, timelineManager?: TimelineManager, adoZoom?: number): void {
         const now = elapsedTime / 1000;
-        this.processEvents(now);
+        const dt = Math.min(0.1, Math.max(0, now - this._lastNow));
+        this._lastNow = now;
+        const camZ = cameraZoom;
+        // 粒子系统驱动
+        for (const d of this.decoList) {
+            if (!d.particles) continue;
+            const vis = d.config.visible !== false;
+            d.particles.setVisible(vis);
+            if (vis) {
+                try {
+                    if (this._lastNow > 0 && !this._particlesStarted.has(d)) {
+                        d.particles.play();
+                        this._particlesStarted.add(d);
+                    }
+                    if (d.particles) {
+                        const m = d.config.lockScale
+                            ? (100 / Math.max(0.001, camZ || 250)) * (d.config.scaleMultiplier ?? 1)
+                            : (d.config.scaleMultiplier ?? 1);
+                        d.particles.setCamScaleMultiplier(m);
+                    }
+                    const p = d.container.position;
+                    const cs = Math.abs(d.container.scale.x) || d.currentScale.x;
+                    d.particles.update(dt, { x: p.x, y: p.y }, d.container.rotation.z, cs);
+                } catch (err) {
+                    // 粒子异常不应中断整个装饰物渲染
+                    d.particles = null;
+                    console.error('[Decoration] particle update error', err);
+                }
+            }
+        }
         const camX = cameraPosition.x;
         const camY = cameraPosition.y;
-        const camZ = cameraZoom;
         const camMoved = Math.abs(camX - this._lastCamX) > 0.01 || Math.abs(camY - this._lastCamY) > 0.01 || Math.abs(camZ - this._lastCamZoom) > 0.001;
         if (camMoved) { this._lastCamX = camX; this._lastCamY = camY; this._lastCamZoom = camZ; }
         const list = this.decoList;
@@ -1283,7 +1487,7 @@ export class DecorationManager {
         let needsTilePositions = false;
         for (let i = 0; i < len; i++) {
             const d = list[i];
-            if (d.config.animating || (this._timelineManager && d.config.tag)) { d.updateAnimation(now, this._timelineManager!); animCount++; }
+            if (this._timelineManager && d.config.tag) { d.updateAnimation(now, this._timelineManager!); animCount++; }
             if (d.config.stickToFloor || d.config.relativeTo === DecPlacementType.RedPlanet
                 || d.config.relativeTo === DecPlacementType.BluePlanet
                 || d.config.relativeTo === DecPlacementType.GreenPlanet) {
@@ -1328,7 +1532,7 @@ export class DecorationManager {
         const sLen = this._staticDecos.length;
         for (let i = 0; i < sLen; i++) {
             const d = this._staticDecos[i];
-            if ((d.config.animating || (this._timelineManager && d.config.tag)) && !this._visibleStaticSet.has(d)) {
+            if ((this._timelineManager && d.config.tag) && !this._visibleStaticSet.has(d)) {
                 visibleStatic.push(d);
             }
         }
@@ -1386,178 +1590,47 @@ export class DecorationManager {
         this.instancedRenderer.flush();
     }
 
-    private processEvents(now: number): void {
-        if (this.lastDecorationEventIndex >= 0 && this.lastDecorationEventIndex < this.decorationEventsTimeline.length) {
-            const last = this.decorationEventsTimeline[this.lastDecorationEventIndex];
-            if (last && now < last.time) {
-                const list = this.decoList;
-                for (let i = 0; i < list.length; i++) list[i].reset();
-                this.lastDecorationEventIndex = -1;
-            }
-        }
-        let safety = 0;
-        while (safety < (this.decorationEventsTimeline.length + 10) &&
-            this.lastDecorationEventIndex + 1 < this.decorationEventsTimeline.length &&
-            this.decorationEventsTimeline[this.lastDecorationEventIndex + 1].time <= now) {
-            this.lastDecorationEventIndex++;
-            const entry = this.decorationEventsTimeline[this.lastDecorationEventIndex];
-            if (entry) this.processEvent(entry.event, now);
-            safety++;
+    /** 时间轴采样驱动：切换 decorationImage 贴图。 */
+    public applyImageTo(deco: DecorationInstance, filename: string): void {
+        deco.config.decorationImage = filename;
+        if (deco.config.decorationType === DecorationType.Image
+            || deco.config.decorationType === DecorationType.Particle) {
+            if (!filename) { deco.setupVisual(null); return; }
+            this.loadDecoTexture(filename, deco);
         }
     }
 
-    private processEvent(event: any, now: number): void {
-        if (!isEventActive(event)) return;
-        if (event.eventType === 'MoveDecorations') {
-            this.processMoveDecorations(event, now);
-        } else if (event.eventType === 'SetText') {
-            this.processSetText(event);
-        } else if (event.eventType === 'SetObject') {
-            this.processSetObject(event);
-        }
+    /** 时间轴采样驱动：SetText。 */
+    public applyTextTo(deco: DecorationInstance, text: string): void {
+        deco.config.decText = text;
+        const ev: any = { decText: text, color: deco.config.color, fontSize: 48, font: undefined };
+        this.setupTextVisual(deco, ev);
     }
 
-    private processMoveDecorations(event: any, now: number): void {
-        const tagStr = event.tag || '';
-        if (!tagStr) return;
-        const tags = tagStr.split(/\s+/).filter(Boolean);
-        const floor = event.floor;
-        const bpm = this.tileBPM[floor] || 100;
-        const duration = (event.duration || 0) * 60 / bpm;
-        const movementType = this.parsePlacement(event.relativeTo);
-        const ts = this.tileSize;
-
-        for (const tag of tags) {
-            const list = this.taggedDecorations.get(tag);
-            if (!list) continue;
-
-            if (this._timelineManager && duration > 0) {
-                // Timeline mode: only apply instant (non-keyframed) properties
-                for (const deco of list) {
-                    if (event.decorationImage !== undefined && !event.disabled?.decorationImage) {
-                        deco.config.decorationImage = event.decorationImage;
-                    }
-                    if (event.depth !== undefined && !event.disabled?.depth) {
-                        deco.config.depth = event.depth;
-                    }
-                    if (event.visible !== undefined && !event.disabled?.visible) {
-                        deco.config.visible = parseEventVisible(event.visible);
-                        deco.setCulledVisible(deco.config.visible);
-                    }
-                    if (event.pivotOffset !== undefined && !event.disabled?.pivotOffset) {
-                        const piv = this.parseVec2(event.pivotOffset, [0, 0]);
-                        deco.config.pivotOffset = [piv[0] * ts, piv[1] * ts];
-                        deco.visualGroup.position.set(deco.config.pivotOffset[0], deco.config.pivotOffset[1], 0);
-                        if (deco.instSlot) this.instancedRenderer.updatePivot(deco.instSlot, deco.config.pivotOffset[0], deco.config.pivotOffset[1]);
-                        deco.updateTransform();
-                    }
-                    // Color: only apply if no keyframe (color not yet in keyframe system)
-                    if (event.color !== undefined && !event.disabled?.color) {
-                        deco.config.color = event.color;
-                        const [hex, alpha] = parseDecoColor(event.color);
-                        deco.currentColor.set(hex);
-                        deco.currentOpacity = (deco.config.opacity / 100) * alpha;
-                        deco.updateTransform();
-                    }
-                }
-                continue;
-            }
-
-            for (const deco of list) {
-                const target: Partial<DecorationConfig> = {};
-
-                if (event.positionOffset !== undefined && !event.disabled?.positionOffset) {
-                    const pos = this.parseVec2(event.positionOffset, [0, 0]);
-                    target.positionOffset = [pos[0] * ts, pos[1] * ts];
-                }
-                if (event.rotationOffset !== undefined && !event.disabled?.rotationOffset) {
-                    target.rotationOffset = event.rotationOffset;
-                }
-                if (event.scale !== undefined && !event.disabled?.scale) {
-                    const s = this.parseVec2(event.scale, [100, 100]);
-                    target.scale = [s[0], s[1]];
-                }
-                if (event.color !== undefined && !event.disabled?.color) {
-                    target.color = event.color;
-                }
-                if (event.opacity !== undefined && !event.disabled?.opacity) {
-                    target.opacity = event.opacity;
-                }
-                if (event.parallax !== undefined && !event.disabled?.parallax) {
-                    const p = this.parseVec2(event.parallax, [100, 100]);
-                    target.parallax = [p[0], p[1]];
-                }
-                if (event.parallaxOffset !== undefined && !event.disabled?.parallaxOffset) {
-                    const po = this.parseVec2(event.parallaxOffset, [0, 0]);
-                    target.parallaxOffset = [po[0] * ts, po[1] * ts];
-                }
-                if (event.pivotOffset !== undefined && !event.disabled?.pivotOffset) {
-                    const piv = this.parseVec2(event.pivotOffset, [0, 0]);
-                    target.pivotOffset = [piv[0] * ts, piv[1] * ts];
-                }
-                if (event.depth !== undefined && !event.disabled?.depth) {
-                    target.depth = event.depth;
-                }
-                if (event.visible !== undefined && !event.disabled?.visible) {
-                    deco.config.visible = parseEventVisible(event.visible);
-                    deco.setCulledVisible(deco.config.visible);
-                }
-                if (event.decorationImage !== undefined && !event.disabled?.decorationImage) {
-                    target.decorationImage = event.decorationImage;
-                }
-
-                deco.startAnimation(target, duration, event.ease || 'Linear', now, movementType);
-            }
+    /** 时间轴采样驱动：SetObject（Planet / Floor 属性）。 */
+    public applyObjectPropsTo(deco: DecorationInstance, props: Partial<DecorationConfig>): void {
+        if (deco.config.decorationType !== DecorationType.Object) return;
+        if (props.planetColor !== undefined) {
+            deco.config.planetColor = props.planetColor;
+            const [hex, alpha] = parseDecoColor(props.planetColor, 'ffffff');
+            deco.currentColor.set(hex);
+            deco.currentOpacity = (deco.config.opacity / 100) * alpha;
         }
-    }
-
-    private processSetText(event: any): void {
-        const tags = (event.tag || '').split(/\s+/).filter(Boolean);
-        const text = event.decText || '';
-        for (const tag of tags) {
-            const list = this.taggedDecorations.get(tag);
-            if (!list) continue;
-            for (const deco of list) {
-                if (deco.config.decorationType !== DecorationType.Text) continue;
-                deco.config.decText = text;
-                this.setupTextVisual(deco, event);
-            }
+        if (props.planetTailColor !== undefined) {
+            deco.config.planetTailColor = props.planetTailColor;
         }
-    }
-
-    private processSetObject(event: any): void {
-        const tags = (event.tag || '').split(/\s+/).filter(Boolean);
-        for (const tag of tags) {
-            const list = this.taggedDecorations.get(tag);
-            if (!list) continue;
-            for (const deco of list) {
-                if (deco.config.decorationType !== DecorationType.Object) continue;
-                if (deco.config.objectType === 'Planet') {
-                    if (event.planetColor !== undefined && !event.disabled?.planetColor) {
-                        const [hex, alpha] = parseDecoColor(event.planetColor, 'ffffff');
-                        deco.config.planetColor = event.planetColor;
-                        deco.currentColor.set(hex);
-                        deco.currentOpacity *= alpha;
-                    }
-                    if (event.planetTailColor !== undefined && !event.disabled?.planetTailColor) {
-                        deco.config.planetTailColor = event.planetTailColor;
-                    }
-                } else if (deco.config.objectType === 'Floor') {
-                    if (event.trackColor !== undefined && !event.disabled?.trackColor) {
-                        deco.config.trackColor = event.trackColor;
-                    }
-                    if (event.trackOpacity !== undefined && !event.disabled?.opacity) {
-                        deco.config.trackOpacity = event.trackOpacity;
-                        deco.currentOpacity = event.trackOpacity / 100;
-                    }
-                    if (event.trackIcon !== undefined && !event.disabled?.trackIcon) {
-                        deco.config.trackIcon = event.trackIcon;
-                        this.rebuildFloorIcon(deco);
-                    }
-                }
-                deco.updateTransform();
-            }
+        if (props.trackColor !== undefined) {
+            deco.config.trackColor = props.trackColor;
         }
+        if (props.trackOpacity !== undefined) {
+            deco.config.trackOpacity = props.trackOpacity;
+            deco.currentOpacity = props.trackOpacity / 100;
+        }
+        if (props.trackIcon !== undefined) {
+            deco.config.trackIcon = props.trackIcon;
+            this.rebuildFloorIcon(deco);
+        }
+        deco.updateTransform();
     }
 
     private rebuildFloorIcon(deco: DecorationInstance): void {
@@ -1590,8 +1663,12 @@ export class DecorationManager {
 
     public reset(): void {
         const list = this.decoList;
-        for (let i = 0; i < list.length; i++) list[i].reset();
-        this.lastDecorationEventIndex = -1;
+        for (let i = 0; i < list.length; i++) {
+            list[i].reset();
+            const p = list[i].particles;
+            if (p) p.stop();
+        }
+        this._particlesStarted.clear();
     }
 
     public clear(): void {
@@ -1606,7 +1683,6 @@ export class DecorationManager {
         this.taggedDecorations.clear();
         this.floorGeoCache.clear();
         this.decorationEventsTimeline = [];
-        this.lastDecorationEventIndex = -1;
         this._tilePositions.clear();
         this.instancedRenderer.clear();
         if (hadDecos) {

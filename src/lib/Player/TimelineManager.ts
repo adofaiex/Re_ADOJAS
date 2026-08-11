@@ -21,6 +21,11 @@ export class TimelineManager {
     private tileBPM: number[];
     private totalTiles: number;
 
+    // 离散时间轴：存储 string | boolean | number 的"即时"属性
+    // （如 deco 的 visible / depth / decorationImage / maskingType 等）。
+    // sampleDiscrete 返回 time<=t 时最新的值，不插值。
+    private discreteTimelines: Map<string, Map<string, Array<{ time: number; value: string | boolean | number }>>> = new Map();
+
     constructor(
         actions: any[],
         tileStartTimes: number[],
@@ -471,6 +476,53 @@ export class TimelineManager {
         const idx = this.findKeyframeIndex(kfs, time);
         if (idx < 0) return kfs[0].value;
         return kfs[idx].value;
+    }
+
+    /* ── 离散时间轴（即时属性 / 字符串 / 布尔） ─────────────────── */
+
+    public ensureDiscreteTimeline(entity: string, property: string): Array<{ time: number; value: string | boolean | number }> {
+        let props = this.discreteTimelines.get(entity);
+        if (!props) {
+            props = new Map();
+            this.discreteTimelines.set(entity, props);
+        }
+        let kfs = props.get(property);
+        if (!kfs) {
+            kfs = [];
+            props.set(property, kfs);
+        }
+        return kfs;
+    }
+
+    public addDiscreteKeyframe(entity: string, property: string, time: number, value: string | boolean | number): void {
+        const kfs = this.ensureDiscreteTimeline(entity, property);
+        // 同时间覆盖
+        for (let i = 0; i < kfs.length; i++) {
+            if (Math.abs(kfs[i].time - time) < 1e-9) {
+                kfs[i].value = value;
+                return;
+            }
+        }
+        kfs.push({ time, value });
+        if (kfs.length > 1) kfs.sort((a, b) => a.time - b.time);
+    }
+
+    public sampleDiscrete(entity: string, property: string, time: number): string | boolean | number | undefined {
+        const kfs = this.discreteTimelines.get(entity)?.get(property);
+        if (!kfs || kfs.length === 0) return undefined;
+        // 二分找 <= time 的最新
+        let lo = 0, hi = kfs.length - 1, idx = -1;
+        while (lo <= hi) {
+            const mid = (lo + hi) >>> 1;
+            if (kfs[mid].time <= time) { idx = mid; lo = mid + 1; }
+            else hi = mid - 1;
+        }
+        if (idx < 0) return undefined; // time 早于第一条 → 无状态
+        return kfs[idx].value;
+    }
+
+    public hasDiscreteTimeline(entity: string, property: string): boolean {
+        return !!this.discreteTimelines.get(entity)?.has(property);
     }
 
     public samplePosition(entity: string, time: number): { x: number; y: number } | null {
