@@ -80,11 +80,15 @@ export class HTMLAudioMusic implements IMusic {
   }
 
   /**
-   * Play at a specific AudioContext time for precise synchronization
-   * @param when The AudioContext.currentTime to start playback
+   * Play after a delay (seconds, relative to call time), using wall-clock timing.
+   * HTMLAudioElement can't be scheduled on the AudioContext clock precisely,
+   * so the delay is computed by the caller from the game clock (elapsedTime),
+   * avoiding AudioContext state (suspended/resumed) differences that caused
+   * random early playback when `when - now` collapsed to 0.
+   * @param delay Delay in seconds before playback starts
    * @param offset Optional offset in seconds within the audio
    */
-  playScheduled(when: number, offset: number = 0): void {
+  playScheduled(delay: number, offset: number = 0): void {
     this.initAudioContext();
     
     if (!this.audioContext) {
@@ -92,8 +96,7 @@ export class HTMLAudioMusic implements IMusic {
       return;
     }
     
-    const now = this.audioContext.currentTime;
-    const delay = Math.max(0, when - now);
+    const safeDelay = Math.max(0, delay);
     
     // Set the start position
     if (offset > 0) {
@@ -103,13 +106,12 @@ export class HTMLAudioMusic implements IMusic {
       this.audioStartOffset = 0;
     }
     
-    this.contextStartTime = when;
-    this.scheduledPlayTime = when;
+    this.scheduledPlayTime = safeDelay;
     
     // Use setTimeout for approximate timing (HTMLAudioElement doesn't support precise scheduling)
     // We'll adjust the timing in getAudioTime()
     setTimeout(() => {
-      if (this.scheduledPlayTime === when) {
+      if (this.scheduledPlayTime === safeDelay) {
         this.audio.play().catch(e => console.error("Audio play failed", e));
         this._isPlaying = true;
         this._isPaused = false;

@@ -26,3 +26,18 @@ export function isEventActive(event: any): boolean {
     if (event.editorOnly === true) return false;
     return true;
 }
+
+/**
+ * Check if a setting/field value is enabled, matching ADOFAI-JS `isEventEnabled`:
+ * - `undefined`/`null` → returns `defaultValue`
+ * - `boolean` → as-is
+ * - `"Enabled"` / `"true"` (string) → true
+ * Anything else → false
+ *
+ * Used for fields like `separateCountdownTime` which may be `true` or `"Enabled"`.
+ */
+export function isEnabled(value: any, defaultValue: boolean = false): boolean {
+    if (value === undefined || value === null) return defaultValue;
+    if (typeof value === 'boolean') return value;
+    return value === 'Enabled' || value === 'true';
+}

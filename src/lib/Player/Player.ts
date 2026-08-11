@@ -10,7 +10,7 @@ import { EasingFunctions } from './Easing';
 import { HTMLAudioMusic, getSharedAudioContext } from './HTMLAudioMusic';
 import tileTextureUrl from '@/assets/texture.json';
 import { TileColorManager, TileColorConfig, parseHexAlpha } from './TileColorManager';
-import { isEventActive } from './EventUtils';
+import { isEnabled, isEventActive } from './EventUtils';
 import { CameraController, CameraTimelineEntry } from './CameraController';
 import { DecorationManager } from './DecorationManager';
 import { MoveTrackManager } from './MoveTrackManager';
@@ -78,6 +78,7 @@ export class Player implements IPlayer {
   private musicStartOffset: number = 0; // Music start position in seconds (separateCountdownTime → 0)
   private hitsoundStartDelay: number = 0; // Hitsound start delay in seconds
   private audioDriftSynced: boolean = false; // whether one-shot audio sync has been applied
+  private _musicScheduled: boolean = false;  // whether playScheduled has been issued (once per startPlay)
   
   private currentTileIndex: number = 0;
 
@@ -376,6 +377,8 @@ export class Player implements IPlayer {
     });
 
     // Initialize Timeline Manager (unified timelines for all event types)
+    // 事件时间轴与判定/打拍音/球共用 tileStartTimes（timeInLevel 时间线），完全同步：
+    // tile0 事件在球走弧起点（timeInLevel 0）触发，tile1 事件与打拍音同时。
     this.timelineManager = new TimelineManager(
       this.levelData.actions || [],
       this.tileStartTimes,
@@ -661,12 +664,13 @@ export class Player implements IPlayer {
     const settings = this.levelData.settings;
     const bpm0 = settings.bpm || 100;
     const cd0 = (settings.countdownTicks || 4) * (60 / bpm0);
+    const timeOrigin = this.getTimeOrigin();
 
     for (let i = 0; i < events.length; i++) {
       const ev = events[i];
       if (ev.type !== 'down') continue;
       const elapsedAtPress = this.getElapsedTimeAt(ev.perfTime);
-      const timeInLevel = elapsedAtPress / 1000 - cd0;
+      const timeInLevel = elapsedAtPress / 1000 - timeOrigin;
       this.judgePress(timeInLevel);
     }
   }
@@ -690,28 +694,76 @@ export class Player implements IPlayer {
   }
 
   /**
+   * 游戏时间线起点（秒）：elapsedTime 到 timeInLevel（tile 时间线）的偏移。
+   * tile1（判定/打拍音）= timeOrigin + tileStartTimes[1]。
+   * - separate：tile1 对齐"官方判定线墙钟"（= 音乐开始 musicStartDelay + offset，
+   *   即音乐开始后 4 拍，mpe），→ timeOrigin = musicStartDelay + offset - tileStartTimes[1]
+   * - 非 separate：timeOrigin = offsetSec（tile1 = offset + floor1.entryTime = 官方判定时刻）
+   */
+  private getTimeOrigin(): number {
+    const s = this.levelData.settings;
+    const bpm0 = s.bpm || 100;
+    const spb0 = 60 / bpm0;
+    const ct0 = s.countdownTicks || 4;
+    const cd0 = ct0 * spb0;
+    const sepCd = isEnabled(s.separateCountdownTime);
+    const offsetSec = (s.offset || 0) / 1000;
+    if (!sepCd) return offsetSec;
+    const t1 = this.tileStartTimes.length > 1 ? this.tileStartTimes[1] : (cd0 - spb0);
+    return cd0 + offsetSec - t1;
+  }
+
+  /**
    * 手动模式判定：用按键时刻 vs 当前砖块出口时刻的误差。
    * 有效命中 → 推进到下一砖块并展示判定；miss → noFail 矫正 / 否则累计/死亡。
    */
   private judgePress(timeInLevel: number): void {
     if (this._manualDead) return;
     const n = this.levelData.tiles.length;
-    const tileIndex = this.currentTileIndex;
+    let tileIndex = this.currentTileIndex;
     if (tileIndex >= n - 1) return;
 
-    const perfectTime = (this.tileStartTimes[tileIndex] || 0) + (this.tileDurations[tileIndex] || 0);
-    // 音乐位置与拍点对齐（拍点=音乐位置 offset+perfectTime）：
-    // - 非 separate：音乐位置 = timeInLevel + offset → 误差 = timeInLevel - perfectTime
-    // - separate：音乐位置 = timeInLevel + cd0（音乐从 0 播）→ 误差 = timeInLevel - perfectTime + (cd0 - offset)
-    let alignMs = 0;
-    const s0 = this.levelData.settings;
-    if (s0.separateCountdownTime === 'Enabled') {
-      const bpm0 = s0.bpm || 100;
-      const cd0 = (s0.countdownTicks || 4) * (60 / bpm0);
-      const offsetSec = this.music.hasAudio ? (s0.offset || 0) / 1000 : 0;
-      alignMs = (cd0 - offsetSec) * 1000;
+    // 倒计时未结束（timeInLevel < 0）：按键无效，不能提前开始/推进
+    if (timeInLevel < 0) return;
+
+    // 按键时刻已过当前砖块完美时刻 且 下一砖块是 midspin：
+    // 按键应判定 midspin（球已到 midspin，防止按键被当前砖块"抢走"，midspin 漏按变 miss）。
+    // 吸收窗口：midspin 前一个砖块的 perfectTime = 球到 midspin 时刻，玩家预判按键可能提前
+    // ~100ms（人类反应误差），此时按键仍应判给 midspin。
+    const curPerfectTime = (this.tileStartTimes[tileIndex] || 0) + (this.tileDurations[tileIndex] || 0);
+    const nextIsMidspin = tileIndex + 1 < n && (this.levelData.tiles[tileIndex + 1]?.direction === 999);
+    if (nextIsMidspin && timeInLevel >= curPerfectTime - 0.1) {
+      tileIndex = tileIndex + 1;
     }
-    const errorMs = (timeInLevel - perfectTime) * 1000 + alignMs;
+
+    // midspin（direction===999，angleData '!'）：官方 midspinInfiniteMargin——任意时刻按键都命中，
+    // 判定显示 Perfect（无限 margin），同时判定 midspin 与其后一个砖块（后者自动完美 Auto，无需再按）。
+    const isMidspin = (this.levelData.tiles[tileIndex]?.direction === 999);
+    if (isMidspin || nextIsMidspin) {
+      console.log('[judge][midspin] pressT=', timeInLevel.toFixed(4), 'curIdx=', this.currentTileIndex, 'judgeIdx=', tileIndex, 'curPerfect=', curPerfectTime.toFixed(4), 'nextIsMidspin=', nextIsMidspin);
+    }
+    if (isMidspin) {
+      const skip = Math.min(2, n - 1 - tileIndex);
+      this.currentTileIndex = tileIndex + skip;
+      this._judgeLastCorrectedTile = -1;
+      this._consecMisses = 0;
+      this.recordMargin(HitMargin.Perfect);
+      const landingTile = this.tiles.get(String(tileIndex + 1)) ?? null;
+      this.judgmentDisplay?.show(landingTile, HitMargin.Perfect);
+      if (skip === 2) {
+        const autoTile = this.tiles.get(String(tileIndex + 2)) ?? null;
+        this.recordMargin(HitMargin.Auto);
+        this.judgmentDisplay?.show(autoTile, HitMargin.Auto);
+        this.playHitForTile(tileIndex + 2);
+      } else {
+        this.playHitForTile(tileIndex + 1);
+      }
+      return;
+    }
+
+    const perfectTime = (this.tileStartTimes[tileIndex] || 0) + (this.tileDurations[tileIndex] || 0);
+    // 音乐位置 = timeInLevel + offset，拍点 = perfectTime + offset → 误差 = timeInLevel - perfectTime（两种模式统一）
+    const errorMs = (timeInLevel - perfectTime) * 1000;
     const bpmTimesSpeed = this.tileBPM[tileIndex] || 100;
     const pitch = this.songPitch;
     const marginScale = this.getTileMarginScale(tileIndex);
@@ -756,16 +808,8 @@ export class Player implements IPlayer {
       const tileIndex = this.currentTileIndex;
       if (tileIndex >= n - 1) return;
       const perfectTime = (this.tileStartTimes[tileIndex] || 0) + (this.tileDurations[tileIndex] || 0);
-      // separateCountdownTime 时音乐位置 = timeInLevel + cd0，拍点 = perfectTime + offset
-      let alignMs = 0;
-      const s0 = this.levelData.settings;
-      if (s0.separateCountdownTime === 'Enabled') {
-        const bpm0 = s0.bpm || 100;
-        const cd0 = (s0.countdownTicks || 4) * (60 / bpm0);
-        const offsetSec = this.music.hasAudio ? (s0.offset || 0) / 1000 : 0;
-        alignMs = (cd0 - offsetSec) * 1000;
-      }
-      const musicPos = timeInLevel + alignMs / 1000;
+      // 音乐位置 = timeInLevel + offset，拍点 = perfectTime + offset → 直接用 timeInLevel 比较
+      const musicPos = timeInLevel;
       if (musicPos <= perfectTime) return;
 
       const bpmTimesSpeed = this.tileBPM[tileIndex] || 100;
@@ -778,11 +822,27 @@ export class Player implements IPlayer {
       if (errDeg <= tooLateThreshold) return;
 
       if (this.noFail) {
-        this.currentTileIndex++;
-        this._judgeLastCorrectedTile = tileIndex;
-        this.recordMargin(HitMargin.FailMiss);
-        this.judgmentDisplay?.show(this.tiles.get(String(tileIndex + 1)) ?? null, HitMargin.FailMiss);
-        this.playHitForTile(tileIndex + 1);
+        // midspin：矫正时同时跳过其后一个方块（自动完美）
+        const isMidspin = (this.levelData.tiles[tileIndex]?.direction === 999);
+        if (isMidspin) {
+          console.log('[tooLate][midspin] corrected tile', tileIndex, 'at t=', timeInLevel.toFixed(4), 'perfect=', perfectTime.toFixed(4));
+        }
+        if (isMidspin && tileIndex + 1 < n - 1) {
+          this.currentTileIndex += 2;
+          this._judgeLastCorrectedTile = tileIndex;
+          this.recordMargin(HitMargin.FailMiss);
+          this.judgmentDisplay?.show(this.tiles.get(String(tileIndex + 1)) ?? null, HitMargin.FailMiss);
+          const autoTile = this.tiles.get(String(tileIndex + 2)) ?? null;
+          this.recordMargin(HitMargin.Auto);
+          this.judgmentDisplay?.show(autoTile, HitMargin.Auto);
+          this.playHitForTile(tileIndex + 2);
+        } else {
+          this.currentTileIndex++;
+          this._judgeLastCorrectedTile = tileIndex;
+          this.recordMargin(HitMargin.FailMiss);
+          this.judgmentDisplay?.show(this.tiles.get(String(tileIndex + 1)) ?? null, HitMargin.FailMiss);
+          this.playHitForTile(tileIndex + 1);
+        }
       } else {
         // 未开不死：超界直接死
         this.manualDie(HitMargin.TooLate);
@@ -804,7 +864,10 @@ export class Player implements IPlayer {
 
   /**
    * 倒计时 HUD + sndHat tick（对齐官方 scrCountdown/scrConductor）。
-   * elapsedTime=0 为倒计时开始，elapsedTime=countdownDuration 为游戏开始（tile0 开始转）。
+   * tick0（"3"）在 elapsedTime = offsetSec（官方 GetCountdownTime(0) = dspTimeSong + addoffset）。
+   * - separate：tick0 = songposition -countdownDuration（球在倒计时期间绕 tile0 旋转），
+   *   倒计时结束（elapsedTime = offsetSec + cd）后球才开始走 tile0 弧。
+   * - 非 separate：tick0 = songposition 0（= tile0 弧起点，球已在走弧）。
    * 显示：3（tick0）/2（tick1）/1（tick2）/GO（tick countdownTicks-1），每个 tick 播一次 sndHat。
    */
   private updateCountdown(): void {
@@ -813,7 +876,9 @@ export class Player implements IPlayer {
     const spb0 = 60 / bpm0;
     const ct = settings.countdownTicks || 4;
     const cd = ct * spb0;
-    const t = this.elapsedTime / 1000; // 0 = countdown 开始
+    const offsetSec = (settings.offset || 0) / 1000;
+    // 倒计时 tick0 在 elapsedTime = offsetSec（官方 GetCountdownTime(0) = dspTimeSong + addoffset）
+    const t = this.elapsedTime / 1000 - offsetSec;
 
     if (t >= cd) {
       if (this.countdownText !== '') this.countdownText = '';
@@ -1234,10 +1299,23 @@ export class Player implements IPlayer {
             startAngle = Math.atan2(prev.position[1] - pivot.position[1], prev.position[0] - pivot.position[0]);
         }
 
-        // tile0 弧长恒为半圈（180°）：3/2/1/GO 是数拍（每拍180°），GO 后球再转半圈到 tile1。
-        // 部分谱面 tile0.angle 解析为 360（一圈），会导致 GO 后多转一圈。
-        const relativeAngle = (i === 0) ? 180 : ((pivot.angle !== undefined) ? pivot.angle : 180);
-        let totalAngle = (relativeAngle * Math.PI) / 180;
+        // tile0：官方 floor0.angleLength = (countdownTicks-1)×π + GetAngleMoved(270°, exitangle, cw)
+        // exitangle = (90 - angle)°，GetAngleMoved = (180 + angle) mod 360（mpe: angle=180 → 0°）。
+        // 倒计时自转 (countdownTicks-1)×180° 并入：progress<0 球反向转，[0,1] 走完自转+弧到 tile1。
+        // midspin（direction===999）：官方 angleLength = 0（即时砖块，无弧）。
+        const isMidspinTile = pivot.direction === 999;
+        let totalAngle: number;
+        if (i === 0) {
+            const cdTicks = this.levelData.settings.countdownTicks || 4;
+            const angleDeg = (pivot.angle !== undefined) ? pivot.angle : 180;
+            const movedDeg = ((180 + angleDeg) % 360 + 360) % 360;
+            totalAngle = ((cdTicks - 1) * 180 + movedDeg) * Math.PI / 180;
+        } else if (isMidspinTile) {
+            totalAngle = 0;
+        } else {
+            const relativeAngle = (pivot.angle !== undefined) ? pivot.angle : 180;
+            totalAngle = (relativeAngle * Math.PI) / 180;
+        }
         if (isCW) totalAngle = -totalAngle;
 
         if (isCW) totalAngle -= extraRotation * 2 * Math.PI;
@@ -1271,14 +1349,8 @@ export class Player implements IPlayer {
         this.tileStartTimes[i+1] = totalTime;
     }
     
-    // Shift all tileStartTimes so that tileStartTimes[0] = 0（tile0 入口 = 倒计时结束时刻）。
-    // 之前把 tileStartTimes[1] 归零导致 tile0 弧被放在倒计时最后一拍（球提前 1 拍开始转）。
-    if (n > 1) {
-        const shift = this.tileStartTimes[0];
-        for (let i = 0; i < n; i++) {
-             this.tileStartTimes[i] -= shift;
-        }
-    }
+    // 不 shift：tileStartTimes[0] = 0（tile0 弧起点 = timeInLevel 0），
+    // tileStartTimes[1] = floor1.entryTime（倒计时结束后的弧拍数）——与官方 songposition 时间线一致。
     
     // Handle the last tile
     if (n > 0) {
@@ -1706,21 +1778,11 @@ export class Player implements IPlayer {
 
   public getTileTimeMs(index: number): number {
     if (index < 0 || index >= this.tileStartTimes.length) return 0;
-    const s = this.levelData.settings;
-    const bpm0 = s.bpm || 100;
-    const spb0 = 60 / bpm0;
-    const ct0 = s.countdownTicks || 4;
-    const cd0 = ct0 * spb0;
-    return (this.tileStartTimes[index] + cd0) * 1000;
+    return (this.tileStartTimes[index] + this.getTimeOrigin()) * 1000;
   }
 
   public getTileIndexAtTime(timeMs: number): number {
-    const s = this.levelData.settings;
-    const bpm0 = s.bpm || 100;
-    const spb0 = 60 / bpm0;
-    const ct0 = s.countdownTicks || 4;
-    const cd0 = ct0 * spb0;
-    const timeInLevel = timeMs / 1000 - cd0;
+    const timeInLevel = timeMs / 1000 - this.getTimeOrigin();
     const times = this.tileStartTimes;
     let lo = 0, hi = times.length - 1;
     let idx = 0;
@@ -1983,20 +2045,22 @@ export class Player implements IPlayer {
         }
 
         // Start music at elapsedTime = musicStartDelay (when game starts + music delay)
-        if (this.music && this.music.hasAudio && !this.music.isPaused && this.elapsedTime >= this.musicStartDelay * 1000 && !this.music.isPlaying) {
+        // 调度一次即可：延迟用墙钟计算（playScheduled 相对调用时刻），
+        // 与 AudioContext 时钟状态（suspended/resume）解耦，避免音乐概率提前播放。
+        if (this.music && this.music.hasAudio && !this.music.isPaused && !this._musicScheduled && !this.music.isPlaying) {
+          this._musicScheduled = true;
           // Initialize AudioContext sync
           const music = this.music;
           try {
             const audioContext = getSharedAudioContext();
             if (audioContext) {
-              // Music should start at elapsedTime = musicStartDelay
-              // AudioContext.currentTime should = audioContextStartOffset + musicStartDelay
-              const scheduledPlayTime = this.audioContextStartOffset + this.musicStartDelay;
+              // 音乐应在 elapsedTime = musicStartDelay 开始：从当前时刻起还需等多久
+              const delaySec = Math.max(0, this.musicStartDelay - this.elapsedTime / 1000);
               const offsetInSeconds = this.musicStartOffset;
               
-              console.log('[Player] Scheduling music to play at AudioContext time:', scheduledPlayTime, 'with offset:', offsetInSeconds, 'musicStartDelay:', this.musicStartDelay);
+              console.log('[Player] Scheduling music to play in', delaySec.toFixed(3), 's with offset:', offsetInSeconds, 'musicStartDelay:', this.musicStartDelay);
               if (music.playScheduled) {
-                music.playScheduled(scheduledPlayTime, offsetInSeconds);
+                music.playScheduled(delaySec, offsetInSeconds);
               }
             } else {
               // Fallback to simple play if no AudioContext
@@ -2015,20 +2079,13 @@ export class Player implements IPlayer {
     
     // --- One-time audio sync ---
     // After music starts, verify the actual audio position matches expected.
-    // Uses timeInLevel (elapsed game time after countdown) as the common reference,
-    // which works correctly for both first-play and seek paths.
+    // 音乐物理位置 = elapsedTime/1000 - musicStartDelay（从 clip 0 播，开始于 musicStartDelay）
+    // = timeInLevel + offset（官方 songposition = song.time - offset），两种表述一致。
     if (this.music.hasAudio && this.music.isPlaying && this.music.audio &&
         !this.audioDriftSynced &&
         typeof this.music.audio.currentTime === 'number' && !isNaN(this.music.audio.currentTime) &&
         this.elapsedTime > 100) {
-      const settings = this.levelData.settings;
-      const bpm0 = settings.bpm || 100;
-      const spb0 = 60 / bpm0;
-      const ct0 = settings.countdownTicks || 4;
-      const cd0 = ct0 * spb0;
-      const offsetSec = (settings.offset || 0) / 1000;
-      const timeInLevel = this.elapsedTime / 1000 - cd0;
-      const expectedMusicPos = offsetSec + Math.max(0, timeInLevel);
+      const expectedMusicPos = this.elapsedTime / 1000 - this.musicStartDelay;
       const actualMusicPos = this.music.audio.currentTime;
       const drift = expectedMusicPos - actualMusicPos;
       if (Math.abs(drift) > 0.01) {
@@ -2049,12 +2106,7 @@ export class Player implements IPlayer {
     }
 
     // Unified trigger event dispatch from TimelineManager
-    const s = this.levelData.settings;
-    const bpm0 = s.bpm || 100;
-    const spb0 = 60 / bpm0;
-    const ct0 = s.countdownTicks || 4;
-    const cd0 = ct0 * spb0;
-    const t0 = this.elapsedTime / 1000 - cd0;
+    const t0 = this.elapsedTime / 1000 - this.getTimeOrigin();
 
     // Handle rewind side effects
     if (this.timelineManager.isRewound(t0)) {
@@ -2129,12 +2181,7 @@ export class Player implements IPlayer {
   private updateDecorations(): void {
     if (!this.decorationManager) return;
 
-    const settings = this.levelData.settings;
-    const initialBPM = settings.bpm || 100;
-    const initialSecPerBeat = 60 / initialBPM;
-    const countdownTicks = settings.countdownTicks || 4;
-    const countdownDuration = countdownTicks * initialSecPerBeat;
-    const timeInLevelMs = this.elapsedTime - countdownDuration * 1000;
+    const timeInLevelMs = this.elapsedTime - this.getTimeOrigin() * 1000;
 
     this.decorationManager.update(
       Math.max(0, timeInLevelMs),
@@ -2150,13 +2197,7 @@ export class Player implements IPlayer {
     if (!this.moveTrackManager) return;
 
     // Calculate timeInLevel matching CameraController's logic
-    const countdownTicks = this.levelData.settings.countdownTicks || 0;
-    const initialBPM = this.levelData.settings.bpm || 100;
-    const initialSecPerBeat = 60 / initialBPM;
-    const countdownDuration = countdownTicks * initialSecPerBeat;
-
-    const currentTimeInSeconds = this.elapsedTime / 1000;
-    const timeInLevel = currentTimeInSeconds - countdownDuration;
+    const timeInLevel = this.elapsedTime / 1000 - this.getTimeOrigin();
 
     // Pass timeInLevel in milliseconds
     this.moveTrackManager.update(timeInLevel * 1000);
@@ -2450,6 +2491,7 @@ export class Player implements IPlayer {
     this.isPaused = false;
     this.startTime = performance.now(); // elapsedTime = 0 when startPlay is called
     this.elapsedTime = 0;
+    this._musicScheduled = false;
     this.currentTileIndex = 0;
     this._manualDead = false;
     this._consecMisses = 0;
@@ -2488,11 +2530,8 @@ export class Player implements IPlayer {
     // Seek to start time after all resets
     if (startAtMs > 0) {
       const s = this.levelData.settings;
-      const bpm0 = s.bpm || 100;
-      const spb0 = 60 / bpm0;
-      const ct0 = s.countdownTicks || 4;
-      const cd0 = ct0 * spb0;
-      const timeInLevel = startAtMs / 1000 - cd0;
+      const timeOrigin = this.getTimeOrigin();
+      const timeInLevel = startAtMs / 1000 - timeOrigin;
       this.elapsedTime = startAtMs;
       this.startTime = performance.now() - startAtMs;
       // 手动模式：把当前砖块定位到 seek 位置，否则球停在 tile0 无法从中途开始
@@ -2508,25 +2547,31 @@ export class Player implements IPlayer {
       }
       // Seek music/hitsound to the target time
       if (this.music && this.music.hasAudio) {
-        // 音乐位置 = elapsedTime/1000 - musicStartDelay + musicStartOffset
-        const sepCd = s.separateCountdownTime === 'Enabled';
-        const msDelay = sepCd ? 0 : cd0;
-        const msOffset = sepCd ? 0 : (s.offset || 0) / 1000;
-        this.music.seek(Math.max(0, startAtMs / 1000 - msDelay + msOffset));
+        // 音乐物理位置 = elapsedTime/1000 - musicStartDelay（从 clip 0 播，开始于 musicStartDelay）
+        const sepCd = isEnabled(s.separateCountdownTime);
+        const cdMs = (s.countdownTicks || 4) * (60 / (s.bpm || 100));
+        const msDelay = sepCd ? cdMs : 0;
+        this.music.seek(Math.max(0, startAtMs / 1000 - msDelay));
         // Start music immediately so updatePlayer doesn't call playScheduled
         if (!this.music.isPlaying) {
           this.music.play();
         }
+        this._musicScheduled = true; // seek 分支直接播放，禁止后续 playScheduled
       }
       if (this.hitsoundManager && this.hitsoundManager.isSynthesized()) {
-        if (timeInLevel >= 0) {
-          this.hitsoundManager.startAtOffset(timeInLevel);
+        // hitsound buffer 时间轴 = tileStartTimes（timeInLevel 时间线）
+        const hsPos = timeInLevel;
+        if (hsPos >= 0) {
+          this.hitsoundManager.startAtOffset(hsPos);
         } else {
-          this.hitsoundManager.start(-timeInLevel);
+          this.hitsoundManager.start(-hsPos);
         }
       }
       if (this.videoElement) {
-        this.videoElement.currentTime = Math.max(0, startAtMs / 1000 - this.musicStartDelay);
+        // 视频跟随音乐：位置 = elapsedTime/1000 - musicStartDelay
+        const sepCd = isEnabled(s.separateCountdownTime);
+        const cdMs = (s.countdownTicks || 4) * (60 / (s.bpm || 100));
+        this.videoElement.currentTime = Math.max(0, startAtMs / 1000 - (sepCd ? cdMs : 0));
       }
         // Use performance.now() timekeeping (AudioContext not yet synced)
         this.useAudioContextTime = false;
@@ -2539,23 +2584,19 @@ export class Player implements IPlayer {
     const countdownTicks = settings.countdownTicks || 4;
     const countdownDuration = countdownTicks * initialSecPerBeat;
     const offset = this.music.hasAudio ? (settings.offset || 0) : 0;
-    // tileStartTimes[1] = 0 (after shift)
-    // tileStartTimes[0] is negative (before tile 1)
-    // offset means: when game starts (elapsedTime = countdownDuration), music should play to offset position
-    // So when elapsedTime = countdownDuration, music.currentTime = offset
-    
-    // Music and hitsounds start after countdown
-    // Note: elapsedTime = 0 when startPlay is called (countdown starts), elapsedTime = countdownDuration when game starts
-    //
-    // 音乐启动（官方行为）：
-    // - separateCountdownTime=Enabled：倒计时与音乐并行，音乐在倒计时开始（elapsedTime=0）从 0 位置播，
-    //   倒计时结束（countdownDuration）时音乐自然播到 offset 位置（谱面作者保证 offset ≈ countdownDuration）。
-    // - 否则：音乐在倒计时结束（elapsedTime=countdownDuration）从 offset 位置播。
-    // tile0 的弧长已包含在 tileStartTimes 中，无需 musicDelaySeconds 修正。
-    const separateCountdown = this.levelData.settings.separateCountdownTime === 'Enabled';
-    const musicStartDelay = separateCountdown ? 0 : countdownDuration;
-    const musicStartOffsetSec = separateCountdown ? 0 : offset / 1000;
-    const hitsoundStartDelay = countdownDuration; // Hitsounds start after countdown (no delay)
+    const timeOrigin = this.getTimeOrigin();
+
+    // 音乐启动（官方行为，scrConductor.StartMusicCo）：
+    // - separateCountdownTime=Enabled：音乐在启动后 countdownDuration 开始，从 clip 0 播
+    //   （官方 num = dspTimeSong + countdownDuration）。
+    // - 否则：音乐从启动时刻（dspTimeSong）开始，从 clip 0 播。
+    // 两种模式下音乐物理位置 = timeInLevel + offset（songposition = song.time - offset）。
+    const separateCountdown = isEnabled(settings.separateCountdownTime);
+    const musicStartDelay = separateCountdown ? countdownDuration : 0;
+    const musicStartOffsetSec = 0;
+    // 打拍音时间轴 = tileStartTimes（timeInLevel 时间线）：buffer 0 = tile0 弧起点 = timeOrigin。
+    // 打拍音在球到达 tile 的时刻响（与判定对齐）。
+    const hitsoundStartDelay = timeOrigin;
 
     // Store delays for use in updatePlayer
     this.musicStartDelay = musicStartDelay;
@@ -2563,7 +2604,7 @@ export class Player implements IPlayer {
     this.hitsoundStartDelay = hitsoundStartDelay;
 
     // Debug: Print tileStartTimes
-    console.log('[Player] startPlay - offset:', offset, 'countdownDuration:', countdownDuration, 'separateCountdown:', separateCountdown, 'musicStartDelay:', musicStartDelay);
+    console.log('[Player] startPlay - offset:', offset, 'countdownDuration:', countdownDuration, 'separateCountdown:', separateCountdown, 'musicStartDelay:', musicStartDelay, 'timeOrigin:', timeOrigin);
     console.log('[Player] startPlay - tileStartTimes (first 10):', this.tileStartTimes.slice(0, 10));
 
     // Initialize AudioContext for synchronization
@@ -2767,6 +2808,7 @@ export class Player implements IPlayer {
     this.deselectTile();
     this.elapsedTime = 0;
     this.audioDriftSynced = false;
+    this._musicScheduled = false;
     this.removePlanets();
     
     if (this.music && (this.music as any).hasAudio ? this.music.hasAudio : false) {
@@ -2851,14 +2893,10 @@ export class Player implements IPlayer {
     }
     
     const currentTimeInSeconds = this.elapsedTime / 1000;
-    const settings = this.levelData.settings;
-    const countdownTicks = settings.countdownTicks || 4;
-    const countdownBPM = (this.tileBPM && this.tileBPM[0]) || settings.bpm || 100;
-    const initialSecPerBeat = 60 / countdownBPM;
-    const countdownDuration = countdownTicks * initialSecPerBeat;
-    const timeInLevel = currentTimeInSeconds - countdownDuration;
+    const timeInLevel = currentTimeInSeconds - this.getTimeOrigin();
     
     // Resume pre-synthesized hitsound track from current position
+    // （buffer 时间轴 = tileStartTimes = timeInLevel 时间线）
     if (this.hitsoundManager.isSynthesized() && timeInLevel > 0) {
         this.hitsoundManager.startAtOffset(timeInLevel);
     }
@@ -2873,7 +2911,8 @@ export class Player implements IPlayer {
 
   get totalDurationMs(): number {
     const lastTileTime = this.tileStartTimes[this.tileStartTimes.length - 1] || 0;
-    return (lastTileTime + 10) * 1000;
+    // tileStartTimes 是 timeInLevel 时间线，墙钟总时长需加 timeOrigin
+    return (lastTileTime + this.getTimeOrigin() + 10) * 1000;
   }
 
   get tileCount(): number { return this.levelData.tiles.length; }
@@ -2881,12 +2920,7 @@ export class Player implements IPlayer {
 
   public seekTo(timeMs: number, visualOnly?: boolean): void {
     console.log('[seekTo]', { timeMs, visualOnly, isPlaying: this.isPlaying, isPaused: this.isPaused });
-    const s = this.levelData.settings;
-    const bpm0 = s.bpm || 100;
-    const spb0 = 60 / bpm0;
-    const ct0 = s.countdownTicks || 4;
-    const cd0 = ct0 * spb0;
-    const timeInLevel = timeMs / 1000 - cd0;
+    const timeInLevel = timeMs / 1000 - this.getTimeOrigin();
 
     // 手动模式：seek 后把当前砖块重置到该时间点，避免从错误的砖块继续判定
     if (this.manualMode) {
@@ -2914,8 +2948,8 @@ export class Player implements IPlayer {
     if (!visualOnly) {
       // Music seek allowed during pause (sets currentTime without playing)
       if (this.music && this.music.hasAudio) {
-        // 音乐位置 = elapsedTime/1000 - musicStartDelay + musicStartOffset
-        this.music.seek(Math.max(0, timeMs / 1000 - this.musicStartDelay + this.musicStartOffset));
+        // 音乐物理位置 = elapsedTime/1000 - musicStartDelay
+        this.music.seek(Math.max(0, timeMs / 1000 - this.musicStartDelay));
       }
       // Hitsounds and video only during active playback
       if (this.isPlaying && !this.isPaused) {
@@ -3148,7 +3182,7 @@ export class Player implements IPlayer {
                 const prevResolved = i > 0 ? this.getResolvedTileDirection(i - 1) : 0;
                 const pred = i > 0 ? (prevResolved || 0) - 180 : -180;
                 const currentDirection = resolved || 0;
-                const is999 = this.levelData.tiles[i]?.angle === 0;
+                const is999 = this.levelData.tiles[i]?.direction === 999;
                 const newShapeKey = `${pred}_${currentDirection}_${is999}_${newTrackStyle}`;
 
                 this.instancedMeshManager.updateTile(
@@ -3745,7 +3779,7 @@ export class Player implements IPlayer {
     // pred = incoming segment direction (prev tile's resolved direction - 180)
     const pred = index > 0 ? (prevResolved || 0) - 180 : -180;
     const currentDirection = resolved || 0;
-    const is999 = (tile.angle === 0);
+    const is999 = (tile.direction === 999);
     
     // Get track style from tile color config
     const tileConfig = this.tileColorManager.getTileRecolorConfig(index);
@@ -3923,14 +3957,10 @@ export class Player implements IPlayer {
     
     const currentTimeInSeconds = this.elapsedTime / 1000;
     const settings = this.levelData.settings;
-    const countdownTicks = settings.countdownTicks || 4;
     
     const offset = this.music.hasAudio ? (this.levelData.settings.offset || 0) : 0;
     
-    const countdownBPM = (this.tileBPM && this.tileBPM[0]) || settings.bpm || 100;
-    const initialSecPerBeat = 60 / countdownBPM;
-    const countdownDuration = countdownTicks * initialSecPerBeat;
-    const timeInLevel = (this.elapsedTime / 1000) - countdownDuration;
+    const timeInLevel = currentTimeInSeconds - this.getTimeOrigin();
     
     if (timeInLevel < 0) {
         // Countdown phase - handled by standard logic
@@ -4085,6 +4115,8 @@ export class Player implements IPlayer {
         }
 
         const totalAngle = this.tileTotalAngle[tileIndex];
+        // 倒计时期间（timeInLevel < tileStartTimes[0] 为负）progress 为负，
+        // 球反向绕 tile0 旋转——这正是倒计时动画（c34c790 及更早版本的行为，无问题）。
         const currentAngle = startAngle + totalAngle * progress;
 
         const clampedProgress = Math.max(0, Math.min(1, progress));
@@ -4106,13 +4138,9 @@ export class Player implements IPlayer {
       if (!this.planetRed || !this.planetBlue) return;
 
       const settings = this.levelData.settings;
-      const initialBPM = settings.bpm || 100;
-      const initialSecPerBeat = 60 / initialBPM;
-      const countdownTicks = settings.countdownTicks || 4;
-      const countdownDuration = countdownTicks * initialSecPerBeat;
       
       const currentTimeInSeconds = this.elapsedTime / 1000;
-      const timeInLevel = currentTimeInSeconds - countdownDuration;
+      const timeInLevel = currentTimeInSeconds - this.getTimeOrigin();
 
       // Process camera events
       const lastIdx = this.cameraController.getLastCameraTimelineIndex();
@@ -4349,12 +4377,8 @@ export class Player implements IPlayer {
     if (!this.videoElement || !this.isPlaying || this.isPaused) return;
 
     const settings = this.levelData.settings;
-    const initialBPM = settings.bpm || 100;
-    const initialSecPerBeat = 60 / initialBPM;
-    const countdownTicks = settings.countdownTicks || 4;
-    const countdownDuration = countdownTicks * initialSecPerBeat;
 
-    const timeInLevel = (this.elapsedTime / 1000) - countdownDuration;
+    const timeInLevel = (this.elapsedTime / 1000) - this.getTimeOrigin();
 
     const targetVideoTime = timeInLevel + (this.videoOffset / 1000);
 

@@ -258,7 +258,10 @@ export class TimelineManager {
                 this._tileRanges.push({ tileIdx, start, end });
             }
         }
-        this._tileRanges.sort((a, b) => a.start - b.start);
+        // 必须按 end 排序：getActiveTileIndicesAt 的二分查找用 end 作查找键，
+        // 若按 start 排序而 end 不单调（长动画 tile 排前面），二分会错误跳过
+        // 前面 start 小但 end 大的 tile（表现为部分/全部 MoveTrack 不触发）。
+        this._tileRanges.sort((a, b) => a.end - b.end);
         this._tileRangesSorted = true;
     }
 
