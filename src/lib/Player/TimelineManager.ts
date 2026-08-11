@@ -155,12 +155,8 @@ export class TimelineManager {
                 const angleOffset = ep.angleOffset;
                 let timeOffset = (angleOffset / 180) * secPerBeat;
 
-                if (action.eventType === 'MoveTrack' && angleOffset === 0) {
-                    const idSorted = perFloorMoveTrack.get(floor) ?? [];
-                    const order = idSorted.findIndex(e => e.id === action.id);
-                    if (order > 0) timeOffset += order * 0.0001;
-                }
-
+                // tileStartTimes 即 songposition 时间线（timeInLevel 0 = countdown 开始），
+                // floor 0 事件天然在 countdown 开始触发（官方 songposition 0）。
                 const eventTime = startTime + timeOffset;
 
             if (action.eventType === 'MoveTrack') {
@@ -204,11 +200,12 @@ export class TimelineManager {
 
         // Build MoveTrack keyframes FIRST, then AnimateTrack (appear/disappear)
         // SECOND so AnimateTrack wins on conflicts (matching C# priority).
+        // 应用顺序（C# ApplyEventsToFloors）：floor 升序，同 floor 按 id 升序。
+        // 后处理的事件覆盖先处理的（RemoveKeyframes 删冲突区间）。
         for (const [tileIdx, events] of perTileMoveTrack) {
             events.sort((a, b) => {
-                const dt = a.time - b.time;
-                if (Math.abs(dt) < 0.0001) return (a.event.id ?? Infinity) - (b.event.id ?? Infinity);
-                return dt > 0 ? 1 : -1;
+                if (a.floor !== b.floor) return a.floor - b.floor;
+                return (a.event.id ?? Infinity) - (b.event.id ?? Infinity);
             });
             this.buildTileMoveTrack(tileIdx, events, basePositions, baseRotations, baseScales, baseOpacities, tileIdx < this.tileStartTimes.length ? this.tileStartTimes[tileIdx] : 0);
         }
@@ -313,6 +310,8 @@ export class TimelineManager {
         const baseSY = tileIdx >= 0 && tileIdx < baseScales.length ? baseScales[tileIdx].y : 1;
         const baseOp = tileIdx >= 0 && tileIdx < baseOpacities.length ? baseOpacities[tileIdx] : 1;
 
+        // base keyframes 在 time 0（songposition 0 = countdown 开始，官方位置）。
+        // 负时间（countdown 期间）事件会 removeAfter 删除它们，startVal 归零渐现——官方行为。
         this.addKeyframe(`tile:${tileIdx}`, 'positionX', 0, baseX, null);
         this.addKeyframe(`tile:${tileIdx}`, 'positionY', 0, baseY, null);
         this.addKeyframe(`tile:${tileIdx}`, 'rotation', 0, baseRot, null);
@@ -325,8 +324,9 @@ export class TimelineManager {
         for (const entry of events) {
             const { event, time: eventTime, duration: eventDuration, floor } = entry;
 
-            // Clamp eventTime to 0 so negative-angle events don't delete base keyframes at time 0
-            const clampedTime = Math.max(0, eventTime);
+            // 不 clamp 到 0：负时间（countdown 期间）动画正常触发，
+            // 与官方 songposition 时间线（timeInLevel - cd）一致。
+            const clampedTime = eventTime;
 
             const positionUsed = event.positionOffset !== undefined && isFieldEnabled(event, 'positionOffset');
             const rotationUsed = event.rotationOffset !== undefined && isFieldEnabled(event, 'rotationOffset');
