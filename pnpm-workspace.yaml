@@ -1,3 +1,5 @@
 allowBuilds:
   core-js: true
   esbuild: true
+minimumReleaseAgeExclude:
+  - adofai@3.3.1

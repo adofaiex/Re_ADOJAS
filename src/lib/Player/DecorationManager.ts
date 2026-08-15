@@ -1,4 +1,4 @@
-import { Group, Mesh, Sprite, Vector2, Color, Texture, MeshBasicMaterial, SpriteMaterial, Material, CanvasTexture, CircleGeometry, RingGeometry, BufferGeometry, BufferAttribute, SRGBColorSpace, DoubleSide, Scene, TextureLoader, PlaneGeometry, Vector3, WebGLRenderTarget, Float32BufferAttribute, NormalBlending, AdditiveBlending, MultiplyBlending, CustomBlending, AddEquation, ReverseSubtractEquation, LinearFilter, LinearMipMapLinearFilter, Blending } from 'three';
+import { Group, Mesh, Sprite, Vector2, Color, Texture, MeshBasicMaterial, SpriteMaterial, Material, CanvasTexture, CircleGeometry, RingGeometry, BufferGeometry, BufferAttribute, SRGBColorSpace, DoubleSide, Scene, TextureLoader, PlaneGeometry, Vector3, WebGLRenderTarget, Float32BufferAttribute, NormalBlending, AdditiveBlending, MultiplyBlending, CustomBlending, AddEquation, ReverseSubtractEquation, LinearFilter, LinearMipMapLinearFilter, Blending, Points, PointsMaterial } from 'three';
 import { TimelineManager } from './TimelineManager';
 import createTrackMesh from '../Geo/mesh_reserve';
 import { isEventActive, isEnabled } from './EventUtils';
@@ -262,6 +262,7 @@ class DecorationInstance {
     public baseSizeY = 1;
     public instSlot: DecoInstanceSlot | null = null;
     public particles: ParticleDecorationSystem | null = null;
+    public planetTrailParticles: Points | null = null;
     public sourceEvent: any = null;
     private instRenderer: DecorationInstancedRenderer | null = null;
     private originalVisible: boolean = true;
@@ -709,6 +710,7 @@ export class DecorationManager {
     private textureLoader: TextureLoader;
     private textureCache: Map<string, Texture> = new Map();
     private floorGeoCache: Map<string, { positions: Float32Array; indices: Uint32Array; mask: Float32Array; vertexCount: number }> = new Map();
+    private trailGeoCache: Map<string, Mesh> = new Map();
     private customImages: Map<string, string> = new Map();
     private texturesLoading: Set<string> = new Set();
     private texturesLoaded: Set<string> = new Set();
@@ -1075,12 +1077,14 @@ export class DecorationManager {
         ctx.clearRect(0, 0, 1024, 256);
         const [textColor] = parseDecoColor(event.color, 'ffffff');
         ctx.fillStyle = textColor;
-        ctx.font = `bold ${event.fontSize || 48}px ${event.font || 'Arial'}`;
+        const fontSize = event.fontSize || 48;
+        const fontFamily = event.font && typeof event.font === 'string' ? event.font : 'Arial';
+        ctx.font = `bold ${fontSize}px ${fontFamily}`;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         const text = event.decText || '';
         const lines = text.split('\n');
-        const lineH = (event.fontSize || 48) * 1.3;
+        const lineH = fontSize * 1.3;
         const startY = 128 - (lines.length - 1) * lineH / 2;
         lines.forEach((l: string, i: number) => {
             ctx.fillText(l, 512, startY + i * lineH);
@@ -1097,12 +1101,23 @@ export class DecorationManager {
             const [pColor, pAlpha] = parseDecoColor(event.planetColor, 'ffffff');
             const mat = new MeshBasicMaterial({ color: new Color(pColor), transparent: true, opacity: pAlpha });
             const sphere = new Mesh(new CircleGeometry(0.4, 32), mat);
+            sphere.name = 'planetBody';
             g.add(sphere);
             if (event.planetTailColor) {
                 const [tColor, tAlpha] = parseDecoColor(event.planetTailColor, 'ffffff');
                 const tailMat = new MeshBasicMaterial({ color: new Color(tColor), transparent: true, opacity: tAlpha * 0.5 });
                 const tail = new Mesh(new RingGeometry(0.35, 0.5, 32), tailMat);
+                tail.name = 'planetTail';
                 g.add(tail);
+            }
+            const tailColorHex = event.planetTailColor ? event.planetTailColor : event.planetColor;
+            const [tailC] = parseDecoColor(tailColorHex, 'ffffff');
+            const tailColorRGB = hexToRGB01(tailC);
+            const tailMesh = this.createPlanetTrailMesh(tailColorRGB);
+            if (tailMesh) {
+                tailMesh.name = 'planetTrailMesh';
+                g.add(tailMesh);
+                deco.planetTrailMesh = tailMesh;
             }
         } else if (objType === 'Floor') {
             const trackAngle = event.trackAngle ?? 0;
@@ -1259,7 +1274,10 @@ export class DecorationManager {
         const cached = this.textureCache.get(filename);
         if (cached) { deco.setupVisual(cached); return true; }
         const url = this.findImageUrl(filename);
-        if (!url) return false;
+        if (!url) {
+            deco.setupVisual(null);
+            return false;
+        }
         this.enqueueTextureLoad(filename, url);
         return true;
     }
@@ -1618,6 +1636,17 @@ export class DecorationManager {
         }
         if (props.planetTailColor !== undefined) {
             deco.config.planetTailColor = props.planetTailColor;
+            if (deco.planetTrailParticles && deco.planetTrailParticles.geometry) {
+                const [tailC] = parseDecoColor(props.planetTailColor, 'ffffff');
+                const tailColorRGB = hexToRGB01(tailC);
+                const colors = deco.planetTrailParticles.geometry.getAttribute('color');
+                if (colors) {
+                    for (let i = 0; i < colors.count; i++) {
+                        colors.setXYZ(i, tailColorRGB[0], tailColorRGB[1], tailColorRGB[2]);
+                    }
+                    colors.needsUpdate = true;
+                }
+            }
         }
         if (props.trackColor !== undefined) {
             deco.config.trackColor = props.trackColor;
