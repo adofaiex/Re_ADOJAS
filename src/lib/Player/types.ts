@@ -61,7 +61,7 @@ export interface IPlanet {
 /**
  * Decoration placement type
  */
-export type DecPlacementType = 'Tile' | 'Camera' | 'CameraAspect' | 'LastPosition';
+export type DecPlacementType = 'Tile' | 'Camera' | 'CameraAspect' | 'Global' | 'LastPosition' | 'RedPlanet' | 'BluePlanet' | 'GreenPlanet';
 
 /**
  * Decoration event from ADOFAI level file
@@ -80,10 +80,21 @@ export interface IDecorationEvent {
   scale?: [number, number];
   parallax?: [number, number];
   parallaxOffset?: [number, number];
+  pivotOffset?: [number, number];
   depth?: number;
-  color?: string;
+  color?: string | Record<string, unknown>;
   opacity?: number;
-  visible?: boolean;
+  visible?: boolean | string;
+  lockScale?: boolean;
+  lockRotation?: boolean;
+  scaleMultiplier?: number;
+  stickToFloor?: boolean;
+  blendMode?: 'None' | 'Additive' | 'Screen' | 'Multiply' | 'Overlay' | 'Subtract' | 'Divide';
+  maskingType?: 'None' | 'Mask' | 'VisibleInsideMask' | 'VisibleOutsideMask';
+  maskingTarget?: string;
+  imageSmoothing?: boolean;
+  objectType?: 'Planet' | 'Floor' | 'PlayerBubble';
+  [key: string]: unknown;
 }
 
 /**
@@ -103,10 +114,15 @@ export interface IMoveDecorationsEvent {
   opacity?: number;
   parallax?: [number, number];
   parallaxOffset?: [number, number];
+  pivotOffset?: [number, number];
   depth?: number;
-  visible?: boolean;
+  visible?: boolean | string;
   relativeTo?: DecPlacementType;
   decorationImage?: string;
+  maskingType?: 'None' | 'Mask' | 'VisibleInsideMask' | 'VisibleOutsideMask';
+  maskingTarget?: string;
+  disabled?: Record<string, boolean>;
+  [key: string]: unknown;
 }
 
 export interface ILevelData {

@@ -12,7 +12,7 @@ import tileTextureUrl from '@/assets/texture.json';
 import { TileColorManager, TileColorConfig, parseHexAlpha } from './TileColorManager';
 import { isEnabled, isEventActive } from './EventUtils';
 import { CameraController, CameraTimelineEntry } from './CameraController';
-import { DecorationManager } from './DecorationManager';
+import { DecorationManager, DecPlacementType } from './DecorationManager';
 import { MoveTrackManager } from './MoveTrackManager';
 import { PositionTrackManager } from './PositionTrackManager';
 import { InstancedMeshManager } from './InstancedMeshManager';
@@ -2250,7 +2250,15 @@ export class Player implements IPlayer {
       this.camera.rotation.z,
       this.camera.zoom,
       this.timelineManager,
-      this.adoZoom
+      this.adoZoom,
+      {
+        viewportWidth: this.renderer.domElement.clientWidth || this.renderer.domElement.width,
+        viewportHeight: this.renderer.domElement.clientHeight || this.renderer.domElement.height,
+        planetPositions: {
+          [DecPlacementType.RedPlanet]: this.planetRed ? new Vector2(this.planetRed.position.x, this.planetRed.position.y) : undefined,
+          [DecPlacementType.BluePlanet]: this.planetBlue ? new Vector2(this.planetBlue.position.x, this.planetBlue.position.y) : undefined,
+        },
+      }
     );
   }
 
