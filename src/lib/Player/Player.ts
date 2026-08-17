@@ -12,7 +12,7 @@ import tileTextureUrl from '@/assets/texture.json';
 import { TileColorManager, TileColorConfig, parseHexAlpha } from './TileColorManager';
 import { isEnabled, isEventActive } from './EventUtils';
 import { CameraController, CameraTimelineEntry } from './CameraController';
-import { DecorationManager } from './DecorationManager';
+import { DecorationManager, DecPlacementType } from './DecorationManager';
 import { MoveTrackManager } from './MoveTrackManager';
 import { PositionTrackManager } from './PositionTrackManager';
 import { InstancedMeshManager } from './InstancedMeshManager';
@@ -134,6 +134,11 @@ export class Player implements IPlayer {
   private onStatsUpdate: ((stats: { fps: number; time: number; tileIndex: number; tileBPM: number[]; tileStartTimes: number[]; totalTiles: number }) => void) | null = null;
   private frameCount: number = 0;
   private lastTime: number = 0;
+
+  // 手动模式事件回调（UI：otto 表情等）
+  private onManualHit: (() => void) | null = null;
+  private onManualFail: (() => void) | null = null;
+  private onManualCorrect: (() => void) | null = null;
 
   // Precalculated rotations and timing
   private cumulativeRotations: number[] = [];
@@ -499,6 +504,17 @@ export class Player implements IPlayer {
     this.noFail = noFail;
   }
 
+  /** 设置手动模式事件回调（UI：otto 表情等）。 */
+  public setManualEventCallbacks(callbacks: {
+    onHit?: () => void;
+    onFail?: () => void;
+    onCorrect?: () => void;
+  }): void {
+    this.onManualHit = callbacks.onHit ?? null;
+    this.onManualFail = callbacks.onFail ?? null;
+    this.onManualCorrect = callbacks.onCorrect ?? null;
+  }
+
   public isManualDead(): boolean {
     return this._manualDead;
   }
@@ -547,6 +563,18 @@ export class Player implements IPlayer {
 
   public getJudgeDifficulty(): Difficulty {
     return this.judgeDifficulty;
+  }
+
+  /** 当前砖块的 BPM（otto 一拍时长等 UI 逻辑用）。 */
+  public getCurrentBPM(): number {
+    return this.tileBPM[this.currentTileIndex] || this.levelData.settings?.bpm || 100;
+  }
+
+  /** 全关最高 BPM（高速关卡 otto 红色/紧张表情用）。 */
+  public getHighestBPM(): number {
+    let max = 0;
+    for (const b of this.tileBPM) if (b > max) max = b;
+    return max;
   }
 
   /** 记录一次判定（统计用）。 */
@@ -697,6 +725,7 @@ export class Player implements IPlayer {
     this.judgeDeadTiles++;
     this.deaths++;
     this.recordMargin(margin === HitMargin.TooEarly ? HitMargin.TooEarly : HitMargin.FailMiss);
+    this.onManualFail?.();
     const tileIndex = this.currentTileIndex;
     const tile = (this.tiles.get(String(tileIndex)) ?? this.tiles.get(String(Math.max(tileIndex - 1, 0)))) ?? null;
     this.judgmentDisplay?.show(tile, margin === HitMargin.TooEarly ? HitMargin.TooEarly : HitMargin.FailMiss);
@@ -767,6 +796,7 @@ export class Player implements IPlayer {
       this.judgmentDisplay?.show(this.tiles.get(String(tileIndex)) ?? null, HitMargin.Perfect);
       this.judgmentDisplay?.show(this.tiles.get(String(tileIndex + 1)) ?? null, HitMargin.Auto);
       this.playHitForTile(tileIndex + 1);
+      this.onManualHit?.();
       // 准度条：midspin 无限 margin → 0 误差
       this.hitErrorMeter?.addHit(0, this.tileBPM[tileIndex] || 100, this.songPitch, this.getTileMarginScale(tileIndex), this.judgeConfig());
       return;
@@ -788,15 +818,24 @@ export class Player implements IPlayer {
       this.recordMargin(margin);
       this.judgmentDisplay?.show(landingTile, margin);
       this.playHitForTile(tileIndex + 1);
+      this.onManualHit?.();
       // 准度条：有效命中按误差角度画线（正=晚 → 条上偏右）
       const errAngleDeg = (errorMs / 1000) * 3 * bpmTimesSpeed * pitch;
       this.hitErrorMeter?.addHit(errAngleDeg, bpmTimesSpeed, pitch, marginScale, this.judgeConfig());
     } else if (this.noFail) {
-      this.currentTileIndex++;
-      this._judgeLastCorrectedTile = -1;
-      this.recordMargin(HitMargin.FailMiss);
-      this.judgmentDisplay?.show(landingTile, HitMargin.FailMiss);
-      this.playHitForTile(tileIndex + 1);
+      // 不死模式：只有 miss（太晚）纠正前进；overload（太早）不推进、不死亡，
+      // 玩家必须按节奏按键，不能乱按一路通关。
+      if (margin === HitMargin.TooLate) {
+        this.currentTileIndex++;
+        this._judgeLastCorrectedTile = -1;
+        this.recordMargin(HitMargin.FailMiss);
+        this.judgmentDisplay?.show(landingTile, HitMargin.FailMiss);
+        this.playHitForTile(tileIndex + 1);
+        this.onManualCorrect?.();
+      } else {
+        this.recordMargin(margin);
+        this.judgmentDisplay?.show(this.tiles.get(String(tileIndex)) ?? null, margin);
+      }
     } else {
       // 太早太晚等无效命中：累积失误，达阈值即死
       this._consecMisses++;
@@ -2250,7 +2289,15 @@ export class Player implements IPlayer {
       this.camera.rotation.z,
       this.camera.zoom,
       this.timelineManager,
-      this.adoZoom
+      this.adoZoom,
+      {
+        viewportWidth: this.renderer.domElement.clientWidth || this.renderer.domElement.width,
+        viewportHeight: this.renderer.domElement.clientHeight || this.renderer.domElement.height,
+        planetPositions: {
+          [DecPlacementType.RedPlanet]: this.planetRed ? new Vector2(this.planetRed.position.x, this.planetRed.position.y) : undefined,
+          [DecPlacementType.BluePlanet]: this.planetBlue ? new Vector2(this.planetBlue.position.x, this.planetBlue.position.y) : undefined,
+        },
+      }
     );
   }
 

@@ -1,4 +1,4 @@
-import { Group, Mesh, Sprite, Vector2, Color, Texture, MeshBasicMaterial, SpriteMaterial, Material, CanvasTexture, CircleGeometry, RingGeometry, BufferGeometry, BufferAttribute, SRGBColorSpace, DoubleSide, Scene, TextureLoader, PlaneGeometry, Vector3, WebGLRenderTarget, Float32BufferAttribute, NormalBlending, AdditiveBlending, MultiplyBlending, CustomBlending, AddEquation, ReverseSubtractEquation, LinearFilter, LinearMipMapLinearFilter, Blending, Points, PointsMaterial } from 'three';
+import { Group, Mesh, Sprite, Vector2, Color, Texture, MeshBasicMaterial, SpriteMaterial, Material, CanvasTexture, CircleGeometry, RingGeometry, BufferGeometry, BufferAttribute, SRGBColorSpace, DoubleSide, Scene, TextureLoader, PlaneGeometry, Vector3, WebGLRenderTarget, Float32BufferAttribute, NormalBlending, AdditiveBlending, MultiplyBlending, CustomBlending, AddEquation, ReverseSubtractEquation, LinearFilter, LinearMipMapLinearFilter, Blending, Points, PointsMaterial, AlwaysStencilFunc, EqualStencilFunc, NotEqualStencilFunc, ReplaceStencilOp, KeepStencilOp } from 'three';
 import { TimelineManager } from './TimelineManager';
 import createTrackMesh from '../Geo/mesh_reserve';
 import { isEventActive, isEnabled } from './EventUtils';
@@ -73,10 +73,19 @@ function getBlendMode(mode: DecorationBlendMode): number {
     switch (mode) {
         case DecorationBlendMode.Additive: return AdditiveBlending;
         case DecorationBlendMode.Multiply: return MultiplyBlending;
-        case DecorationBlendMode.Screen: return CustomBlending;
-        case DecorationBlendMode.Subtract: return CustomBlending;
+        case DecorationBlendMode.Screen:
+        case DecorationBlendMode.Overlay:
+        case DecorationBlendMode.Subtract:
+        case DecorationBlendMode.Divide:
+            return CustomBlending;
         default: return NormalBlending;
     }
+}
+
+function maskReference(value: string): number {
+    let hash = 17;
+    for (let index = 0; index < value.length; index++) hash = (hash * 31 + value.charCodeAt(index)) | 0;
+    return (Math.abs(hash) % 254) + 1;
 }
 
 export enum DecorationType {
@@ -113,6 +122,12 @@ export enum MaskingType {
     Mask = 'Mask',
     VisibleInsideMask = 'VisibleInsideMask',
     VisibleOutsideMask = 'VisibleOutsideMask',
+}
+
+export interface DecorationRuntimeContext {
+    viewportWidth: number;
+    viewportHeight: number;
+    planetPositions?: Partial<Record<DecPlacementType.RedPlanet | DecPlacementType.BluePlanet | DecPlacementType.GreenPlanet, Vector2>>;
 }
 
 export interface DecorationConfig {
@@ -331,8 +346,9 @@ class DecorationInstance {
         const blend = getBlendMode(this.config.blendMode);
         this.visualGroup.position.set(this.config.pivotOffset[0], this.config.pivotOffset[1], 0);
         if (!texture) {
+            // 无贴图（未导入/未提供）：全透明，不显示占位
             const g = new PlaneGeometry(1, 1);
-            const m = new MeshBasicMaterial({ color: 0xff00ff, transparent: true, opacity: 0.5, side: DoubleSide, depthWrite: false });
+            const m = new MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0, side: DoubleSide, depthWrite: false });
             this.mesh = new Mesh(g, m);
             this.visualGroup.add(this.mesh);
             this.baseSizeX = 1;
@@ -365,13 +381,30 @@ class DecorationInstance {
                     map: texture, color: 0xffffff, transparent: true, opacity: this.currentOpacity,
                     blending: blend as Blending, depthWrite: false,
                 });
+                if (this.config.blendMode === DecorationBlendMode.Subtract) mat.blendEquation = ReverseSubtractEquation;
+                const target = this.config.maskingTarget || this.config.tag || this.config.id || '';
+                const stencilRef = maskReference(target);
+                if (this.config.maskingType === MaskingType.Mask) {
+                    mat.colorWrite = false;
+                    mat.depthWrite = false;
+                    mat.stencilWrite = true;
+                    mat.stencilRef = stencilRef;
+                    mat.stencilFunc = AlwaysStencilFunc;
+                    mat.stencilZPass = ReplaceStencilOp;
+                } else if (this.config.maskingType === MaskingType.VisibleInsideMask) {
+                    mat.stencilWrite = true;
+                    mat.stencilRef = stencilRef;
+                    mat.stencilFunc = EqualStencilFunc;
+                    mat.stencilZPass = KeepStencilOp;
+                } else if (this.config.maskingType === MaskingType.VisibleOutsideMask) {
+                    mat.stencilWrite = true;
+                    mat.stencilRef = stencilRef;
+                    mat.stencilFunc = NotEqualStencilFunc;
+                    mat.stencilZPass = KeepStencilOp;
+                }
                 this.sprite = new Sprite(mat);
                 this.sprite.scale.set(this.baseSizeX, this.baseSizeY, 1);
                 this.sprite.center.set(0.5, 0.5);
-                if (this.config.maskingType === MaskingType.Mask) {
-                    (this.sprite as any).mask = null;
-                    this.sprite.visible = false;
-                }
                 this.visualGroup.add(this.sprite);
             }
         }
@@ -401,7 +434,7 @@ class DecorationInstance {
         return [-0.01 - d * 0.1, -d - 2000];
     }
 
-    private syncInstance(): void {
+    public syncInstance(): void {
         if (!this.instSlot || !this.instRenderer) return;
         const [z, ro] = this.depthZ();
         // depth changed (e.g. MoveDecorations) → migrate to correct renderOrder batch
@@ -443,7 +476,7 @@ class DecorationInstance {
         if (this.iconSprite) { this.iconSprite.renderOrder = ro + 1; (this.iconSprite.material as SpriteMaterial).opacity = this.currentOpacity; }
     }
 
-    public updatePosition(camPos: Vector3, camRot: number, camZoom: number, tilePositions?: Map<number, { x: number; y: number; z: number; rotation: number }>, adoZoom?: number): void {
+    public updatePosition(camPos: Vector3, camRot: number, camZoom: number, tilePositions?: Map<number, { x: number; y: number; z: number; rotation: number }>, adoZoom?: number, runtime?: DecorationRuntimeContext): void {
         if (this._isStaticWorld) {
             // Parallax=0 → world-fixed: no camera displacement
             this.container.position.x = this.currentPosition.x;
@@ -478,11 +511,14 @@ class DecorationInstance {
             // WebADOFAI resolveStatePivotWorldPosition: convert pixel coords → world coords
             // pixelX / 20 * viewWidth, then rotate by camera angle
             const viewH = 8 / camZoom;
-            const aspect = (typeof window !== 'undefined' && window.innerWidth > 0) ? window.innerWidth / window.innerHeight : 16 / 9;
+            const aspect = runtime && runtime.viewportHeight > 0
+                ? runtime.viewportWidth / runtime.viewportHeight
+                : 16 / 9;
             const viewW = viewH * aspect;
-            const aspectCorrection = ct === DecPlacementType.CameraAspect ? viewH / viewW : 1;
-            let worldOffsetX = this.currentPosition.x * aspectCorrection / 20 * viewW;
-            let worldOffsetY = this.currentPosition.y / 20 * viewH;
+            // Unity 的 Camera 坐标以屏幕高度为统一基准；CameraAspect 才按实际宽高比扩展 X。
+            const xExtent = ct === DecPlacementType.CameraAspect ? viewW : viewH;
+            const worldOffsetX = this.currentPosition.x / 20 * xExtent;
+            const worldOffsetY = this.currentPosition.y / 20 * viewH;
             const cosR = Math.cos(camRot);
             const sinR = Math.sin(camRot);
             const rotatedX = worldOffsetX * cosR - worldOffsetY * sinR;
@@ -495,7 +531,11 @@ class DecorationInstance {
         } else {
             let followOffsetX = 0, followOffsetY = 0;
             if (ct === DecPlacementType.RedPlanet || ct === DecPlacementType.BluePlanet || ct === DecPlacementType.GreenPlanet) {
-                // followPlanet position would be added here if planet positions were tracked
+                const planet = runtime?.planetPositions?.[ct];
+                if (planet) {
+                    followOffsetX = planet.x;
+                    followOffsetY = planet.y;
+                }
             }
             let stickOffsetX = 0, stickOffsetY = 0;
             if (this.config.stickToFloor && tilePositions?.has(this.config.floor ?? -1)) {
@@ -525,7 +565,7 @@ class DecorationInstance {
 
     public setCulledVisible(vis: boolean): void {
         this._culledVisible = vis;
-        const effective = vis && (this.config.visible !== false);
+        const effective = vis && (this.config.visible !== false) && this.currentOpacity > 0.001;
         if (this._instVisible !== effective) {
             this._instVisible = effective;
             this.container.visible = effective;
@@ -619,9 +659,13 @@ class DecorationInstance {
             }
         }
         const mT = sampleAnyDiscrete('maskingType');
-        if (typeof mT === 'string') { this.config.maskingType = mT as any; }
         const mTgt = sampleAnyDiscrete('maskingTarget');
-        if (typeof mTgt === 'string') { this.config.maskingTarget = mTgt; }
+        if ((typeof mT === 'string' && mT !== this.config.maskingType)
+            || (typeof mTgt === 'string' && mTgt !== this.config.maskingTarget)) {
+            if (typeof mT === 'string') this.config.maskingType = mT as MaskingType;
+            if (typeof mTgt === 'string') this.config.maskingTarget = mTgt;
+            if (this._manager) this._manager.applyMaskTo(this);
+        }
 
         // SetText / SetObject 离散属性
         const txt = sampleAnyDiscrete('text');
@@ -984,6 +1028,7 @@ export class DecorationManager {
 
         const relativeTo = this.parsePlacement(event.relativeTo);
         const rawPos = this.parseVec2(event.position, [0, 0]);
+        const rawPositionOffset = this.parseVec2(event.positionOffset, [0, 0]);
         const rawParallaxOffset = this.parseVec2(event.parallaxOffset, [0, 0]);
         const rawPivotOffset = this.parseVec2(event.pivotOffset, [0, 0]);
         const ts = this.tileSize;
@@ -1004,7 +1049,7 @@ export class DecorationManager {
             decorationImage: event.decorationImage || '',
             decText: event.decText || '',
             position: rawPos,
-            positionOffset: this.parseVec2(event.positionOffset, [0, 0]),
+            positionOffset: rawPositionOffset,
             relativeTo,
             rotation: event.rotation || 0,
             rotationOffset: event.rotationOffset || 0,
@@ -1048,8 +1093,10 @@ export class DecorationManager {
         };
 
         const deco = new DecorationInstance(config);
+        deco.sourceEvent = { ...event };
         deco.setInstancedRenderer(this.instancedRenderer);
-        deco.startPos.copy(this.computeStartPos(rawPos, relativeTo, floor));
+        const initialPosition: [number, number] = [rawPos[0] + rawPositionOffset[0], rawPos[1] + rawPositionOffset[1]];
+        deco.startPos.copy(this.computeStartPos(initialPosition, relativeTo, floor));
         deco.pivotPos.copy(deco.startPos);
         deco.currentPosition.copy(deco.startPos);
 
@@ -1072,24 +1119,28 @@ export class DecorationManager {
 
     private setupTextVisual(deco: DecorationInstance, event: any): boolean {
         const canvas = document.createElement('canvas');
-        canvas.width = 1024; canvas.height = 256;
-        const ctx = canvas.getContext('2d')!;
-        ctx.clearRect(0, 0, 1024, 256);
-        const [textColor] = parseDecoColor(event.color, 'ffffff');
-        ctx.fillStyle = textColor;
-        const fontSize = event.fontSize || 48;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return false;
+        const fontSize = Math.max(8, Number(event.fontSize) || 48);
         const fontFamily = event.font && typeof event.font === 'string' ? event.font : 'Arial';
-        ctx.font = `bold ${fontSize}px ${fontFamily}`;
-        ctx.textAlign = 'center';
+        const fontWeight = event.fontWeight || 'bold';
+        ctx.font = `${fontWeight} ${fontSize}px ${fontFamily}`;
+        const lines = String(event.decText ?? '').split('\n');
+        const lineHeight = fontSize * 1.25;
+        const measuredWidth = Math.max(fontSize, ...lines.map((line) => ctx.measureText(line).width));
+        const padding = Math.ceil(fontSize * 0.35);
+        canvas.width = Math.ceil(measuredWidth + padding * 2);
+        canvas.height = Math.ceil(lines.length * lineHeight + padding * 2);
+        ctx.font = `${fontWeight} ${fontSize}px ${fontFamily}`;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        // Sprite 的颜色由 DecorationInstance 统一相乘，文字纹理保持白色，避免重复染色。
+        ctx.fillStyle = '#ffffff';
+        ctx.textAlign = event.textAlign === 'Left' ? 'left' : event.textAlign === 'Right' ? 'right' : 'center';
         ctx.textBaseline = 'middle';
-        const text = event.decText || '';
-        const lines = text.split('\n');
-        const lineH = fontSize * 1.3;
-        const startY = 128 - (lines.length - 1) * lineH / 2;
-        lines.forEach((l: string, i: number) => {
-            ctx.fillText(l, 512, startY + i * lineH);
-        });
+        const x = ctx.textAlign === 'left' ? padding : ctx.textAlign === 'right' ? canvas.width - padding : canvas.width / 2;
+        lines.forEach((line, index) => ctx.fillText(line, x, padding + lineHeight * (index + 0.5)));
         const texture = new CanvasTexture(canvas);
+        texture.colorSpace = SRGBColorSpace;
         deco.setupVisual(texture);
         return true;
     }
@@ -1109,15 +1160,6 @@ export class DecorationManager {
                 const tail = new Mesh(new RingGeometry(0.35, 0.5, 32), tailMat);
                 tail.name = 'planetTail';
                 g.add(tail);
-            }
-            const tailColorHex = event.planetTailColor ? event.planetTailColor : event.planetColor;
-            const [tailC] = parseDecoColor(tailColorHex, 'ffffff');
-            const tailColorRGB = hexToRGB01(tailC);
-            const tailMesh = this.createPlanetTrailMesh(tailColorRGB);
-            if (tailMesh) {
-                tailMesh.name = 'planetTrailMesh';
-                g.add(tailMesh);
-                deco.planetTrailMesh = tailMesh;
             }
         } else if (objType === 'Floor') {
             const trackAngle = event.trackAngle ?? 0;
@@ -1263,7 +1305,8 @@ export class DecorationManager {
             autoPlay: event.autoPlay !== false,
             simulationSpace: event.simulationSpace || 'Local',
             tileSize: this.tileSize,
-            camScaleMultiplier: deco.config.lockScale ? (100 / Math.max(0.001, this._lastCamZoom || 250)) * (deco.config.scaleMultiplier ?? 1) : (deco.config.scaleMultiplier ?? 1),
+            // 粒子 mesh 位于装饰 transform 下，缩放由父级统一应用，不能重复乘相机倍率。
+            camScaleMultiplier: 1,
         };
         const sys = new ParticleDecorationSystem(deco.visualGroup, cfg, tex);
         deco.particles = sys;
@@ -1275,8 +1318,17 @@ export class DecorationManager {
         if (cached) { deco.setupVisual(cached); return true; }
         const url = this.findImageUrl(filename);
         if (!url) {
-            deco.setupVisual(null);
-            return false;
+            // 装饰图未导入：使用全透明占位纹理（不显示任何内容）
+            if (!this.placeholderTexture) {
+                const canvas = document.createElement('canvas');
+                canvas.width = 64;
+                canvas.height = 64;
+                const tex = new CanvasTexture(canvas);
+                tex.colorSpace = SRGBColorSpace;
+                this.placeholderTexture = tex;
+            }
+            deco.setupVisual(this.placeholderTexture);
+            return true;
         }
         this.enqueueTextureLoad(filename, url);
         return true;
@@ -1323,8 +1375,9 @@ export class DecorationManager {
             if (d.config.decorationImage !== filename) continue;
             if (d.config.decorationType === DecorationType.Particle) {
                 if (!d.particles && d.sourceEvent) this.createParticleSystem(d, d.sourceEvent, tex);
-            } else if (!d.isInstanced && !d.sprite && !d.mesh) {
+            } else {
                 d.setupVisual(tex);
+                d.syncInstance();
             }
         }
         this.instancedRenderer.flush();
@@ -1463,7 +1516,7 @@ export class DecorationManager {
         return this.texturesLoaded.size;
     }
 
-    public update(elapsedTime: number, cameraPosition: Vector3, cameraRotation: number, cameraZoom: number, timelineManager?: TimelineManager, adoZoom?: number): void {
+    public update(elapsedTime: number, cameraPosition: Vector3, cameraRotation: number, cameraZoom: number, timelineManager?: TimelineManager, adoZoom?: number, runtime?: DecorationRuntimeContext): void {
         const now = elapsedTime / 1000;
         const dt = Math.min(0.1, Math.max(0, now - this._lastNow));
         this._lastNow = now;
@@ -1479,15 +1532,9 @@ export class DecorationManager {
                         d.particles.play();
                         this._particlesStarted.add(d);
                     }
-                    if (d.particles) {
-                        const m = d.config.lockScale
-                            ? (100 / Math.max(0.001, camZ || 250)) * (d.config.scaleMultiplier ?? 1)
-                            : (d.config.scaleMultiplier ?? 1);
-                        d.particles.setCamScaleMultiplier(m);
-                    }
-                    const p = d.container.position;
-                    const cs = Math.abs(d.container.scale.x) || d.currentScale.x;
-                    d.particles.update(dt, { x: p.x, y: p.y }, d.container.rotation.z, cs);
+                    // 粒子实例使用装饰局部坐标；container 已包含位置、旋转与锁定缩放。
+                    d.particles.setCamScaleMultiplier(1);
+                    d.particles.update(dt, { x: 0, y: 0 }, 0, 1);
                 } catch (err) {
                     // 粒子异常不应中断整个装饰物渲染
                     d.particles = null;
@@ -1537,7 +1584,9 @@ export class DecorationManager {
         }
         // Compute camera visible area in world units
         const viewH = 8 / camZ;
-        const aspect = (typeof window !== 'undefined' && window.innerWidth > 0) ? window.innerWidth / window.innerHeight : 16 / 9;
+        const aspect = runtime && runtime.viewportHeight > 0
+            ? runtime.viewportWidth / runtime.viewportHeight
+            : 16 / 9;
         const halfW = viewH * aspect * 0.5;
         const halfH = viewH * 0.5;
         const minX = camX - halfW, maxX = camX + halfW;
@@ -1558,7 +1607,7 @@ export class DecorationManager {
         for (let i = 0; i < dLen; i++) {
             const d = this._dynamicDecos[i];
             if (d.config.visible !== false) {
-                d.updatePosition(cameraPosition, cameraRotation, camZ, tilePositions, adoZoom);
+                d.updatePosition(cameraPosition, cameraRotation, camZ, tilePositions, adoZoom, runtime);
                 const p = d.container.position;
                 const csx = Math.abs(d.container.scale.x);
                 const csy = Math.abs(d.container.scale.y);
@@ -1583,7 +1632,7 @@ export class DecorationManager {
         for (let i = 0; i < visibleStatic.length; i++) {
             const d = visibleStatic[i];
             if (d.config.visible !== false) {
-                d.updatePosition(cameraPosition, cameraRotation, camZ, tilePositions, adoZoom);
+                d.updatePosition(cameraPosition, cameraRotation, camZ, tilePositions, adoZoom, runtime);
                 const p = d.container.position;
                 const csx = Math.abs(d.container.scale.x);
                 const csy = Math.abs(d.container.scale.y);
@@ -1616,6 +1665,13 @@ export class DecorationManager {
             if (!filename) { deco.setupVisual(null); return; }
             this.loadDecoTexture(filename, deco);
         }
+    }
+
+    /** MoveDecorations 可在播放中切换 stencil 角色，需从实例批次迁移到独立 sprite。 */
+    public applyMaskTo(deco: DecorationInstance): void {
+        if (deco.config.decorationType !== DecorationType.Image && deco.config.decorationType !== DecorationType.Text) return;
+        const texture = this.textureCache.get(deco.config.decorationImage);
+        if (texture) deco.setupVisual(texture);
     }
 
     /** 时间轴采样驱动：SetText。 */
@@ -1655,10 +1711,24 @@ export class DecorationManager {
             deco.config.trackOpacity = props.trackOpacity;
             deco.currentOpacity = props.trackOpacity / 100;
         }
-        if (props.trackIcon !== undefined) {
-            deco.config.trackIcon = props.trackIcon;
-            this.rebuildFloorIcon(deco);
+        if (props.trackIcon !== undefined) deco.config.trackIcon = props.trackIcon;
+
+        // Unity ResetDecoration 会用更新后的 sourceLevelEvent 重新构建 Object renderer。
+        // 同样重建可确保 Planet body/tail 与 Floor 的顶点色、透明度、图标一起更新。
+        if (deco.objectGroup) {
+            deco.visualGroup.remove(deco.objectGroup);
+            deco.objectGroup.traverse((child) => {
+                const mesh = child as Mesh;
+                if (mesh.geometry) mesh.geometry.dispose();
+                const material = (mesh as any).material as Material | Material[] | undefined;
+                if (Array.isArray(material)) material.forEach((item) => item.dispose());
+                else material?.dispose();
+            });
+            deco.objectGroup = null;
+            deco.iconSprite = null;
         }
+        deco.sourceEvent = { ...(deco.sourceEvent || {}), ...deco.config, ...props };
+        this.setupObjectVisual(deco, deco.sourceEvent);
         deco.updateTransform();
     }
 

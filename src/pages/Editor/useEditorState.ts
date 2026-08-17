@@ -15,6 +15,42 @@ import { useFileHandlers } from "./useFileHandlers"
 // 类型导入
 type ParseProgressEvent = Structure.ParseProgressEvent;
 
+// 手打/判定设置持久化（localStorage）
+const PLAYBACK_SETTINGS_KEY = "editor-playback-settings"
+interface PlaybackSettings {
+  manualMode: boolean
+  noFail: boolean
+  judgeDifficulty: Difficulty
+}
+const DEFAULT_PLAYBACK: PlaybackSettings = {
+  manualMode: false,
+  noFail: false,
+  judgeDifficulty: "Normal",
+}
+function loadPlaybackSettings(): PlaybackSettings {
+  try {
+    const raw = localStorage.getItem(PLAYBACK_SETTINGS_KEY)
+    if (!raw) return DEFAULT_PLAYBACK
+    const parsed = JSON.parse(raw)
+    return {
+      manualMode: typeof parsed.manualMode === "boolean" ? parsed.manualMode : DEFAULT_PLAYBACK.manualMode,
+      noFail: typeof parsed.noFail === "boolean" ? parsed.noFail : DEFAULT_PLAYBACK.noFail,
+      judgeDifficulty: parsed.judgeDifficulty === "Lenient" || parsed.judgeDifficulty === "Strict"
+        ? parsed.judgeDifficulty
+        : DEFAULT_PLAYBACK.judgeDifficulty,
+    }
+  } catch {
+    return DEFAULT_PLAYBACK
+  }
+}
+function savePlaybackSettings(settings: PlaybackSettings): void {
+  try {
+    localStorage.setItem(PLAYBACK_SETTINGS_KEY, JSON.stringify(settings))
+  } catch {
+    // localStorage 不可用时忽略（如隐私模式）
+  }
+}
+
 // 使用 StringParser 作为解析器
 const StringParser = Parsers.StringParser
 const parser = new StringParser()
@@ -44,11 +80,17 @@ export function useEditorState() {
   const containerRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
-  // 手动游玩状态
-  const [manualMode, setManualMode] = useState(false)
-  const [noFail, setNoFail] = useState(false)
+  // 手动游玩状态（localStorage 持久化，导入谱面/刷新后继承）
+  const [manualMode, setManualMode] = useState(() => loadPlaybackSettings().manualMode)
+  const [noFail, setNoFail] = useState(() => loadPlaybackSettings().noFail)
   // 判定难度：宽（Lenient）/ 标（Normal）/ 严（Strict）
-  const [judgeDifficulty, setJudgeDifficultyState] = useState<Difficulty>("Normal")
+  const [judgeDifficulty, setJudgeDifficultyState] = useState<Difficulty>(() => loadPlaybackSettings().judgeDifficulty)
+
+  // otto 表情状态
+  const [autoFailed, setAutoFailed] = useState(false)
+  const [ottoBlinkIdx, setOttoBlinkIdx] = useState(0) // 0=无眨眼，1/2=左右看
+  const ottoBlinkTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const ottoBlinkFlip = useRef(false)
   const audioInputRef = useRef<HTMLInputElement>(null)
   const videoInputRef = useRef<HTMLInputElement>(null)
   const decorationInputRef = useRef<HTMLInputElement>(null)
@@ -73,6 +115,28 @@ export function useEditorState() {
   const { theme, resolvedTheme } = useTheme()
   const { t, mounted: i18nMounted } = useI18n()
   const { settings } = useAppSettings()
+
+  // otto：每次成功判定/矫正 → 左右看一拍时长（官方 OttoBlink）
+  const handleManualHit = useCallback((): void => {
+    setAutoFailed(false)
+    ottoBlinkFlip.current = !ottoBlinkFlip.current
+    setOttoBlinkIdx(ottoBlinkFlip.current ? 1 : 2)
+    const p = previewerRef.current
+    const bpm = p?.getCurrentBPM?.() ?? 100
+    const durMs = Math.max(200, (60 / bpm) * 1000)
+    if (ottoBlinkTimer.current) clearTimeout(ottoBlinkTimer.current)
+    ottoBlinkTimer.current = setTimeout(() => setOttoBlinkIdx(0), durMs)
+  }, [])
+
+  // 绑定 otto 事件到 Player
+  const bindOttoEvents = useCallback((player: Player | null): void => {
+    if (!player) return
+    player.setManualEventCallbacks({
+      onHit: handleManualHit,
+      onCorrect: handleManualHit,
+      onFail: () => setAutoFailed(true),
+    })
+  }, [handleManualHit])
 
   // Initialize player with level data
   const initializePlayer = useCallback((loadedLevel: any): void => {
@@ -99,13 +163,14 @@ export function useEditorState() {
       player.setDisableTrackTexture(settings.disableTrackTexture)
       
       previewerRef.current = player
+      bindOttoEvents(player)
       // 重新应用手动模式状态到新 Player
       if (manualMode) {
         player.enableManualPlay({ noFail })
       }
       player.setJudgmentI18n?.({ t })
     }
-  }, [settings, manualMode, noFail, t])
+  }, [settings, manualMode, noFail, t, bindOttoEvents])
 
   // File handlers
   const { handleFileLoad, handleAudioLoad, handleVideoLoad, handleDecorationLoad, handleBGImageLoad, handleExport } = useFileHandlers({
@@ -149,6 +214,9 @@ export function useEditorState() {
       return
     }
 
+    // 死亡后重新播放 → otto 恢复常态
+    setAutoFailed(false)
+
     if (playMode === "preview") {
       let startTime = startAtMs
       if (startTime === undefined) {
@@ -190,34 +258,46 @@ export function useEditorState() {
   const handleToggleManualPlay = useCallback((): void => {
     setManualMode(prev => {
       const next = !prev
+      // 官方 ToggleAuto：切换即清除 autoFailed（otto 恢复常态）
+      setAutoFailed(false)
+      setOttoBlinkIdx(0)
+      if (ottoBlinkTimer.current) clearTimeout(ottoBlinkTimer.current)
       const p = previewerRef.current
       if (p) {
         if (next) {
           p.enableManualPlay({ noFail })
-          window.showNotification?.("success", "手动模式已开启")
         } else {
           p.disableManualPlay()
-          window.showNotification?.("success", "自动模式已恢复")
         }
       }
+      savePlaybackSettings({ manualMode: next, noFail, judgeDifficulty })
       return next
     })
-  }, [noFail])
+  }, [noFail, judgeDifficulty])
 
   // 切换不死模式
   const handleToggleNoFail = useCallback((): void => {
     setNoFail(prev => {
       const next = !prev
       previewerRef.current?.setManualNoFail(next)
+      savePlaybackSettings({ manualMode, noFail: next, judgeDifficulty })
       return next
     })
-  }, [])
+  }, [manualMode, judgeDifficulty])
 
-  // 切换判定难度
+  // 设置判定难度
   const handleSetJudgeDifficulty = useCallback((d: Difficulty): void => {
     setJudgeDifficultyState(d)
     previewerRef.current?.setJudgeDifficulty(d)
-  }, [])
+    savePlaybackSettings({ manualMode, noFail, judgeDifficulty: d })
+  }, [manualMode, noFail])
+
+  // 循环切换判定难度（官方：单个按钮点击循环 Lenient→Normal→Strict）
+  const handleCycleJudgeDifficulty = useCallback((): void => {
+    const order: Difficulty[] = ["Lenient", "Normal", "Strict"]
+    const idx = order.indexOf(judgeDifficulty)
+    handleSetJudgeDifficulty(order[(idx + 1) % order.length])
+  }, [judgeDifficulty, handleSetJudgeDifficulty])
 
   // 返回主页处理
   const handleBackClick = useCallback((): void => {
@@ -380,6 +460,7 @@ export function useEditorState() {
             await player.preSynthesizeHitsoundsWithProgress()
             
             previewerRef.current = player
+            bindOttoEvents(player)
             // 重新应用手动模式状态到新 Player
             if (manualMode) {
               player.enableManualPlay({ noFail })
@@ -425,6 +506,7 @@ export function useEditorState() {
     window.addEventListener("beforeunload", handleBeforeUnload)
     return () => {
       window.removeEventListener("beforeunload", handleBeforeUnload)
+      if (ottoBlinkTimer.current) clearTimeout(ottoBlinkTimer.current)
       if (previewerRef.current) {
         previewerRef.current.destroyPlayer()
       }
@@ -457,6 +539,9 @@ export function useEditorState() {
     manualMode,
     noFail,
     judgeDifficulty,
+    autoFailed,
+    ottoBlinkIdx,
+    setAutoFailed,
     settingsOpen,
     showExitDialog,
     showVideoImportDialog,
@@ -479,6 +564,7 @@ export function useEditorState() {
     handleToggleManualPlay,
     handleToggleNoFail,
     handleSetJudgeDifficulty,
+    handleCycleJudgeDifficulty,
     handleBackClick,
     handleConfirmExit,
     handleCancelExit,

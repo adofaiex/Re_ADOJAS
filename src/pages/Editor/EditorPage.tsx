@@ -1,13 +1,27 @@
 "use client"
 
-import { useState, useEffect, useCallback } from "react"
+import { useState, useEffect, useCallback, useRef } from "react"
 import { Button } from "@/components/ui/button"
-import { ArrowLeft, Settings, Save, Upload, Download, Music, Video, Image, Maximize, Minimize, Gamepad2, ShieldCheck } from "lucide-react"
+import { ArrowLeft, Settings, Save, Upload, Download, Music, Video, Image, Maximize, Minimize } from "lucide-react"
 import { SettingsModal } from "@/components/SettingsModal"
 import { LoadingModal } from "@/components/LoadingModal"
 import { NotificationSystem } from "./NotificationSystem"
 import { useEditorState } from "./useEditorState"
 import { useFullscreen } from "./useFullscreen"
+import bullseyeLenient from "@/assets/ui/lenient-bullseye.json"
+import bullseyeNormal from "@/assets/ui/normal-bullseye.json"
+import bullseyeStrict from "@/assets/ui/strict-bullseye.json"
+import noFailImg from "@/assets/ui/no_fail.json"
+import ottoOff from "@/assets/ui/otto_off.json"
+import ottoOn from "@/assets/ui/otto_on.json"
+import ottoLeft from "@/assets/ui/otto_left.json"
+import ottoRight from "@/assets/ui/otto_right.json"
+import ottoOffLeft from "@/assets/ui/otto_off_left.json"
+import ottoOffRight from "@/assets/ui/otto_off_right.json"
+import ottoMiss from "@/assets/ui/otto_miss.json"
+import ottoHappy from "@/assets/ui/otto_happy.json"
+import ottoNervousOn from "@/assets/ui/otto_nervous_on.json"
+import ottoNervousOff from "@/assets/ui/otto_nervous_off.json"
 
 // 主编辑器页面
 export default function EditorPage() {
@@ -33,6 +47,8 @@ export default function EditorPage() {
     manualMode,
     noFail,
     judgeDifficulty,
+    autoFailed,
+    ottoBlinkIdx,
     settingsOpen,
     showExitDialog,
     showVideoImportDialog,
@@ -55,6 +71,7 @@ export default function EditorPage() {
     handleToggleManualPlay,
     handleToggleNoFail,
     handleSetJudgeDifficulty,
+    handleCycleJudgeDifficulty,
     handleBackClick,
     handleConfirmExit,
     handleCancelExit,
@@ -153,6 +170,65 @@ export default function EditorPage() {
   }, [handleExitPlayMode])
 
   const { isFullscreen, toggleFullscreen } = useFullscreen()
+
+  // ── otto 自动播放按钮（官方彩蛋逻辑）──
+  const auto = !manualMode
+  const highBPM = (previewerRef.current?.getHighestBPM?.() ?? 0) >= 300
+
+  // 宠物抚摸：鼠标停留在 otto 上并移动 ≥1.5s（且自动播放中）→ happy
+  const [petting, setPetting] = useState(false)
+  const [petHappy, setPetHappy] = useState(false)
+  const petStartRef = useRef(0)
+
+  const handleOttoPetEnter = useCallback((): void => {
+    petStartRef.current = Date.now()
+    setPetting(true)
+    setPetHappy(false)
+  }, [])
+
+  const handleOttoPetMove = useCallback((): void => {
+    if (!auto) return
+    petStartRef.current = Date.now()
+    setPetHappy(false)
+  }, [auto])
+
+  const handleOttoPetLeave = useCallback((): void => {
+    setPetting(false)
+    setPetHappy(false)
+  }, [])
+
+  useEffect(() => {
+    if (!auto || !petting) {
+      setPetHappy(false)
+      return
+    }
+    const id = setInterval(() => {
+      if (Date.now() - petStartRef.current >= 1500) setPetHappy(true)
+    }, 100)
+    return () => clearInterval(id)
+  }, [auto, petting])
+
+  // otto 表情选择（优先级：miss > 眨眼 > happy > 常态）
+  let ottoSrc = ottoOff
+  if (auto) {
+    if (autoFailed) {
+      ottoSrc = ottoMiss
+    } else if (ottoBlinkIdx > 0) {
+      ottoSrc = ottoBlinkIdx === 1 ? ottoLeft : ottoRight
+    } else if (petHappy) {
+      ottoSrc = ottoHappy
+    } else {
+      ottoSrc = highBPM ? ottoNervousOn : ottoOn
+    }
+  } else {
+    if (autoFailed) {
+      ottoSrc = ottoMiss
+    } else if (ottoBlinkIdx > 0) {
+      ottoSrc = ottoBlinkIdx === 1 ? ottoOffLeft : ottoOffRight
+    } else {
+      ottoSrc = highBPM ? ottoNervousOff : ottoOff
+    }
+  }
 
   // 如果还没有完全挂载，显示加载状态
   if (!mounted || !i18nMounted || !themeReady) {
@@ -398,26 +474,59 @@ export default function EditorPage() {
 
       {/* Full-screen Canvas Area */}
       <div ref={containerRef} className="absolute inset-0">
-        {/* 判定难度切换（右下角）：宽 / 标 / 严 */}
-        <div className="absolute bottom-4 right-4 flex items-center gap-1">
-          {([
-            ["宽", "Lenient"],
-            ["标", "Normal"],
-            ["严", "Strict"],
-          ] as Array<[string, "Lenient" | "Normal" | "Strict"]>).map(([label, val]) => (
-            <button
-              key={val}
-              className={`px-2.5 h-7 rounded-full text-xs font-medium transition-colors shadow-lg backdrop-blur-sm ${isDark
-                  ? judgeDifficulty === val ? "bg-blue-600/90 text-white" : "bg-slate-700/70 text-slate-300 hover:bg-slate-600"
-                  : judgeDifficulty === val ? "bg-blue-500/90 text-white" : "bg-white/80 text-slate-600 hover:bg-slate-100"
-                }`}
-              title={`判定难度：${label}`}
-              onClick={() => handleSetJudgeDifficulty(val)}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
+{/* 右下角：判定选择 / 不死模式 / 自动播放（otto）——官方编辑器布局 */}
+      <div className="absolute bottom-4 right-4 flex items-center gap-3 select-none">
+        {/* 判定选择：单按钮循环切换（宽→标→严） */}
+        <button
+          className="shrink-0 flex items-center justify-center"
+          style={{ width: 37, height: 37 }}
+          title={`判定难度：${judgeDifficulty === "Lenient" ? "宽" : judgeDifficulty === "Strict" ? "严" : "标"}（点击切换）`}
+          onClick={handleCycleJudgeDifficulty}
+        >
+          <img
+            src={judgeDifficulty === "Lenient" ? bullseyeLenient : judgeDifficulty === "Strict" ? bullseyeStrict : bullseyeNormal}
+            alt="判定难度"
+            style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+            className="drop-shadow-lg"
+            draggable={false}
+          />
+        </button>
+
+        {/* 不死模式：关闭时降低透明度 */}
+        <button
+          className="shrink-0 flex items-center justify-center"
+          style={{ width: 40, height: 40 }}
+          title={noFail ? "不死模式：开启（miss 自动矫正）" : "不死模式：关闭"}
+          onClick={handleToggleNoFail}
+        >
+          <img
+            src={noFailImg}
+            alt="不死模式"
+            style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+            className={`drop-shadow-lg transition-opacity ${noFail ? "opacity-100" : "opacity-45 grayscale"}`}
+            draggable={false}
+          />
+        </button>
+
+        {/* 自动播放（otto）：开 = 关闭手打 */}
+        <button
+          className="shrink-0 flex items-center justify-center"
+          style={{ width: 56, height: 56 }}
+          title={auto ? "自动播放：开启（点击关闭，进入手动判定）" : "自动播放：关闭（点击开启自动播放）"}
+          onClick={handleToggleManualPlay}
+          onMouseEnter={handleOttoPetEnter}
+          onMouseMove={handleOttoPetMove}
+          onMouseLeave={handleOttoPetLeave}
+        >
+          <img
+            src={ottoSrc}
+            alt="自动播放"
+            style={{ width: '100%', height: '100%', objectFit: 'contain', transform: 'translate(-12px, -7px)' }}
+            className={`drop-shadow-lg transition-all duration-150 ${manualMode ? "opacity-45 grayscale" : highBPM ? "otto-red" : ""}`}
+            draggable={false}
+          />
+        </button>
+      </div>
         <div className="absolute bottom-4 left-4 flex items-end gap-4">
           <div className="relative inline-block">
             <button
@@ -450,28 +559,6 @@ export default function EditorPage() {
           </div>
 
           <div className="flex items-center gap-1">
-            <button
-              className={`w-7 h-7 rounded-full flex items-center justify-center transition-colors shrink-0 ${isDark
-                  ? manualMode ? "bg-green-600/80 text-white hover:bg-green-500" : "bg-slate-700/80 text-slate-300 hover:bg-slate-600"
-                  : manualMode ? "bg-green-500/80 text-white hover:bg-green-400" : "bg-white/80 text-slate-600 hover:bg-slate-100"
-                } shadow-lg backdrop-blur-sm`}
-              title={manualMode ? "手动模式开启（按任意键判定）" : "开启手动模式"}
-              onClick={handleToggleManualPlay}
-            >
-              <Gamepad2 className="w-3.5 h-3.5" />
-            </button>
-            {manualMode && (
-              <button
-                className={`w-7 h-7 rounded-full flex items-center justify-center transition-colors shrink-0 ${isDark
-                    ? noFail ? "bg-blue-600/80 text-white hover:bg-blue-500" : "bg-slate-700/80 text-slate-300 hover:bg-slate-600"
-                    : noFail ? "bg-blue-500/80 text-white hover:bg-blue-400" : "bg-white/80 text-slate-600 hover:bg-slate-100"
-                  } shadow-lg backdrop-blur-sm`}
-                title={noFail ? "不死模式开启（miss 自动矫正）" : "开启不死模式"}
-                onClick={handleToggleNoFail}
-              >
-                <ShieldCheck className="w-3.5 h-3.5" />
-              </button>
-            )}
             <button
               className={`w-7 h-7 rounded-full flex items-center justify-center transition-colors shrink-0 ${isDark
                   ? "bg-slate-700/80 text-slate-300 hover:bg-slate-600"

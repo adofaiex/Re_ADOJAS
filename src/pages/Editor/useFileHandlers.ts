@@ -671,7 +671,7 @@ export function useFileHandlers({
       // Always use readAsArrayBuffer
       reader.readAsArrayBuffer(file)
     },
-    [t, settings, setIsLoading, setLoadingProgress, setLoadingStatus]
+    [t, settings, initializePlayer, setIsLoading, setLoadingProgress, setLoadingStatus]
   )
 
   // 音频加载处理
