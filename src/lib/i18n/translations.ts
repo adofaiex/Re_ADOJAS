@@ -102,6 +102,12 @@ export const translations = {
         decoration: "导入装饰图片（支持多选）",
         bgImage: "导入背景图片（支持多选）",
       },
+      delaySuggestion: {
+        title: "建议的音频延迟",
+        hint: "根据本次按键时机分布估算，应用后可改善节拍对齐",
+        accept: "同意",
+        cancel: "取消",
+      },
     },
     // 设置
     settings: {
@@ -177,6 +183,10 @@ export const translations = {
         description: "对 Standard 轨道禁用纹理叠加（高砖块数谱面性能优化）",
         enabled: "纹理已禁用",
         disabled: "纹理默认",
+      },
+      musicDelayMs: {
+        title: "音乐延迟补偿",
+        description: "独立调整音乐播放延迟（毫秒，正值延后、负值提前），用于校准不同音频输出设备的节拍对齐",
       },
       themePreview: {
         title: "主题预览",
@@ -286,6 +296,12 @@ export const translations = {
         decoration: "Import Decoration Images (Multiple Selection)",
         bgImage: "Import Background Images (Multiple Selection)",
       },
+      delaySuggestion: {
+        title: "Suggested Audio Delay",
+        hint: "Estimated from this run's keypress timing; applying it improves beat alignment",
+        accept: "Agree",
+        cancel: "Cancel",
+      },
     },
     // Settings
     settings: {
@@ -355,6 +371,10 @@ export const translations = {
         description: "Disable texture overlay for Standard tracks (performance optimization for high tile count charts)",
         enabled: "Texture Off",
         disabled: "Texture Default",
+      },
+      musicDelayMs: {
+        title: "Music Delay Compensation",
+        description: "Independently adjust music playback delay (ms, positive delays, negative advances) to align beats across different audio output latencies",
       },
       themePreview: {
         title: "Theme Preview",
@@ -464,6 +484,12 @@ export const translations = {
         decoration: "装飾画像をインポート（複数選択可）",
         bgImage: "背景画像をインポート（複数選択可）",
       },
+      delaySuggestion: {
+        title: "推奨オーディオ遅延",
+        hint: "今回のキー入力タイミングから推定。適用すると拍の同期が改善されます",
+        accept: "同意",
+        cancel: "キャンセル",
+      },
     },
     // 設定
     settings: {
@@ -533,6 +559,10 @@ export const translations = {
         description: "Standardトラックのテクスチャオーバーレイを無効にします（高タイル数譜面のパフォーマンス最適化）",
         enabled: "テクスチャ無効",
         disabled: "テクスチャ通常",
+      },
+      musicDelayMs: {
+        title: "音楽遅延補正",
+        description: "音楽再生の遅延（ミリ秒、正で遅延・負で前倒し）を独立して調整し、オーディオ出力環境の違いによる拍のズレを補正します",
       },
       themePreview: {
         title: "テーマプレビュー",

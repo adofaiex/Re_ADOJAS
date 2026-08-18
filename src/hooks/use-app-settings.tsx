@@ -17,6 +17,7 @@ interface AppSettings {
   showStats: boolean // 是否使用 stats.js 面板
   useOGGCompression: boolean // 是否使用 OGG 压缩减少内存占用
   disableTrackTexture: boolean // 对 Standard 轨道禁用轨道纹理（高砖块数谱面性能优化）
+  musicDelayMs: number // 音乐播放延迟补偿（ms，独立于谱面 offset）
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -29,6 +30,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   showStats: false, // Default to using default FPS panel
   useOGGCompression: false, // Default to disabled (may affect quality)
   disableTrackTexture: false, // Default to enabled (texture on)
+  musicDelayMs: 0, // Default to no compensation
 }
 
 export function useAppSettings() {

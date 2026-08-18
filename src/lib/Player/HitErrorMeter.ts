@@ -1,14 +1,12 @@
 /**
- * 准度条（Hit Error Meter）—— 还原官方 scrHitErrorMeter。
+ * 准度条（Hit Error Meter）—— 横向分段判定条 + 三角指针。
  *
- * 结构（官方）：
- * - 中间 = Perfect，左右按误差偏移（误差角度归一化到 ±60）
- * - 指针（hand）：averageAngle 用 lerp 平滑（sensitivity 0.2）
- * - 判定痕迹（tick）：每次判定在偏移位置画一条带颜色的短线，tickLife=3s 淡出
- * - 越靠近边界颜色越"宽松"：Perfect 绿 → EPerfect/LPerfect 黄绿 → VeryEarly/VeryLate 红 → TooEarly/TooLate 深红
+ * 布局（SVG 样式）：
+ * - 中间 = Perfect（绿），左右依次 Good（黄）→ Bad（橙）→ Miss（红）
+ * - 三角符号是判定时间的指针，随 averageAngle 平滑移动
+ * - 判定痕迹（tick）：每次判定在判定条上方画一个判定颜色的圆角小长方形，tickLife=3s 淡出
  *
  * 归一化（官方 AddHit）：angleNorm = 误差角度(deg) × (60 / Counted边界角度)
- * 颜色（官方 CalculateTickColor）：用归一化后的 ±60 与 Perfect/Pure 边界（同样×60/counted）比较。
  */
 import { getBoundariesInDeg, JudgeConfig, HitMargin } from './Judge';
 
@@ -23,6 +21,11 @@ const TICK_LIFE = 3.0;     // 官方 tickLife
 const SENSITIVITY = 0.2;   // 官方 sensitivity
 const MAX_TICKS = 60;
 
+// 判定条分段（与 SVG viewBox 0..520 同比例）：Miss | Bad | Good | Perfect | Good | Bad | Miss
+const SEG_FRACS = [12, 60, 65, 240, 65, 60, 12];
+const SEG_COLORS = ['#ff0000', '#fca15d', '#ffff00', '#00ff00', '#ffff00', '#fca15d', '#ff0000'];
+const BAR_TOTAL = 520;
+
 export class HitErrorMeter {
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
@@ -34,9 +37,10 @@ export class HitErrorMeter {
   private ticks: Tick[] = [];
 
   // 几何
-  private cx: number = 0;
-  private cy: number = 0;
-  private radius: number = 45;
+  private cx: number = 0;     // 屏幕水平中心
+  private barW: number = 520; // 判定条总宽
+  private barH: number = 20;  // 判定条高度
+  private barY: number = 0;   // 判定条顶部 y
 
   constructor(container: HTMLElement) {
     this.container = container;
@@ -61,8 +65,9 @@ export class HitErrorMeter {
     this.canvas.width = Math.ceil(w * this.dpr);
     this.canvas.height = Math.ceil(h * this.dpr);
     this.cx = w / 2;
-    this.cy = h - 40; // 底部偏上（官方 pos y=0.03）
-    this.radius = Math.min(w * 0.09, 60);
+    this.barW = Math.min(w * 0.44, 380);
+    this.barH = 14;
+    this.barY = h - 85; // 底部偏上（官方 pos y=0.03）
   }
 
   /** 是否显示（有判定痕迹或指针非零时） */
@@ -72,7 +77,7 @@ export class HitErrorMeter {
 
   /**
    * 记录一次判定。
-   * @param errorAngleDeg 误差角度（度，正=晚，负=早）
+   * @param errorAngleDeg 误差角度（度，正=晚/慢，负=早/快）
    * @param bpmTimesSpeed bpm×speed
    * @param pitch song.pitch
    * @param marginScale 砖块判定缩放
@@ -83,7 +88,8 @@ export class HitErrorMeter {
     if (bounds.countedDeg <= 0) return;
 
     // 归一化到 ±60（官方：angleDiff *= 60/counted）
-    let angle = -errorAngleDeg * (60 / bounds.countedDeg);
+    // 左=早（快），右=晚（慢）：errorAngleDeg 正=晚 → 右
+    let angle = errorAngleDeg * (60 / bounds.countedDeg);
     if (angle < -60) angle = -60.0001 - Math.random() * 3;
     if (angle > 60) angle = 60.0001 + Math.random() * 3;
 
@@ -115,6 +121,12 @@ export class HitErrorMeter {
     return '#cf3030';
   }
 
+  /** 归一化角度 → 判定条上的 x 坐标 */
+  private angleToX(angle: number): number {
+    const clamped = Math.max(-60, Math.min(60, angle));
+    return this.cx + (clamped / 60) * (this.barW / 2 - 4);
+  }
+
   /** 每帧：指针平滑 + tick 淡出 */
   update(delta: number): void {
     if (!this.visible && this.ticks.length === 0 && Math.abs(this.averageAngle) < 0.1) return;
@@ -132,6 +144,22 @@ export class HitErrorMeter {
     }
   }
 
+  private roundRectPath(x: number, y: number, w: number, h: number, r: number): void {
+    const ctx = this.ctx;
+    const rr = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + rr, y);
+    ctx.lineTo(x + w - rr, y);
+    ctx.arcTo(x + w, y, x + w, y + rr, rr);
+    ctx.lineTo(x + w, y + h - rr);
+    ctx.arcTo(x + w, y + h, x + w - rr, y + h, rr);
+    ctx.lineTo(x + rr, y + h);
+    ctx.arcTo(x, y + h, x, y + h - rr, rr);
+    ctx.lineTo(x, y + rr);
+    ctx.arcTo(x, y, x + rr, y, rr);
+    ctx.closePath();
+  }
+
   private draw(): void {
     const ctx = this.ctx;
     const w = this.container.clientWidth;
@@ -142,67 +170,44 @@ export class HitErrorMeter {
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     ctx.clearRect(0, 0, w, h);
 
-    // 半圆弧刻度（-60° ~ +60°）
-    ctx.strokeStyle = 'rgba(255,255,255,0.18)';
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.arc(this.cx, this.cy, this.radius, Math.PI * (1 + 60 / 180), Math.PI * (2 - 60 / 180));
-    ctx.stroke();
+    const barX = this.cx - this.barW / 2;
+    const barY = this.barY;
 
-    // 刻度线
-    ctx.strokeStyle = 'rgba(255,255,255,0.35)';
-    ctx.lineWidth = 1;
-    for (let a = -60; a <= 60; a += 15) {
-      const rad = (a / 180) * Math.PI;
-      const x1 = this.cx + Math.sin(rad) * (this.radius - 4);
-      const y1 = this.cy - Math.cos(rad) * (this.radius - 4);
-      const x2 = this.cx + Math.sin(rad) * (this.radius + 4);
-      const y2 = this.cy - Math.cos(rad) * (this.radius + 4);
-      ctx.beginPath();
-      ctx.moveTo(x1, y1);
-      ctx.lineTo(x2, y2);
-      ctx.stroke();
+    // ── 判定条：分段矩形 ──
+    let x = barX;
+    for (let i = 0; i < SEG_FRACS.length; i++) {
+      const segW = (SEG_FRACS[i] / BAR_TOTAL) * this.barW;
+      ctx.fillStyle = SEG_COLORS[i];
+      ctx.fillRect(x, barY, segW, this.barH);
+      x += segW;
     }
 
-    // 中心 Perfect 标记
-    ctx.fillStyle = 'rgba(255,255,255,0.5)';
-    ctx.font = '8px "Google Sans Code", sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText('PERFECT', this.cx, this.cy - this.radius - 10);
-
-    // ticks（判定痕迹，判定颜色，淡出）
+    // ── ticks（判定痕迹：判定颜色的圆角小长方形，位于判定条上方，淡出）──
     for (const t of this.ticks) {
       const alpha = Math.max(0, t.life / t.maxLife);
-      const rad = (t.angle / 180) * Math.PI;
-      const x1 = this.cx + Math.sin(rad) * (this.radius - 10);
-      const y1 = this.cy - Math.cos(rad) * (this.radius - 10);
-      const x2 = this.cx + Math.sin(rad) * (this.radius + 8);
-      const y2 = this.cy - Math.cos(rad) * (this.radius + 8);
-      ctx.strokeStyle = t.color;
+      const tx = this.angleToX(t.angle);
+      ctx.fillStyle = t.color;
       ctx.globalAlpha = alpha;
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(x1, y1);
-      ctx.lineTo(x2, y2);
-      ctx.stroke();
+      this.roundRectPath(tx - 4.5, barY - 30, 9, 20, 4.5);
+      ctx.fill();
     }
     ctx.globalAlpha = 1;
 
-    // 指针（hand，lerp 平滑）
-    const rad = (this.averageAngle / 180) * Math.PI;
-    const px = this.cx + Math.sin(rad) * (this.radius - 2);
-    const py = this.cy - Math.cos(rad) * (this.radius - 2);
+    // ── 指针（三角符号 = 判定时间的指针，lerp 平滑）──
+    const pointerX = this.angleToX(this.averageAngle);
+
+    // 底部向上三角（描边）
+    const apexY = barY + this.barH + 8;
+    const baseY = barY + this.barH + 19;
     ctx.strokeStyle = '#ffffff';
-    ctx.lineWidth = 2;
+    ctx.lineWidth = 5;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
     ctx.beginPath();
-    ctx.moveTo(this.cx, this.cy);
-    ctx.lineTo(px, py);
+    ctx.moveTo(pointerX - 11, baseY);
+    ctx.lineTo(pointerX, apexY);
+    ctx.lineTo(pointerX + 11, baseY);
     ctx.stroke();
-    ctx.fillStyle = '#ffffff';
-    ctx.beginPath();
-    ctx.arc(px, py, 3.5, 0, Math.PI * 2);
-    ctx.fill();
 
     ctx.restore();
   }

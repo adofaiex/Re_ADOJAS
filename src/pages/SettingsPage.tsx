@@ -105,6 +105,12 @@ export default function SettingsPage() {
           description: t("settings.disableTrackTexture.description"),
           type: "disableTrackTexture",
         },
+        {
+          id: "musicDelayMs",
+          title: t("settings.musicDelayMs.title"),
+          description: t("settings.musicDelayMs.description"),
+          type: "musicDelayMs",
+        },
       ],
     },
   ]
@@ -434,6 +440,27 @@ export default function SettingsPage() {
                       <span className="text-sm text-slate-600 dark:text-slate-400">
                         {settings.disableTrackTexture ? t("settings.disableTrackTexture.enabled") : t("settings.disableTrackTexture.disabled")}
                       </span>
+                    </div>
+                  )}
+
+                  {setting.type === "musicDelayMs" && (
+                    <div className="flex items-center gap-3">
+                      <Input
+                        type="number"
+                        min={-500}
+                        max={500}
+                        step={1}
+                        value={settings.musicDelayMs}
+                        onChange={(e) => {
+                          const raw = e.target.value
+                          if (raw === "") return
+                          const v = Number(raw)
+                          if (isNaN(v)) return
+                          updateSettings({ musicDelayMs: Math.max(-500, Math.min(500, Math.round(v))) })
+                        }}
+                        className="w-28 bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:border-purple-500 dark:focus:border-purple-400 focus:ring-purple-500/20 dark:focus:ring-purple-400/20"
+                      />
+                      <span className="text-sm text-slate-600 dark:text-slate-400">ms</span>
                     </div>
                   )}
                 </div>

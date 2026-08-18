@@ -78,6 +78,7 @@ export class Player implements IPlayer {
   private musicStartDelay: number = 0; // Music start delay in seconds
   private musicStartOffset: number = 0; // Music start position in seconds (separateCountdownTime → 0)
   private hitsoundStartDelay: number = 0; // Hitsound start delay in seconds
+  private musicDelayMs: number = 0;       // 音乐播放延迟补偿（ms，独立于谱面 offset，用于校准音频输出延迟）
   private audioDriftSynced: boolean = false; // whether one-shot audio sync has been applied
   private _musicScheduled: boolean = false;  // whether playScheduled has been issued (once per startPlay)
   
@@ -102,10 +103,18 @@ export class Player implements IPlayer {
   private countdownText: string = '';           // 倒计时 HUD 文本（3/2/1/GO）
   private _lastCountdownTick: number = -1;      // 已播 sndHat 的 tick 计数
   private _countdownHatBuffer: AudioBuffer | null = null; // 缓存的 hihat 噪声 buffer
+  // 从非开头启动（手打选中中间砖块播放）时的预启动倒计时状态
+  private preStartHoldMs: number = 0;           // 预启动倒计时剩余时间（ms）
+  private preStartHoldTotal: number = 0;        // 预启动倒计时总时长（ms）
+  private preStartHatTick: number = -1;         // 预启动倒计时已播 sndHat 的 tick 计数
+  private preStartTileIndex: number = -1;       // 起始砖块索引（-1 = 未启用）
+  private preStartFrozenMs: number = 0;         // 倒计时数字阶段冻结的 elapsedTime（= 起始时刻，ms）
+  private preStartMusicStarted: boolean = false; // GO 阶段是否已启动音乐/打拍音
   private marginCounts: number[] = new Array(12).fill(0); // 各判定等级计数（按 HitMargin 索引）
   private judgeDeadTiles: number = 0;           // 死亡次数（XAcc 权重）
   private deaths: number = 0;                   // 死亡次数（HUD 显示）
   private tileMarginScales: number[] = [];       // 各砖块判定窗口倍率（ScaleMargin 事件）
+  private hitErrorSamples: number[] = [];        // 手打有效命中的按键时机偏移（ms，正=晚/慢，负=早/快）
 
   // Camera settings
   private zoom: number = 1;
@@ -515,6 +524,32 @@ export class Player implements IPlayer {
     this.onManualCorrect = callbacks.onCorrect ?? null;
   }
 
+  /**
+   * 根据本次手打的按键时机偏移，估算当前设备最优的音乐延迟补偿（ms）。
+   * 算法：IQR 剔除极端值后取均值；偏差 = 均值误差 - 当前补偿，取反得建议补偿。
+   * 样本过少返回 null（不推荐）。
+   */
+  public getSuggestedAudioDelayMs(): number | null {
+    const samples = this.hitErrorSamples;
+    if (samples.length < 5) return null;
+
+    const sorted = [...samples].sort((a, b) => a - b);
+    const q1 = sorted[Math.floor(sorted.length * 0.25)];
+    const q3 = sorted[Math.floor(sorted.length * 0.75)];
+    const iqr = q3 - q1;
+    const lo = q1 - 1.5 * iqr;
+    const hi = q3 + 1.5 * iqr;
+    const kept = sorted.filter(x => x >= lo && x <= hi);
+    if (kept.length === 0) return null;
+
+    const meanErr = kept.reduce((s, x) => s + x, 0) / kept.length;
+    // errorMs = musicDelayMs + 输出延迟 → 输出延迟 = errorMs - musicDelayMs
+    // 最优补偿 = -输出延迟 = musicDelayMs - errorMs
+    const suggested = this.musicDelayMs - meanErr;
+    const clamped = Math.max(-500, Math.min(500, Math.round(suggested)));
+    return clamped;
+  }
+
   public isManualDead(): boolean {
     return this._manualDead;
   }
@@ -530,10 +565,19 @@ export class Player implements IPlayer {
     this.judgmentDisplay?.clear();
     this.resetMarginStats();
     this.resetTrailHistory();
+    this.hitErrorSamples = [];
     this.currentTileIndex = 0;
     this.isPaused = false;
     this.audioDriftSynced = false;
     this.useAudioContextTime = false;
+    this.preStartHoldMs = 0;
+    this.preStartHoldTotal = 0;
+    this.preStartHatTick = -1;
+    this.preStartTileIndex = -1;
+    this.preStartFrozenMs = 0;
+    this.preStartMusicStarted = false;
+    this.countdownText = '';
+    this._lastCountdownTick = -1;
     this.elapsedTime = 0;
     this.startTime = performance.now();
     // 音乐从 0 重播
@@ -554,6 +598,29 @@ export class Player implements IPlayer {
 
   public setSongPitch(pitch: number): void {
     this.songPitch = Math.max(0.1, pitch);
+  }
+
+  /** 设置音乐播放延迟补偿（ms）。正值=音乐相对游戏时间线延后播放，负值=提前。播放中修改立即生效。 */
+  public setMusicDelayMs(ms: number): void {
+    const clamped = Math.round(ms);
+    if (clamped === this.musicDelayMs) return;
+    const deltaSec = (clamped - this.musicDelayMs) / 1000;
+    this.musicDelayMs = clamped;
+    // 保持 musicStartDelay 与最新补偿一致（startPlay 之外用 seekTo 定位音乐也需要正确值）
+    this.musicStartDelay += deltaSec;
+
+    // 播放中立即生效：保持游戏时间线不变，把音乐重新定位，使可听节拍整体偏移
+    if (this.isPlaying && !this.isPaused && this.music.hasAudio && this.music.isPlaying) {
+      const cur = this.music.audio?.currentTime;
+      if (typeof cur === 'number' && !isNaN(cur)) {
+        this.music.seek(Math.max(0, cur - deltaSec));
+      }
+    }
+  }
+
+  /** 当前音乐延迟补偿（ms）。 */
+  public getMusicDelayMs(): number {
+    return this.musicDelayMs;
   }
 
   /** 切换判定难度：Lenient（宽）/ Normal（标）/ Strict（严）。 */
@@ -701,6 +768,9 @@ export class Player implements IPlayer {
       return;
     }
 
+    // GO 后到首个落点判定窗口开始前：按键忽略（避免提前按被判 TooEarly）
+    if (this.isPreStartGraceActive()) return;
+
     const settings = this.levelData.settings;
     const bpm0 = settings.bpm || 100;
     const cd0 = (settings.countdownTicks || 4) * (60 / bpm0);
@@ -733,6 +803,8 @@ export class Player implements IPlayer {
     if (this.music.hasAudio) {
       // 不 seek，保留位置便于回看
     }
+    // 死亡后停止打拍音（手动模式下命中音效由 playHitForTile 单发，连续轨道不应继续播放）
+    this.hitsoundManager.stop();
   }
 
   /**
@@ -819,6 +891,8 @@ export class Player implements IPlayer {
       this.judgmentDisplay?.show(landingTile, margin);
       this.playHitForTile(tileIndex + 1);
       this.onManualHit?.();
+      // 记录按键时机偏移（正=晚/慢，负=早/快），用于死亡后估算最优音频延迟
+      this.hitErrorSamples.push(errorMs);
       // 准度条：有效命中按误差角度画线（正=晚 → 条上偏右）
       const errAngleDeg = (errorMs / 1000) * 3 * bpmTimesSpeed * pitch;
       this.hitErrorMeter?.addHit(errAngleDeg, bpmTimesSpeed, pitch, marginScale, this.judgeConfig());
@@ -853,6 +927,8 @@ export class Player implements IPlayer {
    */
   private checkManualTooLate(timeInLevel: number): void {
     if (!this.manualMode || this._manualDead) return;
+    // 首个落点判定窗口开始前：不做超时矫正（倒计时期间与 GO 后的提前期）
+    if (this.isPreStartGraceActive()) return;
     const n = this.levelData.tiles.length;
     let guard = 0;
     while (guard < 64) {
@@ -960,6 +1036,50 @@ export class Player implements IPlayer {
     } else {
       this.countdownText = '';
     }
+  }
+
+  /**
+   * 从非开头启动（手打选中中间砖块播放）的预启动倒计时：3/2/1/GO + sndHat tick。
+   * 数字阶段（3-2-1）时间冻结、球停在起始砖块 0°；GO（最后一拍）期间球立即开始运动。
+   */
+  private updatePreStartHold(delta: number): boolean {
+    const settings = this.levelData.settings;
+    const spb = 60 / (settings.bpm || 100);
+    const ct = settings.countdownTicks || 4;
+    const elapsed = this.preStartHoldTotal - this.preStartHoldMs; // ms
+
+    const tickIdx = Math.min(ct - 1, Math.floor(elapsed / (spb * 1000)));
+    if (tickIdx !== this.preStartHatTick) {
+      this.preStartHatTick = tickIdx;
+      this.playCountdownHat();
+    }
+    this.countdownText = tickIdx >= ct - 1 ? 'GO' : String(ct - 1 - tickIdx);
+
+    this.preStartHoldMs -= delta * 1000;
+    if (this.preStartHoldMs <= 0) {
+      this.preStartHoldMs = 0;
+      this.countdownText = '';
+      this._lastCountdownTick = -1;
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * GO 后到首个落点判定窗口开始前的保护期：按键与超时矫正一律忽略。
+   * 与游戏开局一致（开局倒计时期间 timeInLevel<0 的按键被忽略），
+   * 避免"倒计时一结束就因提前按而 TooEarly miss"。
+   */
+  private isPreStartGraceActive(): boolean {
+    if (this.preStartTileIndex < 0) return false;
+    const t0 = this.elapsedTime / 1000 - this.getTimeOrigin();
+    const perfect = (this.tileStartTimes[this.preStartTileIndex] ?? 0) + (this.tileDurations[this.preStartTileIndex] ?? 0);
+    const bpm = this.tileBPM[this.preStartTileIndex] || 100;
+    const pitch = this.songPitch;
+    const marginScale = this.getTileMarginScale(this.preStartTileIndex);
+    const bounds = getBoundariesInDeg(bpm, pitch, marginScale, this.judgeConfig());
+    const countedSec = bounds.countedDeg / (3 * bpm * pitch);
+    return t0 < perfect - countedSec;
   }
 
   /** 播放一次 hihat（sndHat）：白噪声 + 高通 + 短包络。 */
@@ -2090,6 +2210,65 @@ export class Player implements IPlayer {
   public updatePlayer(delta: number): void {
     if (!this.planetRed || !this.planetBlue) return;
 
+    // 从非开头启动的预启动倒计时（完整 3-2-1-GO，共 countdownTicks 拍）。
+    // 数字阶段（3-2-1）：时间冻结、球停在起始砖块 0°；
+    // GO（最后一拍）阶段：时间推进、球立即从 0° 开始运动，音乐/打拍音此时启动。
+    if (this.preStartHoldMs > 0) {
+      const settings = this.levelData.settings;
+      const spb = 60 / (settings.bpm || 100);
+      const ct = settings.countdownTicks || 4;
+      const goStartMs = (ct - 1) * spb * 1000;
+      const elapsed = this.preStartHoldTotal - this.preStartHoldMs;
+      const inGoPhase = elapsed >= goStartMs;
+
+      if (!inGoPhase) {
+        // 数字阶段：冻结时间，球停在 0°
+        this.elapsedTime = this.preStartFrozenMs;
+      } else {
+        // GO 阶段：时间推进（球从 0° 立即运动）
+        this.elapsedTime = this.preStartFrozenMs + (elapsed - goStartMs);
+        if (!this.preStartMusicStarted) {
+          this.preStartMusicStarted = true;
+          this.startTime = performance.now() - this.elapsedTime;
+          const ctx = getSharedAudioContext();
+          if (ctx) {
+            this.audioContextStartOffset = ctx.currentTime - this.elapsedTime / 1000;
+          }
+          if (this.music.hasAudio && !this.music.isPlaying) {
+            this.music.play();
+          }
+          if (this.hitsoundManager && this.hitsoundManager.isSynthesized() && this.preStartTileIndex >= 0) {
+            const hsPos = (this.tileStartTimes[this.preStartTileIndex] ?? 0) + (this.tileDurations[this.preStartTileIndex] ?? 0);
+            if (hsPos >= 0) {
+              this.hitsoundManager.startAtOffset(hsPos);
+            } else {
+              this.hitsoundManager.start(-hsPos);
+            }
+          }
+        }
+      }
+
+      const done = this.updatePreStartHold(delta);
+      this.updatePlanetsPosition();
+      this.updateCameraFollow(delta);
+
+      // GO 阶段也处理按键与超时（grace 保护期会屏蔽过早按键）
+      if (inGoPhase) {
+        this.processAsyncInputs();
+        this.checkManualTooLate(this.elapsedTime / 1000 - this.getTimeOrigin());
+      }
+
+      if (done) {
+        // 倒计时彻底结束：校准时间基准，交由主循环正常推进
+        this.startTime = performance.now() - this.elapsedTime;
+        const ctx = getSharedAudioContext();
+        if (ctx) {
+          this.audioContextStartOffset = ctx.currentTime - this.elapsedTime / 1000;
+        }
+      }
+      return;
+    }
+
     // Calculate current time using AudioContext for synchronization
     const settings = this.levelData.settings;
     const initialBPM = settings.bpm || 100;
@@ -2215,7 +2394,7 @@ export class Player implements IPlayer {
       this.tiles?.forEach((_, id) => this.updateTileMeshColor(parseInt(id)));
     }
 
-    // 倒计时 HUD + sndHat tick
+    // 倒计时 HUD + sndHat tick（预启动倒计时由上方 hold 分支处理，此处仅正常倒计时）
     this.updateCountdown();
 
     const triggeredEvents = this.timelineManager.getTriggered(t0);
@@ -2611,6 +2790,13 @@ export class Player implements IPlayer {
     this._lastAutoJudgedTile = -1;
     this.countdownText = '';
     this._lastCountdownTick = -1;
+    this.preStartHoldMs = 0;
+    this.preStartHoldTotal = 0;
+    this.preStartHatTick = -1;
+    this.preStartTileIndex = -1;
+    this.preStartFrozenMs = 0;
+    this.preStartMusicStarted = false;
+    this.hitErrorSamples = [];
     this.resetMarginStats();
     this.resetTrailHistory();
     this.judgmentDisplay?.clear();
@@ -2650,6 +2836,27 @@ export class Player implements IPlayer {
       this._judgeLastCorrectedTile = -1;
       this._judgeHitsoundPlayed = -1;
       this._lastAutoJudgedTile = this.currentTileIndex;
+      // 手打从非开头（非 tile0）启动：先播完整 3-2-1-GO（countdownTicks 拍）再开始判定。
+      // 数字阶段（3-2-1）球停在起始砖块 0°；GO（最后一拍）期间球立即开始运动。
+      if (this.manualMode && this.currentTileIndex > 0) {
+        const ct0 = s.countdownTicks || 4;
+        const spb0 = 60 / (s.bpm || 100);
+        const cdMs = ct0 * spb0 * 1000;
+        this.preStartHoldMs = cdMs;
+        this.preStartHoldTotal = cdMs;
+        this.preStartHatTick = -1;
+        this.preStartTileIndex = this.currentTileIndex;
+        this.preStartFrozenMs = startAtMs;
+        this.preStartMusicStarted = false;
+        this.countdownText = String(ct0 - 1);
+      } else {
+        this.preStartHoldMs = 0;
+        this.preStartHoldTotal = 0;
+        this.preStartHatTick = -1;
+        this.preStartTileIndex = -1;
+        this.preStartFrozenMs = 0;
+        this.preStartMusicStarted = false;
+      }
       if (this.cameraController) {
         this.cameraController.seek(timeInLevel, this.currentPivotPosition);
       }
@@ -2661,10 +2868,11 @@ export class Player implements IPlayer {
         // 音乐物理位置 = elapsedTime/1000 - musicStartDelay（从 clip 0 播，开始于 musicStartDelay）
         const sepCd = isEnabled(s.separateCountdownTime);
         const cdMs = (s.countdownTicks || 4) * (60 / (s.bpm || 100));
-        const msDelay = sepCd ? cdMs : 0;
+        const msDelay = (sepCd ? cdMs : 0) + this.musicDelayMs / 1000;
         this.music.seek(Math.max(0, startAtMs / 1000 - msDelay));
         // Start music immediately so updatePlayer doesn't call playScheduled
-        if (!this.music.isPlaying) {
+        // （预启动倒计时期间保持暂停，GO 时再播放）
+        if (this.preStartHoldMs <= 0 && !this.music.isPlaying) {
           this.music.play();
         }
         this._musicScheduled = true; // seek 分支直接播放，禁止后续 playScheduled
@@ -2672,17 +2880,20 @@ export class Player implements IPlayer {
       if (this.hitsoundManager && this.hitsoundManager.isSynthesized()) {
         // hitsound buffer 时间轴 = tileStartTimes（timeInLevel 时间线）
         const hsPos = timeInLevel;
-        if (hsPos >= 0) {
-          this.hitsoundManager.startAtOffset(hsPos);
-        } else {
-          this.hitsoundManager.start(-hsPos);
+        // （预启动倒计时期间不播放，GO 时从首个落点启动）
+        if (this.preStartHoldMs <= 0) {
+          if (hsPos >= 0) {
+            this.hitsoundManager.startAtOffset(hsPos);
+          } else {
+            this.hitsoundManager.start(-hsPos);
+          }
         }
       }
       if (this.videoElement) {
         // 视频跟随音乐：位置 = elapsedTime/1000 - musicStartDelay
         const sepCd = isEnabled(s.separateCountdownTime);
         const cdMs = (s.countdownTicks || 4) * (60 / (s.bpm || 100));
-        this.videoElement.currentTime = Math.max(0, startAtMs / 1000 - (sepCd ? cdMs : 0));
+        this.videoElement.currentTime = Math.max(0, startAtMs / 1000 - ((sepCd ? cdMs : 0) + this.musicDelayMs / 1000));
       }
         // Use performance.now() timekeeping (AudioContext not yet synced)
         this.useAudioContextTime = false;
@@ -2703,7 +2914,9 @@ export class Player implements IPlayer {
     // - 否则：音乐从启动时刻（dspTimeSong）开始，从 clip 0 播。
     // 两种模式下音乐物理位置 = timeInLevel + offset（songposition = song.time - offset）。
     const separateCountdown = isEnabled(settings.separateCountdownTime);
-    const musicStartDelay = separateCountdown ? countdownDuration : 0;
+    // 音乐播放延迟补偿：在基础启动延迟上叠加用户可调补偿（ms → s），
+    // 正值延后、负值提前，用于校准不同音频输出设备的延迟。
+    const musicStartDelay = (separateCountdown ? countdownDuration : 0) + this.musicDelayMs / 1000;
     const musicStartOffsetSec = 0;
     // 打拍音时间轴 = tileStartTimes（timeInLevel 时间线）：buffer 0 = tile0 弧起点 = timeOrigin。
     // 打拍音在球到达 tile 的时刻响（与判定对齐）。
@@ -2924,6 +3137,12 @@ export class Player implements IPlayer {
     // 清除 HUD：倒计时、判定文字、准度条
     this.countdownText = '';
     this._lastCountdownTick = -1;
+    this.preStartHoldMs = 0;
+    this.preStartHoldTotal = 0;
+    this.preStartHatTick = -1;
+    this.preStartTileIndex = -1;
+    this.preStartFrozenMs = 0;
+    this.preStartMusicStarted = false;
     this.judgmentDisplay?.clear();
     this.hitErrorMeter?.clear();
     this.removePlanets();
@@ -3005,7 +3224,8 @@ export class Player implements IPlayer {
     this.isPaused = false;
     const pauseDuration = performance.now() - this.pauseTime;
     this.startTime += pauseDuration;
-    if (this.music && (this.music as any).hasAudio ? this.music.hasAudio : false) {
+    // 预启动倒计时期间：音乐保持暂停，GO 时由 updatePlayer 统一播放
+    if (this.preStartHoldMs <= 0 && this.music && (this.music as any).hasAudio ? this.music.hasAudio : false) {
       this.music.resume();
     }
     
@@ -3014,7 +3234,7 @@ export class Player implements IPlayer {
     
     // Resume pre-synthesized hitsound track from current position
     // （buffer 时间轴 = tileStartTimes = timeInLevel 时间线）
-    if (this.hitsoundManager.isSynthesized() && timeInLevel > 0) {
+    if (this.preStartHoldMs <= 0 && this.hitsoundManager.isSynthesized() && timeInLevel > 0) {
         this.hitsoundManager.startAtOffset(timeInLevel);
     }
   }

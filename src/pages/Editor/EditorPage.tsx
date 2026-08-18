@@ -55,6 +55,7 @@ export default function EditorPage() {
     isDark,
     i18nMounted,
     settings,
+    suggestedAudioDelayMs,
 
     // Setters
     setSettingsOpen,
@@ -79,6 +80,8 @@ export default function EditorPage() {
     handleImportVideoBackground,
     handleImportDecoration,
     handleCancelVideoImport,
+    handleAcceptDelaySuggestion,
+    handleCancelDelaySuggestion,
 
     // Translation
     t
@@ -464,6 +467,38 @@ export default function EditorPage() {
       {/* Settings Modal */}
       <SettingsModal isOpen={settingsOpen} onClose={() => setSettingsOpen(false)} />
 
+      {/* 死亡后建议的音频延迟弹窗（非阻塞，按播放/退出可关闭） */}
+      {suggestedAudioDelayMs !== null && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center pointer-events-none">
+          <div className={`pointer-events-auto relative w-72 rounded-xl shadow-2xl overflow-hidden border ${isDark ? "bg-slate-800 border-slate-700" : "bg-white border-slate-200"}`}>
+            <div className={`px-5 py-4 ${isDark ? "text-white" : "text-slate-900"}`}>
+              <div className="text-lg font-semibold mb-1">{t("editor.delaySuggestion.title")}</div>
+              <div className={`text-2xl font-bold ${isDark ? "text-purple-300" : "text-purple-600"}`}>
+                {suggestedAudioDelayMs > 0 ? `+${suggestedAudioDelayMs}` : suggestedAudioDelayMs} ms
+              </div>
+              <div className={`text-sm mt-1 ${isDark ? "text-slate-400" : "text-slate-500"}`}>
+                {t("editor.delaySuggestion.hint")}
+              </div>
+            </div>
+            <div className={`px-5 py-3 flex justify-end gap-2 border-t ${isDark ? "border-slate-700" : "border-slate-200"}`}>
+              <Button
+                variant="ghost"
+                onClick={handleCancelDelaySuggestion}
+                className={isDark ? "text-slate-300 hover:text-white" : "text-slate-600 hover:text-slate-900"}
+              >
+                {t("editor.delaySuggestion.cancel")}
+              </Button>
+              <Button
+                onClick={handleAcceptDelaySuggestion}
+                className="bg-purple-600 hover:bg-purple-500 text-white"
+              >
+                {t("editor.delaySuggestion.accept")}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Loading Modal */}
       <LoadingModal
         isOpen={isLoading}
@@ -475,11 +510,11 @@ export default function EditorPage() {
       {/* Full-screen Canvas Area */}
       <div ref={containerRef} className="absolute inset-0">
 {/* 右下角：判定选择 / 不死模式 / 自动播放（otto）——官方编辑器布局 */}
-      <div className="absolute bottom-4 right-4 flex items-center gap-3 select-none">
+      <div className="absolute bottom-4 right-4 flex items-end gap-3 select-none">
         {/* 判定选择：单按钮循环切换（宽→标→严） */}
         <button
           className="shrink-0 flex items-center justify-center"
-          style={{ width: 37, height: 37 }}
+          style={{ width: 44, height: 44 }}
           title={`判定难度：${judgeDifficulty === "Lenient" ? "宽" : judgeDifficulty === "Strict" ? "严" : "标"}（点击切换）`}
           onClick={handleCycleJudgeDifficulty}
         >
@@ -495,7 +530,7 @@ export default function EditorPage() {
         {/* 不死模式：关闭时降低透明度 */}
         <button
           className="shrink-0 flex items-center justify-center"
-          style={{ width: 40, height: 40 }}
+          style={{ width: 44, height: 44 }}
           title={noFail ? "不死模式：开启（miss 自动矫正）" : "不死模式：关闭"}
           onClick={handleToggleNoFail}
         >
@@ -511,7 +546,7 @@ export default function EditorPage() {
         {/* 自动播放（otto）：开 = 关闭手打 */}
         <button
           className="shrink-0 flex items-center justify-center"
-          style={{ width: 56, height: 56 }}
+          style={{ width: 44, height: 44 }}
           title={auto ? "自动播放：开启（点击关闭，进入手动判定）" : "自动播放：关闭（点击开启自动播放）"}
           onClick={handleToggleManualPlay}
           onMouseEnter={handleOttoPetEnter}
@@ -521,7 +556,7 @@ export default function EditorPage() {
           <img
             src={ottoSrc}
             alt="自动播放"
-            style={{ width: '100%', height: '100%', objectFit: 'contain', transform: 'translate(-12px, -7px)' }}
+            style={{ width: '100%', height: '100%', objectFit: 'contain' }}
             className={`drop-shadow-lg transition-all duration-150 ${manualMode ? "opacity-45 grayscale" : highBPM ? "otto-red" : ""}`}
             draggable={false}
           />

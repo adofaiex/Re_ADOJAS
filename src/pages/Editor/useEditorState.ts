@@ -114,7 +114,10 @@ export function useEditorState() {
   const navigate = useNavigate()
   const { theme, resolvedTheme } = useTheme()
   const { t, mounted: i18nMounted } = useI18n()
-  const { settings } = useAppSettings()
+  const { settings, updateSettings } = useAppSettings()
+
+  // 死亡后建议的音频延迟弹窗（null = 不显示）
+  const [suggestedAudioDelayMs, setSuggestedAudioDelayMs] = useState<number | null>(null)
 
   // otto：每次成功判定/矫正 → 左右看一拍时长（官方 OttoBlink）
   const handleManualHit = useCallback((): void => {
@@ -134,7 +137,14 @@ export function useEditorState() {
     player.setManualEventCallbacks({
       onHit: handleManualHit,
       onCorrect: handleManualHit,
-      onFail: () => setAutoFailed(true),
+      onFail: () => {
+        setAutoFailed(true)
+        // 死亡后根据本次按键偏移分布，估算建议的音频延迟
+        const suggested = player.getSuggestedAudioDelayMs?.()
+        if (suggested !== null && suggested !== undefined) {
+          setSuggestedAudioDelayMs(suggested)
+        }
+      },
     })
   }, [handleManualHit])
 
@@ -161,6 +171,7 @@ export function useEditorState() {
       player.setOGGCompression(settings.useOGGCompression)
       player.setStatsPanel(settings.showStats)
       player.setDisableTrackTexture(settings.disableTrackTexture)
+      player.setMusicDelayMs(settings.musicDelayMs)
       
       previewerRef.current = player
       bindOttoEvents(player)
@@ -209,6 +220,12 @@ export function useEditorState() {
 
   // 播放功能
   const handlePlay = useCallback((startAtMs?: number): void => {
+    // 延迟建议弹窗打开时，按播放只关闭弹窗，不执行播放
+    if (suggestedAudioDelayMs !== null) {
+      setSuggestedAudioDelayMs(null)
+      return
+    }
+
     if (!adofaiFile && !previewerRef.current) {
       window.showNotification?.("error", t("editor.notifications.noFileToPlay"))
       return
@@ -245,13 +262,31 @@ export function useEditorState() {
       setPlayMode("play")
       previewerRef.current?.resumePlay()
     }
-  }, [adofaiFile, playMode, t])
+  }, [adofaiFile, playMode, t, suggestedAudioDelayMs])
 
   // 退出播放模式
   const handleExitPlayMode = useCallback((): void => {
+    // 延迟建议弹窗打开时，按退出只关闭弹窗，不退出
+    if (suggestedAudioDelayMs !== null) {
+      setSuggestedAudioDelayMs(null)
+      return
+    }
     setPlayMode("preview")
     setPlayModeActive(false)
     previewerRef.current?.stopPlay()
+  }, [suggestedAudioDelayMs])
+
+  // 同意建议：应用推荐的音乐延迟补偿
+  const handleAcceptDelaySuggestion = useCallback((): void => {
+    if (suggestedAudioDelayMs !== null) {
+      updateSettings({ musicDelayMs: suggestedAudioDelayMs })
+    }
+    setSuggestedAudioDelayMs(null)
+  }, [suggestedAudioDelayMs, updateSettings])
+
+  // 取消建议：关闭弹窗不应用
+  const handleCancelDelaySuggestion = useCallback((): void => {
+    setSuggestedAudioDelayMs(null)
   }, [])
 
   // 切换手动游玩模式（关闭自动播放，用键盘判定）
@@ -391,6 +426,12 @@ export function useEditorState() {
   }, [settings.hitsoundEnabled])
 
 
+  // 监听音乐延迟补偿设置变化（下次播放时生效）
+  useEffect(() => {
+    previewerRef.current?.setMusicDelayMs(settings.musicDelayMs)
+  }, [settings.musicDelayMs])
+
+
   // 监听帧率设置变化
   useEffect(() => {
     if (previewerRef.current) {
@@ -455,6 +496,7 @@ export function useEditorState() {
             player.setStatsPanel(settings.showStats)
             
             player.setDisableTrackTexture(settings.disableTrackTexture)
+            player.setMusicDelayMs(settings.musicDelayMs)
             
             // Synthesize hitsounds
             await player.preSynthesizeHitsoundsWithProgress()
@@ -478,7 +520,9 @@ export function useEditorState() {
     }
 
     initializeExample()
-  }, [mounted, i18nMounted, themeReady, t, settings])
+    // 注意：仅挂载时初始化一次。设置变更由下方各"实时应用" effect 处理，
+    // 若把 settings 放进依赖，改设置会重建 Player 导致关卡被重置。
+  }, [mounted, i18nMounted, themeReady, t])
 
   // 监听窗口大小变化，触发Previewer的resize
   useEffect(() => {
@@ -548,6 +592,7 @@ export function useEditorState() {
     isDark,
     i18nMounted,
     settings,
+    suggestedAudioDelayMs,
     
     // Setters
     setSettingsOpen,
@@ -572,6 +617,8 @@ export function useEditorState() {
     handleImportVideoBackground,
     handleImportDecoration,
     handleCancelVideoImport,
+    handleAcceptDelaySuggestion,
+    handleCancelDelaySuggestion,
     
     // Translation
     t
