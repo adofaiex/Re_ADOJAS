@@ -265,9 +265,11 @@ export class PositionTrackManager {
         }
 
         for (let i = 0; i < tileCount; i++) {
-            const zLevel = (1000 - (i % 1000)) * 0.0001;
+            // 统一到 z=0 平面：depthZ() 的层级模型以 tile 在 z=0 为前提
+            // （bg 装饰物 z<0、fg 装饰物 z>0、行星 z=1）。
+            // tile 的 z 高度在俯视正交相机下不影响投影，只会破坏与装饰物的深度排序。
             transforms.set(i, {
-                position: new Vector3(workingPos[i].x, workingPos[i].y, zLevel),
+                position: new Vector3(workingPos[i].x, workingPos[i].y, 0),
                 rotation: workingRot[i],
                 scale: new Vector3(workingScale[i], workingScale[i], workingScale[i]),
                 opacity: workingOpacity[i],

@@ -42,7 +42,7 @@ export interface DecoInstanceSlot {
   baseH: number;
   pivotX: number;
   pivotY: number;
-  /** renderOrder this slot was allocated with (= -depth) */
+  /** renderOrder this slot was allocated with (from DecorationInstance.depthZ()) */
   renderOrder: number;
   tex: Texture;
   blending: Blending;
@@ -71,7 +71,7 @@ function blendKey(blending: Blending): string {
 
 /**
  * GPU-instanced renderer for Image/Text decorations.
- * Batch key = texture + blendMode + renderOrder(-depth)
+ * Batch key = texture + blendMode + renderOrder
  * so layering matches per-sprite renderOrder from the original path.
  */
 export class DecorationInstancedRenderer {
@@ -92,7 +92,7 @@ export class DecorationInstancedRenderer {
       vertexShader: decoVert,
       fragmentShader: decoFrag,
       transparent: true,
-      depthWrite: false,
+      depthWrite: true,
       depthTest: true,
       side: DoubleSide,
       blending,
@@ -103,7 +103,9 @@ export class DecorationInstancedRenderer {
     mesh.instanceMatrix.setUsage(DynamicDrawUsage);
     mesh.frustumCulled = false;
     mesh.count = 0;
-    // Match DecorationInstance depthZ(): renderOrder = -depth
+    // Match DecorationInstance depthZ(): renderOrder for this depth.
+    // depthWrite=true so decorations occlude each other via the depth buffer
+    // (tiles also write depth at z=0; Bg is z<0 behind, Default is z>0 in front).
     mesh.renderOrder = renderOrder;
 
     const colorAttr = new InstancedBufferAttribute(new Float32Array(capacity * 3), 3);

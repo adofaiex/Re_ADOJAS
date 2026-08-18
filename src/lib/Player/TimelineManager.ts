@@ -459,10 +459,10 @@ export class TimelineManager {
         const kfs = this.timelines.get(entity)?.get(property);
         if (!kfs || kfs.length === 0) return undefined;
 
-        if (kfs.length === 1) return kfs[0].value;
-
+        // Before the first keyframe there is no state yet: return undefined so the
+        // caller falls back to the entity's base value. (Matches sampleDiscrete.)
         const idx = this.findKeyframeIndex(kfs, time);
-        if (idx < 0) return kfs[0].value;
+        if (idx < 0) return undefined;
         if (idx >= kfs.length - 1) return kfs[kfs.length - 1].value;
 
         const left = kfs[idx];
@@ -474,7 +474,7 @@ export class TimelineManager {
         const kfs = this.timelines.get(entity)?.get(property);
         if (!kfs || kfs.length === 0) return undefined;
         const idx = this.findKeyframeIndex(kfs, time);
-        if (idx < 0) return kfs[0].value;
+        if (idx < 0) return undefined; // before first keyframe: no state yet
         return kfs[idx].value;
     }
 
@@ -587,6 +587,10 @@ export class TimelineManager {
 
     public hasTimeline(entity: string, property: string): boolean {
         return !!this.timelines.get(entity)?.has(property);
+    }
+
+    public hasAnyTimeline(entity: string): boolean {
+        return this.timelines.has(entity) || this.discreteTimelines.has(entity);
     }
 
     public reset(): void {

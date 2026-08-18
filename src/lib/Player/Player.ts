@@ -4205,7 +4205,7 @@ export class Player implements IPlayer {
       }
     } else {
       // Fallback to original position calculation - use stable Z for depth ordering
-      const stableZ = (12 - index) * 0.01;
+      const stableZ = 0; // tiles live on the z=0 plane (see depthZ() layer model)
       tileMesh.position.set(x, y, stableZ);
       finalPos.set(x, y, stableZ);
       const colorOpacity = tileConfig?.trackOpacity ?? 1;

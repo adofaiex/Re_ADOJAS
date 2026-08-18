@@ -425,13 +425,19 @@ class DecorationInstance {
 
     /** Compute depth z + renderOrder from config.depth.
      *  ADOFAI sorting layers: Bg (depth>=0) < Floor (tiles) < Default (depth<0).
-     *  Tiles use renderOrder = -tileIndex (0 to -N+1).
-     *  Background decorations get renderOrder << -N so they render behind ALL tiles.
-     *  Foreground decorations (depth<0) get positive renderOrder, on top of tiles. */
+     *  Tiles use renderOrder = -tileIndex (0 to -(N-1)).
+     *  Background decorations get renderOrder below ALL tiles, so they render behind them
+     *  even in very long levels. Foreground decorations (depth<0) get positive renderOrder.
+     *  Materials are transparent with depthWrite=true, so the z offsets also let the depth
+     *  buffer sort tiles (z=0) in front of Bg (z<0) and behind Default (z>0). */
     private depthZ(): [number, number] {
         const d = this.config.depth;
         if (d < 0) return [0.1 - d * 0.1, -d];
-        return [-0.01 - d * 0.1, -d - 2000];
+        // Bg base must be below the deepest tile renderOrder (-(N-1)).
+        const tiles = this._manager?.levelData?.tiles;
+        const n = Array.isArray(tiles) ? tiles.length : 0;
+        const base = n > 0 ? -(n + 1) : -100000;
+        return [-0.01 - d * 0.1, base - d];
     }
 
     public syncInstance(): void {
@@ -574,7 +580,7 @@ class DecorationInstance {
     }
 
     public updateAnimation(now: number, tm?: TimelineManager): void {
-        if (!tm || !this.config.tag) return;
+        if (!tm) return;
         try {
             this.updateAnimationInner(now, tm);
         } catch (err) {
@@ -819,7 +825,7 @@ export class DecorationManager {
         // 目标值基于装饰自身初始值计算——同 tag 不同 scale/position 的装饰互不影响。
         for (const deco of this.decoList) {
             const kv = `deco:${deco.config.id}`;
-            const decoTags = (deco.config.tag || '').split(/\s+/).filter(Boolean);
+            const decoTags = (deco.config.tag || 'NO TAG').split(/\s+/).filter(Boolean);
 
             const [baseColorHex] = parseDecoColor(deco.config.color, 'ffffff');
             const [baseCR, baseCG, baseCB] = hexToRGB01(baseColorHex);
@@ -830,7 +836,7 @@ export class DecorationManager {
             for (const entry of entries) {
                 const { time: eventTime, event } = entry;
                 if (!isEventActive(event)) continue;
-                const eventTags = (event.tag || '').split(/\s+/).filter(Boolean);
+                const eventTags = (event.tag || 'NO TAG').split(/\s+/).filter(Boolean);
                 if (!decoTags.some(t => eventTags.includes(t))) continue;
 
                 // SetText / SetObject：离散轨（decText / 物体属性）
@@ -1552,7 +1558,10 @@ export class DecorationManager {
         let needsTilePositions = false;
         for (let i = 0; i < len; i++) {
             const d = list[i];
-            if (this._timelineManager && d.config.tag) { d.updateAnimation(now, this._timelineManager!); animCount++; }
+            if (this._timelineManager && (d.config.tag || this._timelineManager.hasAnyTimeline(`deco:${d.config.id}`))) {
+                d.updateAnimation(now, this._timelineManager!);
+                animCount++;
+            }
             if (d.config.stickToFloor || d.config.relativeTo === DecPlacementType.RedPlanet
                 || d.config.relativeTo === DecPlacementType.BluePlanet
                 || d.config.relativeTo === DecPlacementType.GreenPlanet) {
@@ -1599,7 +1608,7 @@ export class DecorationManager {
         const sLen = this._staticDecos.length;
         for (let i = 0; i < sLen; i++) {
             const d = this._staticDecos[i];
-            if ((this._timelineManager && d.config.tag) && !this._visibleStaticSet.has(d)) {
+            if ((this._timelineManager && (d.config.tag || this._timelineManager.hasAnyTimeline(`deco:${d.config.id}`))) && !this._visibleStaticSet.has(d)) {
                 visibleStatic.push(d);
             }
         }
