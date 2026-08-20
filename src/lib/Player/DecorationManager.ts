@@ -286,6 +286,8 @@ class DecorationInstance {
     // 真正生效的可见性 = culling 视锥可见 && 用户/事件 visible
     private _instVisible = true;
     private _culledVisible = true;
+    // 最近一次 updatePosition 计算出的 scale 乘数（camScaleMultiplier × floorScale）
+    private _scaleMul = 1;
     // 时间轴采样缓存：避免每帧重复触发 image load 或相同值导致的 transform 重算
     public _manager: any = null;
     private _lastImage: string | null = null;
@@ -448,14 +450,12 @@ class DecorationInstance {
             this.instSlot = this.instRenderer.ensureLayer(this.instSlot, ro);
         }
         const p = this.container.position;
-        // container.scale is set by updatePosition to currentScale * multipliers.
-        // Before the first updatePosition it stays at (1,1,1) — fall back to currentScale.
-        let sx = this.container.scale.x;
-        let sy = this.container.scale.y;
-        if (sx === 1 && sy === 1 && (this.currentScale.x !== 1 || this.currentScale.y !== 1)) {
-            sx = this.currentScale.x;
-            sy = this.currentScale.y;
-        }
+        // Use currentScale × the multiplier last computed in updatePosition.
+        // This keeps instanced writes in sync with the animated currentScale even if
+        // updatePosition hasn't run this frame yet (static/culled decorations).
+        const mul = this._scaleMul;
+        const sx = this.currentScale.x * mul;
+        const sy = this.currentScale.y * mul;
         const rot = this.container.rotation.z;
         const vis = this._instVisible && (this.config.visible !== false);
         this.instRenderer.write(
@@ -495,7 +495,8 @@ class DecorationInstance {
                 const ts = tilePositions!.get(this.config.floor ?? -1)!;
                 floorScaleMul = ts.z;
             }
-            this.container.scale.set(this.currentScale.x * camScaleMul * floorScaleMul, this.currentScale.y * camScaleMul * floorScaleMul, 1);
+            this._scaleMul = camScaleMul * floorScaleMul;
+            this.container.scale.set(this.currentScale.x * this._scaleMul, this.currentScale.y * this._scaleMul, 1);
             if (this.instSlot) this.syncInstance();
             return;
         }
@@ -509,6 +510,7 @@ class DecorationInstance {
             floorScaleMul = ts.z;
         }
         const totalScaleMul = camScaleMul * floorScaleMul;
+        this._scaleMul = totalScaleMul;
         // Parallax offset multiplier: official = decoration.camScaleMultiplier
         const parallaxOffsetMul = camScaleMul;
         const ct = this.config.relativeTo;
@@ -1836,12 +1838,14 @@ export class DecorationManager {
     }
 
     private parseVec2(v: any, def: [number, number]): [number, number] {
-        if (!v) return def;
+        if (v === undefined || v === null || v === '') return def;
         if (Array.isArray(v) && v.length >= 2) return [Number(v[0]), Number(v[1])];
+        if (Array.isArray(v) && v.length === 1) return [Number(v[0]), Number(v[0])];
         // Handle string vectors like "[1, 2]" or "(1, 2)"
         if (typeof v === 'string') {
             const m = v.match(/-?\d+\.?\d*/g);
             if (m && m.length >= 2) return [parseFloat(m[0]), parseFloat(m[1])];
+            if (m && m.length === 1) return [parseFloat(m[0]), parseFloat(m[0])];
         }
         // Handle single number as uniform value (e.g., scale: 50 → [50, 50])
         if (typeof v === 'number') return [v, v];

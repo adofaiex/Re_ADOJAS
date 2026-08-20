@@ -545,8 +545,13 @@ export class TimelineManager {
         const range = right.time - left.time;
         if (range <= 1e-12) return right.value;
 
+        // ease=null marks an instant (zero-duration) keyframe: the value snaps at
+        // left.time and holds until the next event. Official MoveDecorations/MoveCamera
+        // with duration 0 set the target immediately, so never interpolate from one.
+        if (left.ease == null) return left.value;
+
         let progress = (time - left.time) / range;
-        if (left.ease && left.ease !== 'Linear.easeNone' && left.ease !== 'Linear') {
+        if (left.ease !== 'Linear.easeNone' && left.ease !== 'Linear') {
             const fn = getEasingFunction(left.ease);
             progress = fn(progress);
         }
