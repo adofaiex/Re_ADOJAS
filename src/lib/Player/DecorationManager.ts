@@ -128,6 +128,10 @@ export interface DecorationRuntimeContext {
     viewportWidth: number;
     viewportHeight: number;
     planetPositions?: Partial<Record<DecPlacementType.RedPlanet | DecPlacementType.BluePlanet | DecPlacementType.GreenPlanet, Vector2>>;
+    /** Editor mouse-wheel zoom (view-zoom factor, 1 = default). Official equivalent:
+     *  scrCamera.userSizeMultiplier = 1 / this value. Participates in lockScale
+     *  decorations' camScaleMultiplier exactly like MoveCamera zoom does. */
+    editorWheelZoom?: number;
 }
 
 export interface DecorationConfig {
@@ -487,10 +491,11 @@ class DecorationInstance {
     public updatePosition(camPos: Vector3, camRot: number, camZoom: number, tilePositions?: Map<number, { x: number; y: number; z: number; rotation: number }>, adoZoom?: number, runtime?: DecorationRuntimeContext): void {
         if (this._isStaticWorld) {
             // Parallax=0 → world-fixed: no camera displacement
+            // (lockScale is guaranteed false here — see _isStaticWorld — so the
+            // camScaleMul formula below never applies; keep scaleMultiplier only.)
             this.container.position.x = this.currentPosition.x;
             this.container.position.y = this.currentPosition.y;
             let camScaleMul = 1;
-            if (this.config.lockScale && adoZoom && adoZoom > 0) camScaleMul = 100 / adoZoom;
             camScaleMul *= this.config.scaleMultiplier;
             let floorScaleMul = 1;
             if (this.config.stickToFloor && tilePositions?.has(this.config.floor ?? -1)) {
@@ -502,9 +507,21 @@ class DecorationInstance {
             if (this.instSlot) this.syncInstance();
             return;
         }
-        // camScaleMultiplier: C# = orthoSize * 0.2 / (camZoom / 100), orthoSize=5 → 100/adoZoom
+        // Official camera model (scrCamera.UpdateSize):
+        //   orthographicSize = camsizenormal(5) × userSizeMultiplier × zoomSize
+        //   - userSizeMultiplier: editor mouse-wheel "observer" zoom. Re's zoomMultiplier
+        //     is a view-zoom factor (bigger = closer), official's u is a size factor
+        //     (smaller = closer) → userSizeMultiplier = 1 / editorWheelZoom.
+        //   - zoomSize = current ADOFAI zoom (level settings baseline + MoveCamera
+        //     events) ÷ 100.
+        // Decoration lockScale (scrDecoration.camScaleMultiplier):
+        //   csm = orthoSize × 0.2 / (settingsCamZoom / 100) = adoZoom/(settingsZoom×wheel)
+        const settingsZoom = this._manager?.levelData?.settings?.zoom || 100;
+        const wheel = runtime?.editorWheelZoom && runtime.editorWheelZoom > 0 ? runtime.editorWheelZoom : 1;
         let camScaleMul = 1;
-        if (this.config.lockScale && adoZoom && adoZoom > 0) camScaleMul = 100 / adoZoom;
+        if (this.config.lockScale && adoZoom && adoZoom > 0) {
+            camScaleMul = adoZoom / (settingsZoom * wheel);
+        }
         camScaleMul *= this.config.scaleMultiplier;
         let floorScaleMul = 1;
         if (this.config.stickToFloor && tilePositions?.has(this.config.floor ?? -1)) {
@@ -525,8 +542,12 @@ class DecorationInstance {
                 ? runtime.viewportWidth / runtime.viewportHeight
                 : 16 / 9;
             const viewW = viewH * aspect;
-            // Unity 的 Camera 坐标以屏幕高度为统一基准；CameraAspect 才按实际宽高比扩展 X。
-            const xExtent = ct === DecPlacementType.CameraAspect ? viewW : viewH;
+            // Official UpdateScreenClamp + SetTrans(clampToScreen):
+            //   screenRelativePos.x = pivotX/20 (+aspect pre-division for CameraAspect),
+            //   worldOffsetX = screenRelX × pixelWidth × worldPerPixel.
+            // Camera → X extent is the FULL view width; CameraAspect's pre-divided X makes
+            // its effective X extent equal the view HEIGHT.
+            const xExtent = ct === DecPlacementType.Camera ? viewW : viewH;
             const worldOffsetX = this.currentPosition.x / 20 * xExtent;
             const worldOffsetY = this.currentPosition.y / 20 * viewH;
             const cosR = Math.cos(camRot);
@@ -553,10 +574,16 @@ class DecorationInstance {
                 stickOffsetX = tp.x - this.startPos.x;
                 stickOffsetY = tp.y - this.startPos.y;
             }
-            const px = (camPos.x - this.pivotPos.x) * this.currentParallax.x;
-            const py = (camPos.y - this.pivotPos.y) * this.currentParallax.y;
-            posX = this.currentPosition.x + px + this.currentParallaxOffset.x * parallaxOffsetMul + followOffsetX + stickOffsetX;
-            posY = this.currentPosition.y + py + this.currentParallaxOffset.y * parallaxOffsetMul + followOffsetY + stickOffsetY;
+            // Official scrDecoration.UpdatePosition + scrParallax.SetTrans:
+            //   decoBase = pivotPos + planetFollow + stickToFloor offset;
+            //   final = decoBase + (camPos − decoBase) × parallax + parallaxOffset × csm
+            // Both interpolation anchors are decoBase itself (posCamAtStart == startPosition).
+            const baseX = this.currentPosition.x + followOffsetX + stickOffsetX;
+            const baseY = this.currentPosition.y + followOffsetY + stickOffsetY;
+            const px = (camPos.x - baseX) * this.currentParallax.x;
+            const py = (camPos.y - baseY) * this.currentParallax.y;
+            posX = baseX + px + this.currentParallaxOffset.x * parallaxOffsetMul;
+            posY = baseY + py + this.currentParallaxOffset.y * parallaxOffsetMul;
             // Rotation: official priority: stickToFloor (floor rot) > lockRotation (camera rot) > none
             if (this.config.stickToFloor && tilePositions?.has(this.config.floor ?? -1)) {
                 const tp = tilePositions!.get(this.config.floor ?? -1)!;

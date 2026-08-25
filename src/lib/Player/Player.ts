@@ -2472,6 +2472,7 @@ export class Player implements IPlayer {
       {
         viewportWidth: this.renderer.domElement.clientWidth || this.renderer.domElement.width,
         viewportHeight: this.renderer.domElement.clientHeight || this.renderer.domElement.height,
+        editorWheelZoom: this.zoomMultiplier,
         planetPositions: {
           [DecPlacementType.RedPlanet]: this.planetRed ? new Vector2(this.planetRed.position.x, this.planetRed.position.y) : undefined,
           [DecPlacementType.BluePlanet]: this.planetBlue ? new Vector2(this.planetBlue.position.x, this.planetBlue.position.y) : undefined,
