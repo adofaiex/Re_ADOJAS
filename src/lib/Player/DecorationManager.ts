@@ -286,6 +286,10 @@ class DecorationInstance {
     private instRenderer: DecorationInstancedRenderer | null = null;
     private originalVisible: boolean = true;
     private originalDepth: number = 0;
+    // SetPlacementType 状态快照：死亡重开时恢复原参考系与原 startPos
+    private _placementChanged = false;
+    private _originalRelativeTo: DecPlacementType = DecPlacementType.Tile;
+    private _originalStartPos: Vector2 = new Vector2();
     private _isStaticWorld = true;
     // 真正生效的可见性 = culling 视锥可见 && 用户/事件 visible
     private _instVisible = true;
@@ -734,6 +738,11 @@ class DecorationInstance {
                 const rawPos: [number, number] = Array.isArray(ev.position)
                     ? [Number(ev.position[0]) || 0, Number(ev.position[1]) || 0]
                     : [0, 0];
+                if (!this._placementChanged) {
+                    this._originalRelativeTo = this.config.relativeTo;
+                    this._originalStartPos.copy(this.startPos);
+                    this._placementChanged = true;
+                }
                 this.config.relativeTo = np;
                 this.startPos.copy(this._manager.computeStartPos(rawPos, np, this.config.floor));
                 this.refreshStaticWorld();
@@ -800,6 +809,13 @@ class DecorationInstance {
     public reset(): void {
         this.config.visible = this.originalVisible;
         this.config.depth = this.originalDepth;
+        // 恢复 SetPlacementType 变更前的参考系与 startPos
+        if (this._placementChanged) {
+            this.config.relativeTo = this._originalRelativeTo;
+            this.startPos.copy(this._originalStartPos);
+            this.refreshStaticWorld();
+            this._placementChanged = false;
+        }
         this.currentScale.set(this.config.scale[0] / 100, this.config.scale[1] / 100);
         if (this.config.decorationType === DecorationType.Particle) this.currentScale.set(1, 1);
         this.currentRotation = this.config.rotation + this.config.rotationOffset;
@@ -921,6 +937,12 @@ export class DecorationManager {
             const baseOp0 = (deco.config.opacity / 100) * parseDecoColor(deco.config.color, 'ffffff')[1];
             const basePosX = deco.startPos.x;
             const basePosY = deco.startPos.y;
+            // Events trigger chronologically at runtime: once a SetPlacementType
+            // changes the reference frame, later position tweens end at the
+            // RE-DERIVED startPos (official scrDecoration.SetPlacementType),
+            // not the original spawn one. Track it while building.
+            let curStartX = basePosX;
+            let curStartY = basePosY;
 
             for (const entry of entries) {
                 const { time: eventTime, event } = entry;
@@ -963,9 +985,13 @@ export class DecorationManager {
                 const hasDur = duration > 0;
 
                 // Official SetPlacementType: a non-disabled relativeTo (≠ LastPosition)
-                // re-parents the decoration at trigger time.
+                // re-parents the decoration at trigger time, re-deriving startPos
+                // from the decoration's OWN source-event position in the new frame.
                 if (event.relativeTo !== undefined && !event.disabled?.relativeTo && !isLastPos) {
                     tm.addDiscreteKeyframe(kv, 'placement', eventTime, String(event.relativeTo));
+                    const sp = this.computeStartPos(deco.config.position, movementType, deco.config.floor);
+                    curStartX = sp.x;
+                    curStartY = sp.y;
                 }
 
                 if (event.positionOffset !== undefined && !event.disabled?.positionOffset) {
@@ -974,8 +1000,8 @@ export class DecorationManager {
                     const offY = pos[1] * ts;
                     const startX = tm.sample(kv, 'positionX', eventTime) ?? basePosX;
                     const startY = tm.sample(kv, 'positionY', eventTime) ?? basePosY;
-                    const endX = isLastPos ? startX + offX : basePosX + offX;
-                    const endY = isLastPos ? startY + offY : basePosY + offY;
+                    const endX = isLastPos ? startX + offX : curStartX + offX;
+                    const endY = isLastPos ? startY + offY : curStartY + offY;
                     if (hasDur) {
                         tm.addTweenKillComplete(kv, 'positionX', eventTime, endTime, startX, endX, ease);
                         tm.addTweenKillComplete(kv, 'positionY', eventTime, endTime, startY, endY, ease);
