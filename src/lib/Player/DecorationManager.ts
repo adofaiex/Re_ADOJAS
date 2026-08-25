@@ -292,6 +292,8 @@ class DecorationInstance {
     private _culledVisible = true;
     // 最近一次 updatePosition 计算出的 scale 乘数（camScaleMultiplier × floorScale）
     private _scaleMul = 1;
+    // 同深度平局的排名偏移（updateZRank 每帧按创建序分配）
+    private _zRankOffset = 0;
     // 时间轴采样缓存：避免每帧重复触发 image load 或相同值导致的 transform 重算
     public _manager: any = null;
     private _lastImage: string | null = null;
@@ -430,22 +432,44 @@ class DecorationInstance {
     }
 
     /** Compute depth z + renderOrder from config.depth.
-     *  ADOFAI sorting layers: Bg (depth>=0) < Floor (tiles) < Default (depth<0).
-     *  Tiles keep renderOrder ≤ 0 (per-shape batches use -minTileIndex as a blending
-     *  heuristic; exact tile-vs-tile occlusion is resolved by Player's per-instance
-     *  tile layers inside the (-0.01, +0.1) band reserved here).
-     *  Background decorations get renderOrder below ALL tiles, so they render behind them
-     *  even in very long levels. Foreground decorations (depth<0) get positive renderOrder.
-     *  Materials are transparent with depthWrite=true, so the z offsets also let the depth
-     *  buffer sort tiles (z≈0 band) in front of Bg (z<0) and behind Default (z>0). */
-    private depthZ(): [number, number] {
+     *  Official SetDepth model: Unity SortingLayer "Bg" (depth>=0) behind "Default"
+     *  (depth<0); within a layer sortingOrder = -depth.
+     *  Re maps the layer pair to renderOrder tiers around the tiles' 0
+     *  (bg below, fg above) and the depth itself to a continuous z that the depth
+     *  buffer resolves against tiles and other decorations — same mechanism as the
+     *  per-instance tile layers (Player.setTileLayer).
+     *  Bands (see also InstancedMeshManager.setTileLayer doc):
+     *    bg:  z ∈ [-0.09 - d*0.1 .. -0.01 - d*0.1]  (top edge -0.01 stays below tiles)
+     *    fg:  z ∈ [0.1 - d*0.1 .. 0.18 - d*0.1]     (bottom edge 0.1 stays above tiles)
+     *  The ±0.08 rank span inside each step (updateZRank) never crosses a neighbouring
+     *  depth step (gap 0.02). */
+    public depthZ(): [number, number] {
         const d = this.config.depth;
         if (d < 0) return [0.1 - d * 0.1, -d];
-        // Bg base must be below the deepest tile renderOrder (-(N-1)).
+        // Bg tier: strictly below the tiles' renderOrder 0, preserving -depth ordering.
         const tiles = this._manager?.levelData?.tiles;
         const n = Array.isArray(tiles) ? tiles.length : 0;
         const base = n > 0 ? -(n + 1) : -100000;
-        return [-0.01 - d * 0.1, base - d];
+        return [-0.09 - d * 0.1, base - d];
+    }
+
+    /** Tie-break for decorations sharing the exact same base z (same depth value).
+     *  Called once per frame for every decoration in creation order; the k-th
+     *  decoration of a z-group gets k small upward steps so equal-depth overlaps
+     *  deterministically render later-creation-on-top (Unity's instantiation-order
+     *  stability), independent of batch allocation/migration order.
+     *  Step 2e-4 ≫ ortho depth resolution (~6e-5); capped spread 0.08 fits inside
+     *  each 0.1 depth step without crossing into the neighbouring band. */
+    public updateZRank(counters: Map<number, number>): void {
+        const [z] = this.depthZ();
+        const rank = counters.get(z) ?? 0;
+        counters.set(z, rank + 1);
+        const off = Math.min(rank, 400) * 2e-4;
+        if (off !== this._zRankOffset) {
+            this._zRankOffset = off;
+            this.container.position.z = z + off;
+            if (this.instSlot) this.syncInstance();
+        }
     }
 
     public syncInstance(): void {
@@ -466,7 +490,7 @@ class DecorationInstance {
         const vis = this._instVisible && (this.config.visible !== false);
         this.instRenderer.write(
             this.instSlot,
-            p.x, p.y, z,
+            p.x, p.y, z + this._zRankOffset,
             rot,
             sx, sy,
             this.currentColor,
@@ -478,7 +502,7 @@ class DecorationInstance {
     public updateTransform(): void {
         this.container.rotation.z = this.currentRotation * Math.PI / 180;
         const [z, ro] = this.depthZ();
-        this.container.position.set(this.currentPosition.x, this.currentPosition.y, z);
+        this.container.position.set(this.currentPosition.x, this.currentPosition.y, z + this._zRankOffset);
         if (this.instSlot) {
             this.syncInstance();
             return;
@@ -805,6 +829,8 @@ export class DecorationManager {
     private _dynamicDecos: DecorationInstance[] = [];
     private _tilePositions: Map<number, { x: number; y: number; z: number; rotation: number }> = new Map();
     private _visibleStaticSet: Set<DecorationInstance> = new Set();
+    // base z → rank counter, rebuilt each frame for same-depth tie-breaking
+    private _rankCounters: Map<number, number> = new Map();
     private instancedRenderer: DecorationInstancedRenderer;
 
     constructor(scene: Scene, levelData: any, tileStartTimes: number[], tileBPM: number[]) {
@@ -1587,12 +1613,16 @@ export class DecorationManager {
         const len = list.length;
         let animCount = 0;
         let needsTilePositions = false;
+        // Same-depth tie-break ranks: rebuilt every frame in creation order so
+        // equal-depth overlaps resolve deterministically (later creation on top).
+        this._rankCounters.clear();
         for (let i = 0; i < len; i++) {
             const d = list[i];
             if (this._timelineManager && (d.config.tag || this._timelineManager.hasAnyTimeline(`deco:${d.config.id}`))) {
                 d.updateAnimation(now, this._timelineManager!);
                 animCount++;
             }
+            d.updateZRank(this._rankCounters);
             if (d.config.stickToFloor || d.config.relativeTo === DecPlacementType.RedPlanet
                 || d.config.relativeTo === DecPlacementType.BluePlanet
                 || d.config.relativeTo === DecPlacementType.GreenPlanet) {
