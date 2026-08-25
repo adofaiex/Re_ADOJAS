@@ -338,6 +338,11 @@ class DecorationInstance {
         this.currentParallaxOffset.set(this.config.parallaxOffset[0], this.config.parallaxOffset[1]);
         this.originalVisible = this.config.visible;
         this.originalDepth = this.config.depth;
+        this.refreshStaticWorld();
+    }
+
+    /** Re-evaluate the static-world fast path (call after relativeTo changes). */
+    public refreshStaticWorld(): void {
         const c = this.config;
         this._isStaticWorld = (c.relativeTo === DecPlacementType.Tile
             || c.relativeTo === DecPlacementType.Global
@@ -510,6 +515,15 @@ class DecorationInstance {
         if (this.mesh) { this.mesh.renderOrder = ro; (this.mesh.material as MeshBasicMaterial).color.copy(this.currentColor); (this.mesh.material as MeshBasicMaterial).opacity = this.currentOpacity; }
         if (this.sprite) { this.sprite.renderOrder = ro; (this.sprite.material as SpriteMaterial).color.copy(this.currentColor); (this.sprite.material as SpriteMaterial).opacity = this.currentOpacity; }
         if (this.iconSprite) { this.iconSprite.renderOrder = ro + 1; (this.iconSprite.material as SpriteMaterial).opacity = this.currentOpacity; }
+        // Object decorations: children renderers must inherit the decoration's
+        // sorting tier (official scrObjectDecoration sets every child renderer's
+        // sortingOrder = -depth); otherwise they default to 0 and draw in the
+        // tile tier instead of their depth layer.
+        if (this.objectGroup) {
+            for (const child of this.objectGroup.children) {
+                (child as Mesh).renderOrder = ro;
+            }
+        }
     }
 
     public updatePosition(camPos: Vector3, camRot: number, camZoom: number, tilePositions?: Map<number, { x: number; y: number; z: number; rotation: number }>, adoZoom?: number, runtime?: DecorationRuntimeContext): void {
@@ -707,6 +721,24 @@ class DecorationInstance {
         if (typeof dpt === 'number' && dpt !== this.config.depth) {
             this.config.depth = dpt;
             dirty = true;
+        }
+        // Official SetPlacementType: a MoveDecorations event can re-parent the
+        // decoration mid-level. startPos is re-derived from the SOURCE event's
+        // position interpreted in the NEW placement frame (tile offset added /
+        // screen units for Camera), pivotPos stays untouched.
+        const plc = sampleAnyDiscrete('placement');
+        if (typeof plc === 'string' && this._manager) {
+            const np = this._manager.parsePlacement(plc);
+            if (np !== this.config.relativeTo) {
+                const ev: any = this.sourceEvent || {};
+                const rawPos: [number, number] = Array.isArray(ev.position)
+                    ? [Number(ev.position[0]) || 0, Number(ev.position[1]) || 0]
+                    : [0, 0];
+                this.config.relativeTo = np;
+                this.startPos.copy(this._manager.computeStartPos(rawPos, np, this.config.floor));
+                this.refreshStaticWorld();
+                dirty = true;
+            }
         }
         const vis = sampleAnyDiscrete('visible');
         if (typeof vis === 'boolean' && vis !== this.config.visible) {
@@ -930,6 +962,12 @@ export class DecorationManager {
                 const endTime = eventTime + duration;
                 const hasDur = duration > 0;
 
+                // Official SetPlacementType: a non-disabled relativeTo (≠ LastPosition)
+                // re-parents the decoration at trigger time.
+                if (event.relativeTo !== undefined && !event.disabled?.relativeTo && !isLastPos) {
+                    tm.addDiscreteKeyframe(kv, 'placement', eventTime, String(event.relativeTo));
+                }
+
                 if (event.positionOffset !== undefined && !event.disabled?.positionOffset) {
                     const pos = this.parseVec2(event.positionOffset, [0, 0]);
                     const offX = pos[0] * ts;
@@ -939,11 +977,11 @@ export class DecorationManager {
                     const endX = isLastPos ? startX + offX : basePosX + offX;
                     const endY = isLastPos ? startY + offY : basePosY + offY;
                     if (hasDur) {
-                        tm.addTween(kv, 'positionX', eventTime, endTime, startX, endX, ease);
-                        tm.addTween(kv, 'positionY', eventTime, endTime, startY, endY, ease);
+                        tm.addTweenKillComplete(kv, 'positionX', eventTime, endTime, startX, endX, ease);
+                        tm.addTweenKillComplete(kv, 'positionY', eventTime, endTime, startY, endY, ease);
                     } else {
-                        tm.addKeyframe(kv, 'positionX', eventTime, endX, null);
-                        tm.addKeyframe(kv, 'positionY', eventTime, endY, null);
+                        tm.addInstantEvent(kv, 'positionX', eventTime, endX);
+                        tm.addInstantEvent(kv, 'positionY', eventTime, endY);
                     }
                 }
 
@@ -951,9 +989,9 @@ export class DecorationManager {
                     const endRot = event.rotationOffset;
                     const startRot = tm.sample(kv, 'rotation', eventTime) ?? 0;
                     if (hasDur) {
-                        tm.addTween(kv, 'rotation', eventTime, endTime, startRot, endRot, ease);
+                        tm.addTweenKillComplete(kv, 'rotation', eventTime, endTime, startRot, endRot, ease);
                     } else {
-                        tm.addKeyframe(kv, 'rotation', eventTime, endRot, null);
+                        tm.addInstantEvent(kv, 'rotation', eventTime, endRot);
                     }
                 }
 
@@ -964,11 +1002,11 @@ export class DecorationManager {
                     const startSX = tm.sample(kv, 'scaleX', eventTime) ?? (deco.config.scale[0] / 100);
                     const startSY = tm.sample(kv, 'scaleY', eventTime) ?? (deco.config.scale[1] / 100);
                     if (hasDur) {
-                        tm.addTween(kv, 'scaleX', eventTime, endTime, startSX, endSX, ease);
-                        tm.addTween(kv, 'scaleY', eventTime, endTime, startSY, endSY, ease);
+                        tm.addTweenKillComplete(kv, 'scaleX', eventTime, endTime, startSX, endSX, ease);
+                        tm.addTweenKillComplete(kv, 'scaleY', eventTime, endTime, startSY, endSY, ease);
                     } else {
-                        tm.addKeyframe(kv, 'scaleX', eventTime, endSX, null);
-                        tm.addKeyframe(kv, 'scaleY', eventTime, endSY, null);
+                        tm.addInstantEvent(kv, 'scaleX', eventTime, endSX);
+                        tm.addInstantEvent(kv, 'scaleY', eventTime, endSY);
                     }
                 }
 
@@ -976,9 +1014,9 @@ export class DecorationManager {
                     const endOp = event.opacity / 100;
                     const startOp = tm.sample(kv, 'opacity', eventTime) ?? baseOp0;
                     if (hasDur) {
-                        tm.addTween(kv, 'opacity', eventTime, endTime, startOp, endOp, ease);
+                        tm.addTweenKillComplete(kv, 'opacity', eventTime, endTime, startOp, endOp, ease);
                     } else {
-                        tm.addKeyframe(kv, 'opacity', eventTime, endOp, null);
+                        tm.addInstantEvent(kv, 'opacity', eventTime, endOp);
                     }
                 }
 
@@ -989,11 +1027,11 @@ export class DecorationManager {
                     const startParX = tm.sample(kv, 'parallaxX', eventTime) ?? (deco.config.parallax[0] / 100);
                     const startParY = tm.sample(kv, 'parallaxY', eventTime) ?? (deco.config.parallax[1] / 100);
                     if (hasDur) {
-                        tm.addTween(kv, 'parallaxX', eventTime, endTime, startParX, endParX, ease);
-                        tm.addTween(kv, 'parallaxY', eventTime, endTime, startParY, endParY, ease);
+                        tm.addTweenKillComplete(kv, 'parallaxX', eventTime, endTime, startParX, endParX, ease);
+                        tm.addTweenKillComplete(kv, 'parallaxY', eventTime, endTime, startParY, endParY, ease);
                     } else {
-                        tm.addKeyframe(kv, 'parallaxX', eventTime, endParX, null);
-                        tm.addKeyframe(kv, 'parallaxY', eventTime, endParY, null);
+                        tm.addInstantEvent(kv, 'parallaxX', eventTime, endParX);
+                        tm.addInstantEvent(kv, 'parallaxY', eventTime, endParY);
                     }
                 }
 
@@ -1004,11 +1042,11 @@ export class DecorationManager {
                     const startPOX = tm.sample(kv, 'parallaxOffsetX', eventTime) ?? deco.config.parallaxOffset[0];
                     const startPOY = tm.sample(kv, 'parallaxOffsetY', eventTime) ?? deco.config.parallaxOffset[1];
                     if (hasDur) {
-                        tm.addTween(kv, 'parallaxOffsetX', eventTime, endTime, startPOX, endPOX, ease);
-                        tm.addTween(kv, 'parallaxOffsetY', eventTime, endTime, startPOY, endPOY, ease);
+                        tm.addTweenKillComplete(kv, 'parallaxOffsetX', eventTime, endTime, startPOX, endPOX, ease);
+                        tm.addTweenKillComplete(kv, 'parallaxOffsetY', eventTime, endTime, startPOY, endPOY, ease);
                     } else {
-                        tm.addKeyframe(kv, 'parallaxOffsetX', eventTime, endPOX, null);
-                        tm.addKeyframe(kv, 'parallaxOffsetY', eventTime, endPOY, null);
+                        tm.addInstantEvent(kv, 'parallaxOffsetX', eventTime, endPOX);
+                        tm.addInstantEvent(kv, 'parallaxOffsetY', eventTime, endPOY);
                     }
                 }
 
@@ -1019,11 +1057,11 @@ export class DecorationManager {
                     const startPVX = tm.sample(kv, 'pivotOffsetX', eventTime) ?? deco.config.pivotOffset[0];
                     const startPVY = tm.sample(kv, 'pivotOffsetY', eventTime) ?? deco.config.pivotOffset[1];
                     if (hasDur) {
-                        tm.addTween(kv, 'pivotOffsetX', eventTime, endTime, startPVX, endPVX, ease);
-                        tm.addTween(kv, 'pivotOffsetY', eventTime, endTime, startPVY, endPVY, ease);
+                        tm.addTweenKillComplete(kv, 'pivotOffsetX', eventTime, endTime, startPVX, endPVX, ease);
+                        tm.addTweenKillComplete(kv, 'pivotOffsetY', eventTime, endTime, startPVY, endPVY, ease);
                     } else {
-                        tm.addKeyframe(kv, 'pivotOffsetX', eventTime, endPVX, null);
-                        tm.addKeyframe(kv, 'pivotOffsetY', eventTime, endPVY, null);
+                        tm.addInstantEvent(kv, 'pivotOffsetX', eventTime, endPVX);
+                        tm.addInstantEvent(kv, 'pivotOffsetY', eventTime, endPVY);
                     }
                 }
 
@@ -1034,13 +1072,13 @@ export class DecorationManager {
                     const sG = tm.sample(kv, 'colorG', eventTime) ?? baseCG;
                     const sB = tm.sample(kv, 'colorB', eventTime) ?? baseCB;
                     if (hasDur) {
-                        tm.addTween(kv, 'colorR', eventTime, endTime, sR, eR, ease);
-                        tm.addTween(kv, 'colorG', eventTime, endTime, sG, eG, ease);
-                        tm.addTween(kv, 'colorB', eventTime, endTime, sB, eB, ease);
+                        tm.addTweenKillComplete(kv, 'colorR', eventTime, endTime, sR, eR, ease);
+                        tm.addTweenKillComplete(kv, 'colorG', eventTime, endTime, sG, eG, ease);
+                        tm.addTweenKillComplete(kv, 'colorB', eventTime, endTime, sB, eB, ease);
                     } else {
-                        tm.addKeyframe(kv, 'colorR', eventTime, eR, null);
-                        tm.addKeyframe(kv, 'colorG', eventTime, eG, null);
-                        tm.addKeyframe(kv, 'colorB', eventTime, eB, null);
+                        tm.addInstantEvent(kv, 'colorR', eventTime, eR);
+                        tm.addInstantEvent(kv, 'colorG', eventTime, eG);
+                        tm.addInstantEvent(kv, 'colorB', eventTime, eB);
                     }
                 }
 

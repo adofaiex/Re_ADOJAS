@@ -383,17 +383,13 @@ export class TimelineManager {
                 if (opacity != null) props.push(['opacity', targetOp]);
 
                 for (const [prop, target] of props) {
-                    const kfs = this.timelines.get(`tile:${tileIdx}`)!.get(prop)!;
-                    const prevIdx = this.findKeyframeIndex(kfs, clampedTime);
-                    const startVal = prevIdx >= 0
-                        ? this.interpolateTimeline(kfs, prevIdx, clampedTime)
-                        : (kfs[0]?.value ?? 0);
-
-                    this.removeAfter(kfs, clampedTime + 1e-9);
-
-                    kfs.push({ time: clampedTime, value: startVal, ease: ease });
-                    kfs.push({ time: endTime, value: target, ease: null });
-                    if (kfs.length > 1) kfs.sort((a, b) => a.time - b.time);
+                    // Official ffxMoveFloorPlus: floors share one moveTweens dict, and a
+                    // new event Kill(complete:true)s the previous tween of the same
+                    // property — the old tween instantly jumps to ITS end value at
+                    // clampedTime and the new tween eases from there.
+                    const kfs0 = this.timelines.get(`tile:${tileIdx}`)!.get(prop)!;
+                    const fallback = kfs0.length > 0 ? kfs0[0].value : 0;
+                    this.addTweenKillComplete(`tile:${tileIdx}`, prop, clampedTime, endTime, fallback, target, ease);
                 }
             }
 
