@@ -16,7 +16,7 @@
         "@radix-ui/react-label": "^2.1.7",
         "@radix-ui/react-select": "^2.2.5",
         "@radix-ui/react-slot": "^1.2.3",
-        "adofai": "^3.3.1",
+        "adofai": "^3.3.2",
         "class-variance-authority": "^0.7.1",
         "clsx": "^2.1.1",
         "express": "^5.2.1",

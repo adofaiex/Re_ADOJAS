@@ -658,6 +658,61 @@ export class TimelineManager {
     }
 
     /**
+     * Instant event landing on a float timeline (official DOTween semantics for
+     * zero-duration MoveDecorations fields): the previous ACTIVE tween of this
+     * property is killed with complete:true (its end value is applied), then the
+     * new value is set immediately and holds. Everything after `time` is wiped,
+     * so a superseded tween's endpoint can never "resurrect" later.
+     */
+    public addInstantEvent(entity: string, property: string, time: number, value: number): void {
+        this.instantKeyframe(entity, property, time, value);
+    }
+
+    /**
+     * Tween entry with official ffxMoveDecorationsPlus DOTween semantics:
+     * before creating the new tween, the previous tween of the same property is
+     * killed with complete:true — it INSTANTLY jumps to its own end value at
+     * `startTime`, and the new tween eases FROM that value (a visible mid-flight
+     * discontinuity, unlike a smooth takeover).
+     * The old curve is preserved up to startTime (severed there), then the snap
+     * and the new eased segment follow.
+     */
+    public addTweenKillComplete(entity: string, property: string, startTime: number, endTime: number, fallbackStart: number, endValue: number, ease: string): void {
+        const kfs = this.ensureTimeline(entity, property);
+        const prevIdx = this.findKeyframeIndex(kfs, startTime);
+
+        let actualStart: number;
+        let severedTail: Keyframe | null = null;
+        if (prevIdx >= 0 && prevIdx < kfs.length - 1) {
+            const left = kfs[prevIdx];
+            const right = kfs[prevIdx + 1];
+            const insideActive = left.ease !== null
+                && left.time <= startTime + 1e-9
+                && right.time > startTime + 1e-9;
+            if (insideActive) {
+                // Kill(complete:true): old tween jumps to its end at startTime.
+                actualStart = right.value;
+                if (left.time < startTime - 1e-9) {
+                    // Keep the old curve playable up to the snap point.
+                    severedTail = { time: startTime, value: this.interpolateTimeline(kfs, prevIdx, startTime), ease: left.ease };
+                }
+            } else {
+                actualStart = Math.abs(kfs[prevIdx].time - startTime) < 1e-9 ? kfs[prevIdx].value : this.interpolateTimeline(kfs, prevIdx, startTime);
+            }
+        } else if (prevIdx >= 0) {
+            actualStart = kfs[prevIdx].value;
+        } else {
+            actualStart = kfs[0]?.value ?? fallbackStart;
+        }
+
+        this.removeAfter(kfs, startTime + 1e-9);
+        if (severedTail) kfs.push(severedTail);
+        kfs.push({ time: startTime, value: actualStart, ease });
+        kfs.push({ time: endTime, value: endValue, ease: null });
+        if (kfs.length > 1) kfs.sort((a, b) => a.time - b.time);
+    }
+
+    /**
      * Like addTween but does NOT remove keyframes after endTime.
      * Only removes keyframes BETWEEN startTime and endTime, preserving
      * existing keyframes after endTime (e.g. MoveTrack keyframes that
