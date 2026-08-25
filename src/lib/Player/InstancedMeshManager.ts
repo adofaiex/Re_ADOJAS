@@ -17,6 +17,10 @@ interface TileInstance {
     opacity: number;
     texSeed: number;
     visible: boolean;
+    /** Depth layer offset (world z) assigned in real time from tile id for visible
+     *  tiles. Kept separate from `position` so external position writers (MoveTrack,
+     *  PositionTrack sync) never wipe it. Higher layerZ = closer to camera = on top. */
+    layerZ: number;
 }
 
 /**
@@ -234,7 +238,7 @@ export class InstancedMeshManager {
             }
         }
 
-        // Store instance data
+        // Store instance data (preserve an existing depth layer across updates)
         const instance: TileInstance = {
             index: tileIndex,
             shapeKey,
@@ -245,7 +249,8 @@ export class InstancedMeshManager {
             bgColor: new Color(bgColor),
             opacity,
             texSeed,
-            visible
+            visible,
+            layerZ: this.tileInstances.get(tileIndex)?.layerZ ?? 0
         };
 
         this.tileInstances.set(tileIndex, instance);
@@ -334,7 +339,9 @@ export class InstancedMeshManager {
             shapeData.instanceCount++;
             shapeData.instancedMesh.count = shapeData.instanceCount;
 
-            // Update minTileIndex and renderOrder for correct between-shape z-ordering
+            // Update minTileIndex and renderOrder for between-shape draw order.
+            // This is only a blending-order heuristic now: exact per-tile occlusion
+            // comes from setTileLayer()'s per-instance z offsets via the depth buffer.
             if (tileIndex < shapeData.minTileIndex) {
                 shapeData.minTileIndex = tileIndex;
                 // Lower tile ID = higher layer = rendered last = higher renderOrder
@@ -346,7 +353,7 @@ export class InstancedMeshManager {
         // Update instance transform and color
         const { instancedMesh, dummy } = shapeData;
 
-        dummy.position.copy(position);
+        dummy.position.set(position.x, position.y, position.z + instance.layerZ);
         dummy.rotation.copy(rotation);
         
         if (visible) {
@@ -423,7 +430,7 @@ export class InstancedMeshManager {
                 const { instancedMesh, dummy } = shapeData;
 
                 if (posChanged || rotChanged || scaleChanged) {
-                    dummy.position.copy(position);
+                    dummy.position.set(position.x, position.y, position.z + instance.layerZ);
                     dummy.rotation.copy(rotation);
                     if (instance.visible) {
                         dummy.scale.copy(scale);
@@ -669,7 +676,7 @@ export class InstancedMeshManager {
                 const { instancedMesh, dummy } = shapeData;
                 
                 // We need to update the matrix for this instance
-                dummy.position.copy(instance.position);
+                dummy.position.set(instance.position.x, instance.position.y, instance.position.z + instance.layerZ);
                 dummy.rotation.copy(instance.rotation);
                 
                 if (visible) {
@@ -710,6 +717,42 @@ export class InstancedMeshManager {
                     instancedMesh.geometry.attributes.iOpacity!.setX(instanceIndex, 0);
                     instancedMesh.geometry.attributes.iOpacity!.needsUpdate = true;
                 }
+                break;
+            }
+        }
+    }
+
+    /**
+     * Assign a depth layer to a tile (real-time, derived from tile id for visible tiles).
+     *
+     * Official Floor sorting: tile[x] renders ABOVE tile[x+1]. Per-instance renderOrder
+     * does not exist inside one InstancedMesh, so the layer is encoded as a small world-z
+     * offset and resolved by the depth buffer (depthWrite=true), which works across ALL
+     * instanced shape batches regardless of which mesh a tile belongs to.
+     *
+     * The band stays inside the decoration-safe range: bg decorations sit at z <= -0.01,
+     * foreground at z >= 0.1 (see DecorationInstance.depthZ). Camera depth resolution
+     * near the tile plane is ~6e-5 world units, so steps of 2e-4 are safely distinguishable.
+     */
+    public setTileLayer(tileIndex: number, layerZ: number): void {
+        const instance = this.tileInstances.get(tileIndex);
+        if (!instance || instance.layerZ === layerZ) return;
+        instance.layerZ = layerZ;
+
+        for (const shapeData of this.instancedMeshes.values()) {
+            const instanceIndex = shapeData.instances.get(tileIndex);
+            if (instanceIndex !== undefined) {
+                const { instancedMesh, dummy } = shapeData;
+                dummy.position.set(instance.position.x, instance.position.y, instance.position.z + layerZ);
+                dummy.rotation.copy(instance.rotation);
+                if (instance.visible) {
+                    dummy.scale.copy(instance.scale);
+                } else {
+                    dummy.scale.set(0, 0, 0);
+                }
+                dummy.updateMatrix();
+                instancedMesh.setMatrixAt(instanceIndex, dummy.matrix);
+                instancedMesh.instanceMatrix.needsUpdate = true;
                 break;
             }
         }

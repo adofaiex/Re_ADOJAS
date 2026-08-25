@@ -3975,6 +3975,8 @@ export class Player implements IPlayer {
 
   private lastVisibleCheckPos = new Vector3(Infinity, Infinity, Infinity);
   private lastVisibleCheckZoom = -1;
+  // Sorted ids of the last assigned visible set (avoids re-layering when unchanged)
+  private _lastSortedVisible: number[] = [];
 
   private updateVisibleTiles(): void {
     if (!this.scene || !this.levelData.tiles || !this.camera) return;
@@ -4019,9 +4021,16 @@ export class Player implements IPlayer {
       }
     }
 
-    // Fast path: if sizes match, sets are equivalent (same tiles visible)
-    if (this.visibleTiles.size === newVisibleSet.size) {
-        return;
+    // Fast path: identical visible set → nothing to add/remove/re-layer.
+    // (Size alone is not enough — a pan can swap tiles 1:1, so compare ids.)
+    const sortedVisible = Array.from(newVisibleSet).sort((a, b) => a - b);
+    if (this.visibleTiles.size === newVisibleSet.size &&
+        this._lastSortedVisible.length === sortedVisible.length) {
+      let same = true;
+      for (let i = 0; i < sortedVisible.length; i++) {
+        if (sortedVisible[i] !== this._lastSortedVisible[i]) { same = false; break; }
+      }
+      if (same) return;
     }
 
     // Remove tiles no longer visible
@@ -4057,6 +4066,23 @@ export class Player implements IPlayer {
         this.tileVisible[idx] = true;
         this.visibleTiles.add(idx.toString());
         this.dirtyTiles.add(idx);
+      }
+    }
+
+    // Real-time per-id layering for VISIBLE tiles only (official Floor sorting:
+    // tile[x].layer > tile[x+1].layer → lower id renders on top). Rank-by-id is
+    // encoded as a small z offset; the depth buffer resolves overlapping tiles
+    // across all instanced shape batches per instance. O(v log v), v = on-screen
+    // tile count (typically a few hundred); skipped entirely when the set is unchanged.
+    this._lastSortedVisible = sortedVisible;
+    if (this.instancedMeshManager && sortedVisible.length > 0) {
+      const n = sortedVisible.length;
+      // Band: z ∈ (-0.008 .. +0.09), inside the decoration-safe range
+      // (bg decos ≤ -0.01, fg decos ≥ 0.1). Step ≥ ~6e-5 stays resolvable by the
+      // depth buffer; shrink adaptively for extremely dense screens.
+      const step = Math.min(2e-4, 0.098 / n);
+      for (let r = 0; r < n; r++) {
+        this.instancedMeshManager.setTileLayer(sortedVisible[r], 0.09 - r * step);
       }
     }
 
@@ -4105,7 +4131,6 @@ export class Player implements IPlayer {
     if (!tile) return null;
     
     const [x, y] = tile.position;
-    const zLevel = 12 - index;
     
     // Resolve absolute directions for mesh geometry.
     // tile.direction contains raw angleData values (0, 999, etc.)

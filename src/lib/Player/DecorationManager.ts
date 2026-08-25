@@ -427,11 +427,13 @@ class DecorationInstance {
 
     /** Compute depth z + renderOrder from config.depth.
      *  ADOFAI sorting layers: Bg (depth>=0) < Floor (tiles) < Default (depth<0).
-     *  Tiles use renderOrder = -tileIndex (0 to -(N-1)).
+     *  Tiles keep renderOrder ≤ 0 (per-shape batches use -minTileIndex as a blending
+     *  heuristic; exact tile-vs-tile occlusion is resolved by Player's per-instance
+     *  tile layers inside the (-0.01, +0.1) band reserved here).
      *  Background decorations get renderOrder below ALL tiles, so they render behind them
      *  even in very long levels. Foreground decorations (depth<0) get positive renderOrder.
      *  Materials are transparent with depthWrite=true, so the z offsets also let the depth
-     *  buffer sort tiles (z=0) in front of Bg (z<0) and behind Default (z>0). */
+     *  buffer sort tiles (z≈0 band) in front of Bg (z<0) and behind Default (z>0). */
     private depthZ(): [number, number] {
         const d = this.config.depth;
         if (d < 0) return [0.1 - d * 0.1, -d];
