@@ -257,6 +257,14 @@ class ShiftType extends ColorType {
   }
 }
 
+export interface TileColorFade {
+    fromColor: string; fromBg: string;
+    toColor: string; toBg: string;
+    startTime: number; duration: number;
+    fromAlpha: number;
+    ease: string;
+}
+
 export interface TileColorConfig {
   trackStyle: string;
   trackColorType: string;
@@ -283,6 +291,10 @@ export class TileColorManager {
   private colorInfluencing: number[] = [];
   private recolorTimes: [number, number][] = [];
   private recolorRecord: number = 0;
+
+  // Official TweenColor semantics (scrFloor.cs): Single/Stripes recolors ease
+  // from the CURRENT displayed color to the target over the event duration.
+  private colorFades: Map<number, TileColorFade> = new Map();
 
   private volumePulseMap: Map<number, number> = new Map();
 
@@ -475,6 +487,35 @@ export class TileColorManager {
       this.tileRecolorConfigs[index] = config;
     }
   }
+
+  /** Start an eased color fade for a tile (official TweenColor). */
+  startColorFade(index: number, fromColor: string, fromBg: string, toColor: string, toBg: string, startTime: number, duration: number, fromAlpha: number, ease: string = 'Linear'): void {
+    if (duration <= 0) return;
+    this.colorFades.set(index, { fromColor, fromBg, toColor, toBg, startTime, duration, fromAlpha, ease });
+  }
+
+  getColorFade(index: number): TileColorFade | undefined {
+    return this.colorFades.get(index);
+  }
+
+  /** Advance a tile's fade; returns the blended colors and removes finished fades. */
+  tickColorFade(index: number, time: number, easeFn: (t: number) => number): { color: string; bg: string; alpha: number } | null {
+    const fade = this.colorFades.get(index);
+    if (!fade) return null;
+    let t = (time - fade.startTime) / fade.duration;
+    if (t >= 1) {
+      this.colorFades.delete(index);
+      return { color: fade.toColor, bg: fade.toBg, alpha: fade.fromAlpha };
+    }
+    if (t < 0) t = 0;
+    const p = easeFn(t);
+    const mix = (a: string, b: string): string => {
+      const pa = parseHex(a), pb = parseHex(b);
+      return toHex(pa[0] + (pb[0] - pa[0]) * p) + toHex(pa[1] + (pb[1] - pa[1]) * p) + toHex(pa[2] + (pb[2] - pa[2]) * p);
+    };
+    return { color: '#' + mix(fade.fromColor, fade.toColor), bg: '#' + mix(fade.fromBg, fade.toBg), alpha: fade.fromAlpha };
+  }
+
 
   getTotalTiles(): number {
     return this.tileColors.length;

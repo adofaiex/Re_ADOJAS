@@ -12,6 +12,7 @@ import tileTextureUrl from '@/assets/texture.json';
 import { TileColorManager, TileColorConfig, parseHexAlpha } from './TileColorManager';
 import { isEnabled, isEventActive } from './EventUtils';
 import { loadCompressedTexture } from './TextureCompress';
+import { getEasingFunction } from './WasmEasing';
 import { CameraController, CameraTimelineEntry } from './CameraController';
 import { DecorationManager, DecPlacementType } from './DecorationManager';
 import { MoveTrackManager } from './MoveTrackManager';
@@ -2638,6 +2639,22 @@ export class Player implements IPlayer {
             if (!this.tileVisible[index]) continue;
             const config = this.tileColorManager.getTileRecolorConfig(index);
             if (!config) continue;
+
+            // 渐变补间优先（官方 TweenColor）：逐帧混合当前→目标色
+            const fade = this.tileColorManager.getColorFade(index);
+            if (fade) {
+                const eased = getEasingFunction(fade.ease || 'Linear');
+                const res = this.tileColorManager.tickColorFade(index, time, eased);
+                if (res) this.applyTileColor(index, res.color, res.bg, res.alpha);
+                continue;
+            }
+
+            // 渐变结束且配色类型已不是时间驱动 → 从每帧集合移除（恢复优化）
+            if (!['Glow', 'Blink', 'Rainbow', 'Volume'].includes(config.trackColorType)) {
+                this._tilesWithAnimatedColor.delete(index);
+                continue;
+            }
+
             const rendered = this.tileColorManager.getTileRenderer(index, time, config, this.music.amplitude);
             const current = this.tileColorManager.getTileColor(index);
             if (current && current.color === rendered.color && current.secondaryColor === rendered.bgcolor) continue;
@@ -3505,14 +3522,21 @@ export class Player implements IPlayer {
     const minIdx = Math.max(0, Math.min(startIdx, endIdx));
     const maxIdx = Math.min(this.tileColorManager.getTotalTiles() - 1, Math.max(startIdx, endIdx));
     
+    // Official ffxRecolorFloorPlus: event `duration`+`ease` drive a TweenColor
+    // fade (Single/Stripes) from each tile's CURRENT color to the target;
+    // Glow/Blink/etc. set instantly and keep animating via their pulse phase.
+    const evDurBeats = event.duration || 0;
+    const bpm = this.tileBPM[event.floor ?? 0] || 100;
+    const fadeDur = evDurBeats > 0 ? evDurBeats * 60 / bpm : 0;
+
     for (let i = minIdx; i <= maxIdx; i += (gap + 1)) {
         this.tileColorManager.setTileRecolorConfig(i, config);
         const rendered = this.tileColorManager.getTileRenderer(i, this.elapsedTime / 1000, config, this.music.amplitude);
         this.applyTileColor(i, rendered.color, rendered.bgcolor, rendered.opacity);
 
-        // RecolorTrack 可把砖块改成时间驱动配色（Glow/Blink/Rainbow/Volume）。
-        // 这些砖必须加入每帧颜色更新集合，否则颜色只在触发瞬间算一次就冻结
-        // （_tilesWithAnimatedColor 只在 createPlayer 时按初始配置初始化）。
+        // 这些砖必须加入每帧颜色更新集合：Glow/Blink/Rainbow/Volume 持续动画，
+        // Single/Stripes 渐变期间逐帧插值（_tilesWithAnimatedColor 只在
+        // createPlayer 时按初始配置初始化，运行期变更必须手动登记）。
         if (['Glow', 'Blink', 'Rainbow', 'Volume'].includes(config.trackColorType)) {
             this._tilesWithAnimatedColor?.add(i);
         }
@@ -3538,6 +3562,24 @@ export class Player implements IPlayer {
                     tileMesh.userData.floorIconAngle ?? 0
                 );
             }
+        }
+
+        // Official ffxRecolorFloorPlus: Single/Stripes ease from the CURRENT color
+        // to the target over the event duration (TweenColor); start AFTER applying.
+        if (fadeDur > 0 && (config.trackColorType === 'Single' || config.trackColorType === 'Stripes')) {
+            const cur = this.tileColorManager.getTileColor(i);
+            this.tileColorManager.startColorFade(
+                i,
+                cur?.color ?? rendered.color,
+                cur?.secondaryColor ?? rendered.bgcolor,
+                rendered.color,
+                rendered.bgcolor,
+                this.elapsedTime / 1000,
+                fadeDur,
+                config.trackOpacity ?? 1,
+                event.ease || 'Linear',
+            );
+            this._tilesWithAnimatedColor?.add(i);
         }
     }
   }
