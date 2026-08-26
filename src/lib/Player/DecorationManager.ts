@@ -293,6 +293,10 @@ class DecorationInstance {
     private _placementChanged = false;
     private _originalRelativeTo: DecPlacementType = DecPlacementType.Tile;
     private _originalStartPos: Vector2 = new Vector2();
+    // SetPlacementType 的行星跟随重绑（official followPlanet）。注意：渲染分支
+    // （Camera 屏幕定位 vs 世界定位）不随事件翻转——官方 pivotPosVec/clampToScreen
+    // 也不因此切换，切换会导致坐标系误读、装饰瞬移出画面。
+    private _followOverride: DecPlacementType | null = null;
     private _isStaticWorld = true;
     // 真正生效的可见性 = culling 视锥可见 && 用户/事件 visible
     private _instVisible = true;
@@ -607,8 +611,9 @@ class DecorationInstance {
                 : this.currentRotation * Math.PI / 180;
         } else {
             let followOffsetX = 0, followOffsetY = 0;
-            if (ct === DecPlacementType.RedPlanet || ct === DecPlacementType.BluePlanet || ct === DecPlacementType.GreenPlanet) {
-                const planet = runtime?.planetPositions?.[ct];
+            const followCt = this._followOverride ?? ct;
+            if (followCt === DecPlacementType.RedPlanet || followCt === DecPlacementType.BluePlanet || followCt === DecPlacementType.GreenPlanet) {
+                const planet = runtime?.planetPositions?.[followCt];
                 if (planet) {
                     followOffsetX = planet.x;
                     followOffsetY = planet.y;
@@ -732,24 +737,30 @@ class DecorationInstance {
         }
         // Official SetPlacementType: a MoveDecorations event can re-parent the
         // decoration mid-level. startPos is re-derived from the SOURCE event's
-        // position interpreted in the NEW placement frame (tile offset added /
-        // screen units for Camera), pivotPos stays untouched.
+        // position interpreted in the NEW placement frame, and followPlanet is
+        // re-bound. The RENDERING branch (screen- vs world-positioned) stays
+        // frozen at spawn — officially pivotPosVec/clampToScreen don't switch
+        // here either; switching misreads coordinate units and teleports the
+        // decoration off-screen.
         const plc = sampleAnyDiscrete('placement');
         if (typeof plc === 'string' && this._manager) {
             const np = this._manager.parsePlacement(plc);
-            if (np !== this.config.relativeTo) {
-                const ev: any = this.sourceEvent || {};
-                const rawPos: [number, number] = Array.isArray(ev.position)
-                    ? [Number(ev.position[0]) || 0, Number(ev.position[1]) || 0]
-                    : [0, 0];
+            if (np !== this.config.relativeTo || this._followOverride !== null) {
                 if (!this._placementChanged) {
                     this._originalRelativeTo = this.config.relativeTo;
                     this._originalStartPos.copy(this.startPos);
                     this._placementChanged = true;
                 }
-                this.config.relativeTo = np;
-                this.startPos.copy(this._manager.computeStartPos(rawPos, np, this.config.floor));
-                this.refreshStaticWorld();
+                if (np !== this.config.relativeTo) {
+                    const ev: any = this.sourceEvent || {};
+                    const rawPos: [number, number] = Array.isArray(ev.position)
+                        ? [Number(ev.position[0]) || 0, Number(ev.position[1]) || 0]
+                        : [0, 0];
+                    this.startPos.copy(this._manager.computeStartPos(rawPos, np, this.config.floor));
+                }
+                this._followOverride = (np === DecPlacementType.RedPlanet
+                    || np === DecPlacementType.BluePlanet
+                    || np === DecPlacementType.GreenPlanet) ? np : null;
                 dirty = true;
             }
         }
@@ -817,6 +828,7 @@ class DecorationInstance {
         if (this._placementChanged) {
             this.config.relativeTo = this._originalRelativeTo;
             this.startPos.copy(this._originalStartPos);
+            this._followOverride = null;
             this.refreshStaticWorld();
             this._placementChanged = false;
         }

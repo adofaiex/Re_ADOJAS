@@ -535,8 +535,10 @@ export class TimelineManager {
     }
 
     private interpolateTimelinePair(left: Keyframe, right: Keyframe, time: number): number {
-        if (time <= left.time) return left.value;
+        // 右端点优先判定：同一时刻存在被切断的旧曲线尾与 snap 新起点两个 key 时
+        // （kill-complete 语义），必须取右（新）值——官方在事件时刻立即跳变。
         if (time >= right.time) return right.value;
+        if (time <= left.time) return left.value;
 
         const range = right.time - left.time;
         if (range <= 1e-12) return right.value;
