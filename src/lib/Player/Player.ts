@@ -4639,7 +4639,9 @@ export class Player implements IPlayer {
     texture.magFilter = LinearFilter;
     texture.colorSpace = SRGBColorSpace;
     if (this.instancedMeshManager) {
-      this.instancedMeshManager.setTileTexture(texture, 0.6);
+      // uv = worldPos × scale：scale 越小贴图显示越大，每块砖分到的纹路越少。
+      // Standard 轨道默认纹路过密，取 0.3 让特征尺寸约为砖块长度的 3 倍。
+      this.instancedMeshManager.setTileTexture(texture, 0.3);
     }
   }
 
