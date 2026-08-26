@@ -3510,6 +3510,13 @@ export class Player implements IPlayer {
         const rendered = this.tileColorManager.getTileRenderer(i, this.elapsedTime / 1000, config, this.music.amplitude);
         this.applyTileColor(i, rendered.color, rendered.bgcolor, rendered.opacity);
 
+        // RecolorTrack 可把砖块改成时间驱动配色（Glow/Blink/Rainbow/Volume）。
+        // 这些砖必须加入每帧颜色更新集合，否则颜色只在触发瞬间算一次就冻结
+        // （_tilesWithAnimatedColor 只在 createPlayer 时按初始配置初始化）。
+        if (['Glow', 'Blink', 'Rainbow', 'Volume'].includes(config.trackColorType)) {
+            this._tilesWithAnimatedColor?.add(i);
+        }
+
         // Update instanced mesh with new trackStyle (shapeKey + texSeed)
         if (this.instancedMeshManager) {
             const newTrackStyle = config.trackStyle;
