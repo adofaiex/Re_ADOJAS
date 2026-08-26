@@ -433,6 +433,11 @@ class DecorationInstance {
                 this.visualGroup.add(this.sprite);
             }
         }
+        // 贴图到位后真实尺寸已知 → 让静态网格查询外扩覆盖该装饰的画布范围
+        this._manager?.noteDecoExtent(
+            this.baseSizeX * Math.abs(this.config.scale[0]) / 200,
+            this.baseSizeY * Math.abs(this.config.scale[1]) / 200,
+        );
         this.updateTransform();
     }
 
@@ -890,11 +895,20 @@ export class DecorationManager {
     private _staticGrid: DecorationSpatialGrid = new DecorationSpatialGrid(32);
     private _staticDecos: DecorationInstance[] = [];
     private _dynamicDecos: DecorationInstance[] = [];
+    // 网格按锚点索引：锚点在视口外但画布巨大的装饰必须靠查询范围外扩才不会被
+    // 误剔除。该值随观察到的最大半宽/半高增长（美术图常达数千单位）。
+    private _staticQueryPad = 8;
     private _tilePositions: Map<number, { x: number; y: number; z: number; rotation: number }> = new Map();
     private _visibleStaticSet: Set<DecorationInstance> = new Set();
     // base z → rank counter, rebuilt each frame for same-depth tie-breaking
     private _rankCounters: Map<number, number> = new Map();
     private instancedRenderer: DecorationInstancedRenderer;
+
+    /** 记录观察到的装饰最大半宽/半高，用于扩展静态网格查询范围。 */
+    public noteDecoExtent(hw: number, hh: number): void {
+        const need = Math.max(hw, hh) * 1.2 + 2;
+        if (need > this._staticQueryPad) this._staticQueryPad = need;
+    }
 
     constructor(scene: Scene, levelData: any, tileStartTimes: number[], tileBPM: number[]) {
         this.scene = scene;
@@ -1777,8 +1791,12 @@ export class DecorationManager {
         const halfH = viewH * 0.5;
         const minX = camX - halfW, maxX = camX + halfW;
         const minY = camY - halfH, maxY = camY + halfH;
-        // Spatial grid: query static decorations in cells overlapping the camera view.
-        const visibleStatic = this._staticGrid.query(minX, minY, maxX, maxY);
+        // Spatial grid: query static decorations in cells overlapping the camera
+        // view, EXPANDED by the largest known decoration half-extent — grid cells
+        // index anchor points only, so a huge canvas anchored off-screen would
+        // otherwise be culled while still covering the viewport.
+        const pad = this._staticQueryPad;
+        const visibleStatic = this._staticGrid.query(minX - pad, minY - pad, maxX + pad, maxY + pad);
         this._visibleStaticSet.clear();
         for (let i = 0; i < visibleStatic.length; i++) this._visibleStaticSet.add(visibleStatic[i]);
         // Include animated statics even if outside original cell
@@ -1809,6 +1827,7 @@ export class DecorationManager {
                 } else {
                     hw = csx * 0.5; hh = csy * 0.5;
                 }
+                if (hw > this._staticQueryPad || hh > this._staticQueryPad) this.noteDecoExtent(hw, hh);
                 const vis = p.x + hw >= minX && p.x - hw <= maxX && p.y + hh >= minY && p.y - hh <= maxY;
                 d.setCulledVisible(vis);
             } else {
@@ -1834,6 +1853,7 @@ export class DecorationManager {
                 } else {
                     hw = csx * 0.5; hh = csy * 0.5;
                 }
+                if (hw > this._staticQueryPad || hh > this._staticQueryPad) this.noteDecoExtent(hw, hh);
                 const vis = p.x + hw >= minX && p.x - hw <= maxX && p.y + hh >= minY && p.y - hh <= maxY;
                 d.setCulledVisible(vis);
             } else {
