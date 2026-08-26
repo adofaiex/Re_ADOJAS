@@ -11,6 +11,7 @@ import { HTMLAudioMusic, getSharedAudioContext } from './HTMLAudioMusic';
 import tileTextureUrl from '@/assets/texture.json';
 import { TileColorManager, TileColorConfig, parseHexAlpha } from './TileColorManager';
 import { isEnabled, isEventActive } from './EventUtils';
+import { loadCompressedTexture } from './TextureCompress';
 import { CameraController, CameraTimelineEntry } from './CameraController';
 import { DecorationManager, DecPlacementType } from './DecorationManager';
 import { MoveTrackManager } from './MoveTrackManager';
@@ -3046,11 +3047,10 @@ export class Player implements IPlayer {
           }
       }
       
-      // Load new texture
-      const loader = new TextureLoader();
-      loader.load(imageUrl, (texture) => {
-          texture.colorSpace = SRGBColorSpace;
-          
+      // Load new texture — 压缩加载：全屏背景图常为最大资源，超限即缩放
+      loadCompressedTexture(imageUrl).then((texture: Texture | null) => {
+          if (!texture) return;
+
           // Apply smoothing setting
           texture.minFilter = event.imageSmoothing === false ? NearestFilter : LinearFilter;
           texture.magFilter = event.imageSmoothing === false ? NearestFilter : LinearFilter;

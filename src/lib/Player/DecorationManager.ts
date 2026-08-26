@@ -1,4 +1,4 @@
-import { Group, Mesh, Sprite, Vector2, Color, Texture, MeshBasicMaterial, SpriteMaterial, Material, CanvasTexture, CircleGeometry, RingGeometry, BufferGeometry, BufferAttribute, SRGBColorSpace, DoubleSide, Scene, TextureLoader, PlaneGeometry, Vector3, WebGLRenderTarget, Float32BufferAttribute, NormalBlending, AdditiveBlending, MultiplyBlending, CustomBlending, AddEquation, ReverseSubtractEquation, LinearFilter, LinearMipMapLinearFilter, Blending, Points, PointsMaterial, AlwaysStencilFunc, EqualStencilFunc, NotEqualStencilFunc, ReplaceStencilOp, KeepStencilOp } from 'three';
+import { Group, Mesh, Sprite, Vector2, Color, Texture, MeshBasicMaterial, SpriteMaterial, Material, CanvasTexture, CircleGeometry, RingGeometry, BufferGeometry, BufferAttribute, SRGBColorSpace, DoubleSide, Scene, PlaneGeometry, Vector3, WebGLRenderTarget, Float32BufferAttribute, NormalBlending, AdditiveBlending, MultiplyBlending, CustomBlending, AddEquation, ReverseSubtractEquation, LinearFilter, LinearMipMapLinearFilter, Blending, Points, PointsMaterial, AlwaysStencilFunc, EqualStencilFunc, NotEqualStencilFunc, ReplaceStencilOp, KeepStencilOp } from 'three';
 import { TimelineManager } from './TimelineManager';
 import createTrackMesh from '../Geo/mesh_reserve';
 import { isEventActive, isEnabled } from './EventUtils';
@@ -7,6 +7,9 @@ import { debugLog } from './DebugLog';
 import { DecorationInstancedRenderer, DecoInstanceSlot } from './DecorationInstancedRenderer';
 import { ParticleDecorationSystem } from './ParticleDecoration';
 import type { ParticleConfig } from './ParticleDecoration';
+import { loadCompressedTexture } from './TextureCompress';
+
+
 
 /**
  * Parse ADOFAI hex color which may be #RRGGBBAA (8-digit with alpha).
@@ -372,9 +375,10 @@ class DecorationInstance {
             this.baseSizeY = 1;
         } else {
             if (this.config.imageSmoothing) {
+                // 滤镜是采样期状态，无需 needsUpdate（那会强制整张纹理重新上传）。
+                // mipmap 只有纹理本身声明了才可用，否则 WebGL2 下会得到未完成纹理（渲染发黑）。
                 texture.magFilter = LinearFilter;
-                texture.minFilter = LinearMipMapLinearFilter;
-                texture.needsUpdate = true;
+                texture.minFilter = texture.generateMipmaps ? LinearMipMapLinearFilter : LinearFilter;
             }
             const texW = texture.image?.width || 100;
             const texH = texture.image?.height || 100;
@@ -860,7 +864,6 @@ export class DecorationManager {
     private decorationEventsTimeline: { time: number; event: any }[] = [];
     private pendingDecorationEvents: any[] = [];
     private tileSize: number = 1.0;
-    private textureLoader: TextureLoader;
     private textureCache: Map<string, Texture> = new Map();
     private floorGeoCache: Map<string, { positions: Float32Array; indices: Uint32Array; mask: Float32Array; vertexCount: number }> = new Map();
     private trailGeoCache: Map<string, Mesh> = new Map();
@@ -891,7 +894,6 @@ export class DecorationManager {
         this.container = new Group();
         this.container.name = 'DecorationContainer';
         this.scene.add(this.container);
-        this.textureLoader = new TextureLoader();
         this.instancedRenderer = new DecorationInstancedRenderer(this.container);
     }
 
@@ -1481,23 +1483,48 @@ export class DecorationManager {
             if (this.textureCache.has(job.filename) || this.texturesLoading.has(job.filename)) continue;
             this.texturesLoading.add(job.filename);
             this.textureLoadingCount++;
-            this.textureLoader.load(job.url, (tex) => {
-                tex.colorSpace = SRGBColorSpace;
-                this.textureCache.set(job.filename, tex);
-                this.texturesLoaded.add(job.filename);
-                this.texturesLoading.delete(job.filename);
-                this.textureLoadingCount--;
-                this.afterTextureLoaded(job.filename, tex);
-                this.pumpTextureQueue();
-            }, undefined, () => {
-                this.texturesLoading.delete(job.filename);
-                this.textureLoadingCount--;
-                this.pumpTextureQueue();
-            });
+            this.loadTextureCompressed(job.url)
+                .then(tex => {
+                    if (tex) {
+                        this.textureCache.set(job.filename, tex);
+                        this.texturesLoaded.add(job.filename);
+                        this.afterTextureLoaded(job.filename, tex);
+                    } else {
+                        // 加载失败：登记为已加载（空），避免无限重试；装饰保持不可见
+                        this.texturesLoaded.add(job.filename);
+                    }
+                })
+                .catch(err => {
+                    console.warn('[Decoration] texture load failed:', job.filename, err);
+                })
+                .finally(() => {
+                    this.texturesLoading.delete(job.filename);
+                    this.textureLoadingCount--;
+                    this.pumpTextureQueue();
+                });
         }
     }
 
+    /** 装饰纹理最大边长。美术图常达 4k-8k²，原样上传 GPU 一张即 64-256MB，
+     *  是 canvas 崩溃 / 页面 OOM 的主因。压缩到该上限视觉上几乎无差别。 */
+    private static readonly MAX_TEX_DIMENSION = 2048;
+
+    /**
+     * 压缩加载：fetch → 从文件头读原始尺寸 → 超限时由浏览器在解码阶段直接
+     * 缩放（createImageBitmap resize，全尺寸位图从不进入 JS/CPU 内存）→
+     * 未超限则直接用位图上传，零拷贝。
+     */
+    private loadTextureCompressed(url: string): Promise<Texture | null> {
+        return loadCompressedTexture(url, DecorationManager.MAX_TEX_DIMENSION);
+    }
+
     private afterTextureLoaded(filename: string, tex: Texture): void {
+        // mipmap 按需生成（+33% 显存）：只有显式开启 imageSmoothing 的消费者才付这笔成本。
+        // 必须在纹理首次上传前决定，因此在这里统一设置而不是等 setupVisual。
+        const wantsMips = this.decoList.some(d => d.config.decorationImage === filename && d.config.imageSmoothing === true);
+        tex.generateMipmaps = wantsMips;
+        tex.minFilter = wantsMips ? LinearMipMapLinearFilter : LinearFilter;
+        tex.magFilter = LinearFilter;
         for (const d of this.decoList) {
             if (d.config.decorationImage !== filename) continue;
             if (d.config.decorationType === DecorationType.Particle) {
@@ -1516,10 +1543,18 @@ export class DecorationManager {
         const base = filename.split(/[/\\]/).pop()!;
         u = this.customImages.get(base);
         if (u) return u;
-        for (const [k, v] of this.customImages) {
-            if (k.endsWith(filename) || filename.endsWith(k)) return v;
+        // 兜底后缀匹配：候选可能多个（同名文件散布子目录），取确定性最优——
+        // 路径段最少（越接近根）优先，其次字典序，避免依赖 Map 插入顺序。
+        let bestK: string | null = null;
+        for (const k of this.customImages.keys()) {
+            if (!(k.endsWith(filename) || filename.endsWith(k) || k.endsWith('/' + base))) continue;
+            if (bestK === null
+                || k.split(/[/\\]/).length < bestK.split(/[/\\]/).length
+                || (k.split(/[/\\]/).length === bestK.split(/[/\\]/).length && k.toLowerCase() < bestK.toLowerCase())) {
+                bestK = k;
+            }
         }
-        return undefined;
+        return bestK !== null ? this.customImages.get(bestK) : undefined;
     }
 
     private registerDecoration(deco: DecorationInstance): void {
@@ -1596,7 +1631,12 @@ export class DecorationManager {
     public registerCustomImage(filename: string, url: string): void {
         this.customImages.set(filename, url);
         const base = filename.split(/[/\\]/).pop()!;
-        if (base !== filename) this.customImages.set(base, url);
+        // basename 别名只允许"空位复用或同文件重注册"，不同文件不得借别名互相覆盖
+        // （例：a/0.png 与 a/[Dynamic Decoration 1]/0.png 是两张不同的图）
+        if (base !== filename) {
+            const cur = this.customImages.get(base);
+            if (cur === undefined || cur === url) this.customImages.set(base, url);
+        }
         const existing = this.textureCache.get(filename);
         if (existing) { existing.dispose(); this.textureCache.delete(filename); }
         this.texturesLoaded.delete(filename);

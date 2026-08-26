@@ -484,32 +484,50 @@ export function useFileHandlers({
         const imageExtensions = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg']
         let loadedImages = 0
 
-        for (const imageName of decorationImages) {
-          // Find matching image file in ZIP
-          for (const ext of imageExtensions) {
-            const imageFile = files.find(f => {
-              const name = f.toLowerCase()
-              const targetName = imageName.toLowerCase()
-              // Flexible matching
-              return name === targetName ||
-                name === targetName + ext ||
-                name.endsWith('/' + targetName) ||
-                name.endsWith('/' + targetName + ext) ||
-                // Match just filename
-                name.endsWith('/' + imageName.split('/').pop()?.toLowerCase() + ext) ||
-                name.endsWith(imageName.split('/').pop()?.toLowerCase() + ext)
-            })
+        // 确定性挑选：精确路径 > basename 匹配；同级候选里路径更浅、字典序更小者优先。
+        // 否则 a/0.png 与 a/[Dynamic Decoration 1]/0.png 之类同名文件会随机命中。
+        const pickZipImage = (imageName: string): string | null => {
+          const targetName = imageName.toLowerCase().replace(/\\/g, '/')
+          const base = targetName.split('/').pop() || targetName
+          let best: string | null = null
+          let bestKind = 3
+          for (const f of files) {
+            if (!imageExtensions.some(ext => f.toLowerCase().endsWith(ext))) continue
+            const n = f.toLowerCase()
+            const kind =
+              (n === targetName || n === targetName + extOf(n) ||
+                n.endsWith('/' + targetName) || n.endsWith('/' + targetName + extOf(n))) ? 0 :
+              (n === base || n === base + extOf(n) ||
+                n.endsWith('/' + base) || n.endsWith('/' + base + extOf(n))) ? 1 : 3
+            if (kind > bestKind) continue
+            const depth = n.split('/').length
+            const curDepth = best ? best.toLowerCase().split('/').length : Infinity
+            if (kind < bestKind || depth < curDepth || (depth === curDepth && n < best!.toLowerCase())) {
+              best = f
+              bestKind = kind
+            }
+          }
+          // extOf: 候选文件自身的扩展名（保持原逻辑"引用可缺扩展名"的宽松性）
+          function extOf(cand: string): string {
+            const m = cand.match(/\.[a-z0-9]+$/)
+            return m ? m[0] : ''
+          }
+          return best
+        }
 
-            if (imageFile) {
-              console.log('[ZIP] Found decoration image:', imageFile)
-              const imageBlob = await zip.file(imageFile)?.async('blob')
-              if (imageBlob && previewerRef.current?.registerDecorationImage) {
-                const imageUrl = URL.createObjectURL(imageBlob)
-                const filename = imageName.split('/').pop() || imageName
-                previewerRef.current.registerDecorationImage(filename, imageUrl)
-                loadedImages++
+        for (const imageName of decorationImages) {
+          const imageFile = pickZipImage(imageName)
+          if (imageFile) {
+            console.log('[ZIP] Found decoration image:', imageFile)
+            const imageBlob = await zip.file(imageFile)?.async('blob')
+            if (imageBlob && previewerRef.current?.registerDecorationImage) {
+              const imageUrl = URL.createObjectURL(imageBlob)
+              // 同时注册：ZIP 内完整路径（嵌套文件夹精确命中）+ JSON 引用名（basename 兜底）
+              previewerRef.current.registerDecorationImage(imageFile, imageUrl)
+              if (imageName !== imageFile) {
+                previewerRef.current.registerDecorationImage(imageName, imageUrl)
               }
-              break
+              loadedImages++
             }
           }
         }
@@ -726,7 +744,9 @@ export function useFileHandlers({
       for (let i = 0; i < files.length; i++) {
         const file = files[i]
         const url = URL.createObjectURL(file)
-        const filename = file.name
+        // 文件夹上传时用相对路径作 key，避免不同子目录的同名文件互相覆盖
+        const relPath = (file as any).webkitRelativePath as string | undefined
+        const filename = (relPath && relPath.length > 0) ? relPath : file.name
 
         // Register with decoration manager
         if (previewerRef.current.registerDecorationImage) {
