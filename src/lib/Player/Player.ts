@@ -22,6 +22,7 @@ import { TimelineManager } from './TimelineManager';
 import { OverlayHUD } from './OverlayHUD';
 import { ShakeScreen } from './effects/ShakeScreen';
 import { AsyncInputManager } from './AsyncInputManager';
+import { debugLog } from './DebugLog';
 import {
   HitMargin, HitMarginLimit, Difficulty,
   getHitMarginFromErrorMs, isValidHit, getBoundariesInDeg, JudgeConfig,
@@ -46,6 +47,28 @@ export class Player implements IPlayer {
   private lastFrameTime: number = 0;
   private frameInterval: number = 0; // milliseconds between frames
   private stats: Stats | null = null;
+
+  // Lightweight per-frame timing breakdown (logged via debugLog every ~2s).
+  private _perf: Record<string, number> = {};
+  private _perfSamples: number = 0;
+  private _perfLastLog: number = 0;
+  private perfAdd(name: string, ms: number): void { this._perf[name] = (this._perf[name] ?? 0) + ms; }
+  private perfTick(nowMs: number): void {
+    this._perfSamples++;
+    if (this._perfLastLog === 0) { this._perfLastLog = nowMs; return; }
+    if (nowMs - this._perfLastLog < 2000) return;
+    const n = this._perfSamples || 1;
+    const parts = Object.entries(this._perf)
+      .filter(([k]) => k !== 'total')
+      .sort((a, b) => b[1] - a[1])
+      .map(([k, v]) => `${k}=${(v / n).toFixed(2)}`)
+      .join(' ');
+    const total = (this._perf.total ?? 0) / n;
+    debugLog(`[Perf] frame=${total.toFixed(2)}ms | ${parts}`);
+    this._perf = {};
+    this._perfSamples = 0;
+    this._perfLastLog = nowMs;
+  }
   
   private levelData: ILevelData;
   private planetRed: Planet | null = null;
@@ -123,7 +146,6 @@ export class Player implements IPlayer {
   private zoomMultiplier: number = 1.0;
   private adoZoom: number = 100;
   private cameraPosition: Vector3 = new Vector3(0, 0, 0);
-  private _lastCamSmoothTile: number = -1;
   
   // Interaction state
   private isDragging: boolean = false;
@@ -168,6 +190,7 @@ export class Player implements IPlayer {
   private tileTotalAngle: number[] = [];
   private tileStartDist: number[] = [];
   private tileEndDist: number[] = [];
+  private tileAuto: boolean[] = [];
   private tileEvents: Map<number, any[]> = new Map();
   private tileCameraEvents: Map<number, any[]> = new Map();
   private tileSetHitsoundEvents: Map<number, any[]> = new Map();
@@ -259,6 +282,11 @@ export class Player implements IPlayer {
   constructor(levelData: Level, rendererType: 'webgl' | 'webgpu' = 'webgpu') {
     this.rendererType = rendererType;
     this.levelData = levelData;
+
+    // Song pitch drives camera follow speed and judging (settings.pitch is percent).
+    if (levelData.settings?.pitch !== undefined) {
+      this.songPitch = Math.max(0.1, levelData.settings.pitch / 100);
+    }
 
     // Convert pathData to tiles if needed
     this.convertPathDataToTiles();
@@ -444,14 +472,18 @@ export class Player implements IPlayer {
 
     // Sync MoveTrack animations to InstancedMeshManager (when instanced rendering is active,
     // individual tile meshes are hidden and only the InstancedMesh is visible)
+    // opacity 参数语义固定为 MoveTrack 透明度；颜色 hex 的 #RRGGBBAA alpha 在此统一合成，
+    // 否则 MoveTrack 每帧覆盖 iOpacity 时会吞掉轨道颜色透明度。
     this.moveTrackManager.tileTransformChanged = (tileIndex, position, rotation, scale, opacity) => {
-      if (this.instancedMeshManager) {
-        this.instancedMeshManager.updateTileTransform(tileIndex, position, rotation, scale, opacity);
-      }
       const mesh = this.tiles.get(tileIndex.toString());
+      const colorOpacity = mesh?.userData.trackColorOpacity ?? 1;
+      const effectiveOpacity = opacity * colorOpacity;
+      if (this.instancedMeshManager) {
+        this.instancedMeshManager.updateTileTransform(tileIndex, position, rotation, scale, effectiveOpacity);
+      }
       if (mesh) {
         if (this.instancedMeshManager) {
-          this.instancedMeshManager.setTileVisibility(tileIndex, mesh.visible);
+          this.instancedMeshManager.setTileVisibility(tileIndex, mesh.visible && effectiveOpacity > 0.001);
         }
         this.updateTileChildSpriteRotations(mesh, this.camera.rotation.z);
       }
@@ -841,6 +873,29 @@ export class Player implements IPlayer {
 
     // 倒计时未结束（timeInLevel < 0）：按键无效，不能提前开始/推进
     if (timeInLevel < 0) return;
+
+    // 暂停节拍事件（Pause）弧线延伸区间：球在 pause 区域时不响应按键，
+    // 直到球离开 pause 区域回到标准弧线区间才允许判定。
+    // pause 区域 = 弧线中由 Pause.extraRotation 贡献的额外部分。
+    if (tileIndex < n - 1) {
+      const extraRot = this.tileExtraRotations[tileIndex] || 0;
+      if (extraRot > 0) {
+        const totalAngle = this.tileTotalAngle[tileIndex];
+        if (totalAngle !== 0) {
+          const normalAngle = totalAngle - extraRot * 2 * Math.PI;
+          const normalThreshold = Math.abs(normalAngle) / Math.abs(totalAngle);
+          const startTime = this.tileStartTimes[tileIndex] || 0;
+          const duration = this.tileDurations[tileIndex] || 0;
+          if (duration > 0) {
+            const progress = (timeInLevel - startTime) / duration;
+            if (progress >= normalThreshold) return;
+          }
+        }
+      }
+    }
+
+    // AutoPlayTiles: auto 砖块由 autoAdvanceAutoTiles() 自动推进，手动按键不触发判定
+    if (this.tileAuto[tileIndex]) return;
 
     // 按键时刻已过当前砖块完美时刻 且 下一砖块是 midspin：
     // 按键应判定 midspin（球已到 midspin，防止按键被当前砖块"抢走"，midspin 漏按变 miss）。
@@ -1449,13 +1504,14 @@ export class Player implements IPlayer {
     this.tileStartDist = new Array(n - 1);
     this.tileEndDist = new Array(n - 1);
     this.tileStickToFloors = new Array(n);
+    this.tileAuto = new Array(n).fill(false);
     
     // Initialize tileStickToFloors from PositionTrackManager
     if (this.positionTrackManager) {
       const allTransforms = this.positionTrackManager.calculateAllTileTransforms(this.isEditorMode);
       for (let i = 0; i < n; i++) {
         const transform = allTransforms.get(i);
-        this.tileStickToFloors[i] = transform?.stickToFloors ?? (this.levelData.settings?.stickToFloors !== false);
+        this.tileStickToFloors[i] = transform?.stickToFloors ?? isEnabled(this.levelData.settings?.stickToFloors, true);
       }
     } else {
       // Default to true if no PositionTrackManager
@@ -1473,6 +1529,7 @@ export class Player implements IPlayer {
     // Initial settings
     let currentBPM = this.levelData.settings.bpm || 100;
     let isCW = true;
+    let autoPlayTiles = false; // AutoPlayTiles running state
 
     // We iterate through tiles to calculate the rotation/time to reach the NEXT tile.
     for (let i = 0; i < n - 1; i++) {
@@ -1494,8 +1551,15 @@ export class Player implements IPlayer {
                     }
                 } else if (event.eventType === 'Pause') {
                     extraRotation += (event.duration || 0) / 2.0;
+                } else if (event.eventType === 'AutoPlayTiles') {
+                    autoPlayTiles = event.enabled !== false;
                 }
             }
+        }
+        
+        // AutoPlayTiles: event on tile i → tiles i+1 onwards are auto (not including i)
+        if (autoPlayTiles) {
+            this.tileAuto[i + 1] = true;
         }
         
         this.tileIsCW[i] = isCW;
@@ -1970,9 +2034,7 @@ export class Player implements IPlayer {
     this.zoomMultiplier = 1.0;
     this.camera.rotation.z = 0;
     if (this.cameraController) {
-      const cam = this.cameraController.getCameraMode();
-      cam.rotation = 0;
-      cam.zoom = 100;
+      this.cameraController.resetRotationAndZoom();
     }
   }
 
@@ -2150,13 +2212,23 @@ export class Player implements IPlayer {
       
       const delta = (time - lastTime) / 1000;
       lastTime = time;
+      const tFrame = performance.now();
       
       if (this.isPlaying && !this.isPaused && !this._manualDead) {
+        const tU = performance.now();
         this.updatePlayer(delta);
+        this.perfAdd('updatePlayer', performance.now() - tU);
         this.syncVideo();
       }
 
-      this.renderPlayer(delta);
+      {
+        const tR = performance.now();
+        this.renderPlayer(delta);
+        this.perfAdd('renderPlayer', performance.now() - tR);
+      }
+
+      this.perfAdd('total', performance.now() - tFrame);
+      this.perfTick(time);
 
       // FPS calculation (update every 500ms)
       frameCount++;
@@ -2400,14 +2472,18 @@ export class Player implements IPlayer {
     this.updateCountdown();
 
     const triggeredEvents = this.timelineManager.getTriggered(t0);
-    for (const ev of triggeredEvents) {
-      switch (ev.eventType) {
-        case 'Bloom': this.processBloomEvent(ev); break;
-        case 'Flash': this.processFlashEvent(ev); break;
-        case 'ShakeScreen': this.processShakeScreenEvent(ev); break;
-        case 'SetCustomBG': this.processCustomBGEvent(ev); break;
-        case 'RecolorTrack': this.processRecolorEvent(ev); break;
+    {
+      const tP = performance.now();
+      for (const ev of triggeredEvents) {
+        switch (ev.eventType) {
+          case 'Bloom': this.processBloomEvent(ev); break;
+          case 'Flash': this.processFlashEvent(ev); break;
+          case 'ShakeScreen': this.processShakeScreenEvent(ev); break;
+          case 'SetCustomBG': this.processCustomBGEvent(ev); break;
+          case 'RecolorTrack': this.processRecolorEvent(ev); break;
+        }
       }
+      this.perfAdd('events', performance.now() - tP);
     }
 
     // 手动模式：先用异步输入时刻判定 + 超时矫正（推进 currentTileIndex），
@@ -2415,22 +2491,45 @@ export class Player implements IPlayer {
     if (this.manualMode) {
       this.processAsyncInputs();
       this.checkManualTooLate(t0);
+      // AutoPlayTiles: 手动模式下自动砖块无需按键，到达完美时刻即自动推进
+      this.autoAdvanceAutoTiles(t0);
     }
 
-    this.updatePlanetsPosition();
+    {
+      const tPlanet = performance.now();
+      this.updatePlanetsPosition();
+      this.perfAdd('planets', performance.now() - tPlanet);
+    }
 
-    this.updateCameraFollow(delta);
+    {
+      const tCam = performance.now();
+      this.updateCameraFollow(delta);
+      this.perfAdd('cameraFollow', performance.now() - tCam);
+    }
 
-    this.updateAnimatedTiles();
+    {
+      const tAnim = performance.now();
+      this.updateAnimatedTiles();
+      this.perfAdd('animatedTiles', performance.now() - tAnim);
+    }
 
-    // Update decorations
-    this.updateDecorations();
+    {
+      const tDeco = performance.now();
+      this.updateDecorations();
+      this.perfAdd('decorations', performance.now() - tDeco);
+    }
 
-    // Update MoveTrack animations
-    this.updateMoveTrack();
+    {
+      const tMT = performance.now();
+      this.updateMoveTrack();
+      this.perfAdd('moveTrack', performance.now() - tMT);
+    }
 
-    // Sync instanced meshes for visible tiles
-    this.syncInstancedTiles();
+    {
+      const tSync = performance.now();
+      this.syncInstancedTiles();
+      this.perfAdd('syncInstanced', performance.now() - tSync);
+    }
   }
 
   private syncInstancedTiles(): void {
@@ -2670,15 +2769,17 @@ export class Player implements IPlayer {
     this.hitErrorMeter?.update(delta);
 
     // Sync camera/visibleTiles/instanced from CameraController (non-play + paused)
+    // NOTE: do NOT overwrite the camera position here — in the editor the user
+    // pans the view by dragging, and the controller position is only applied on
+    // seek / playback. Only zoom + rotation are synced every frame.
     if ((!this.isPlaying || this.isPaused) && this.cameraController) {
-      const interp = this.cameraController.getInterpolatedValues(this.elapsedTime);
-      this.adoZoom = interp.zoom;
-      this.zoom = 100 / interp.zoom;
-      this.camera.zoom = this.zoom * this.zoomMultiplier;
-      this.camera.updateProjectionMatrix();
-      this.camera.rotation.z = interp.rotation * (Math.PI / 180);
+      this.syncCameraFromController(false);
       this.updateVisibleTiles();
       this.syncInstancedTiles();
+      // Keep decorations in sync with the seeked time while not actively playing
+      // (editor scrubbing / paused playback). During playback updateDecorations
+      // is driven from updatePlayer instead.
+      this.updateDecorations();
     }
     // Selection green flash animation (disabled during playback)
     if (this.selectedTileIndex !== null && !this.isPlaying) {
@@ -2877,7 +2978,7 @@ export class Player implements IPlayer {
         this.preStartMusicStarted = false;
       }
       if (this.cameraController) {
-        this.cameraController.seek(timeInLevel, this.currentPivotPosition);
+        this.cameraController.seek(timeInLevel, this.currentPivotPosition, this.currentTileIndex, this.songPitch);
       }
       if (this.moveTrackManager) {
         this.moveTrackManager.fastForwardTo(timeInLevel);
@@ -3069,8 +3170,8 @@ export class Player implements IPlayer {
           if (!texture) return;
 
           // Apply smoothing setting
-          texture.minFilter = event.imageSmoothing === false ? NearestFilter : LinearFilter;
-          texture.magFilter = event.imageSmoothing === false ? NearestFilter : LinearFilter;
+          texture.minFilter = isEnabled(event.imageSmoothing, true) ? LinearFilter : NearestFilter;
+          texture.magFilter = isEnabled(event.imageSmoothing, true) ? LinearFilter : NearestFilter;
           
           this.customBGTexture = texture;
           
@@ -3178,8 +3279,8 @@ export class Player implements IPlayer {
     }
     
     this.bloomEnabled = false;
-    this.bloomThreshold = 10;
-    this.bloomIntensity = 150; 
+    this.bloomThreshold = 50;
+    this.bloomIntensity = 100;
     this.bloomColor = 'ffffff';
     if (this.bloomEffect) {
       this.bloomEffect.setEnabled(false);
@@ -3352,10 +3453,9 @@ export class Player implements IPlayer {
           this.resetTrailHistory();
         }
       }
-      this.cameraController.seek(timeInLevel, this.currentPivotPosition);
-      // Update absolute camera position for display (always, to avoid 1-frame lag)
-      const interp = this.cameraController.getInterpolatedValues(this.elapsedTime);
-      const pivot = this.isPaused
+      // Resolve the planet/pivot position at the seek time so the follow layer
+      // and mode switches anchor correctly.
+      const seekPivot = this.isPaused
         ? this.currentPivotPosition
         : (() => {
             const seekIdx = this.getTileIndexAtTime(this.elapsedTime);
@@ -3364,11 +3464,10 @@ export class Player implements IPlayer {
               ? { x: seekTile.position[0], y: seekTile.position[1] }
               : this.currentPivotPosition;
           })();
-      const target = this.cameraController.calculateTargetPosition(pivot, interp);
-      this.cameraPosition.x = target.x;
-      this.cameraPosition.y = target.y;
-      this.camera.position.x = target.x;
-      this.camera.position.y = target.y;
+      const seekTileIdx = this.getTileIndexAtTime(this.elapsedTime);
+      this.cameraController.seek(timeInLevel, seekPivot, seekTileIdx, this.songPitch);
+      // Update absolute camera position for display (always, to avoid 1-frame lag)
+      this.syncCameraFromController();
     }
 
     if (this.moveTrackManager) {
@@ -3408,7 +3507,7 @@ export class Player implements IPlayer {
       // Update tileStickToFloors array
       for (let i = 0; i < this.levelData.tiles.length; i++) {
         const transform = allTransforms.get(i);
-        this.tileStickToFloors[i] = transform?.stickToFloors ?? (this.levelData.settings?.stickToFloors !== false);
+        this.tileStickToFloors[i] = transform?.stickToFloors ?? isEnabled(this.levelData.settings?.stickToFloors, true);
       }
 
       // Sync instanced meshes after re-applying PositionTrack in editor mode
@@ -3432,12 +3531,14 @@ export class Player implements IPlayer {
       mesh.scale.set(1, 1, 1);
       mesh.userData.opacity = 1;
       mesh.visible = true;
+      // 合成轨道颜色 alpha（#RRGGBBAA），否则预览/seek 回基准态时透明度被吞
+      const colorOpacity = mesh.userData.trackColorOpacity ?? 1;
       if (mesh.material) {
-        (mesh.material as any).opacity = 1;
-        (mesh.material as any).transparent = false;
+        (mesh.material as any).opacity = colorOpacity;
+        (mesh.material as any).transparent = colorOpacity < 0.999;
       }
       if (this.instancedMeshManager) {
-        this.instancedMeshManager.updateTileTransform(idx, mesh.position, mesh.rotation as Euler, mesh.scale, 1);
+        this.instancedMeshManager.updateTileTransform(idx, mesh.position, mesh.rotation as Euler, mesh.scale, colorOpacity);
       }
     }
   }
@@ -3485,7 +3586,7 @@ export class Player implements IPlayer {
     // Update tileStickToFloors array
     for (let i = 0; i < this.levelData.tiles.length; i++) {
       const transform = allTransforms.get(i);
-      this.tileStickToFloors[i] = transform?.stickToFloors ?? (this.levelData.settings?.stickToFloors !== false);
+      this.tileStickToFloors[i] = transform?.stickToFloors ?? isEnabled(this.levelData.settings?.stickToFloors, true);
     }
 
     // Sync instanced meshes after re-applying PositionTrack
@@ -3691,7 +3792,7 @@ export class Player implements IPlayer {
     const intensity = (event.intensity ?? 100) / 100;
     const duration = (event.duration ?? 1) * secPerBeat;
     const ease = event.ease || 'Linear';
-    const fadeOut = event.fadeOut === true;
+    const fadeOut = isEnabled(event.fadeOut);
     const plane = event.plane === 1 ? 'BG' : 'FG';
     
     this.shakeScreen.startShake(
@@ -4553,85 +4654,30 @@ export class Player implements IPlayer {
   private updateCameraFollow(delta: number): void {
       if (!this.planetRed || !this.planetBlue) return;
 
-      const settings = this.levelData.settings;
-      
-      const currentTimeInSeconds = this.elapsedTime / 1000;
-      const timeInLevel = currentTimeInSeconds - this.getTimeOrigin();
-
-      // Process camera events
-      const lastIdx = this.cameraController.getLastCameraTimelineIndex();
-      const cameraTimeline = this.cameraController.getCameraTimeline();
-      
-      if (lastIdx >= 0) {
-          const currentEntry = cameraTimeline[lastIdx];
-          if (currentEntry && timeInLevel < currentEntry.time) {
-              this.cameraController.resetCameraState();
-              this.cameraController.setLastCameraTimelineIndex(-1);
-          }
-      }
-
-      let newIdx = lastIdx;
-      while (newIdx + 1 < cameraTimeline.length && 
-             cameraTimeline[newIdx + 1].time <= timeInLevel) {
-          newIdx++;
-          const entry = cameraTimeline[newIdx];
-          // Pass current camera state and tile index for proper transition handling
-          const cameraSnapshot = {
-              position: { x: this.cameraPosition.x, y: this.cameraPosition.y },
-              zoom: this.zoom * 100,  // Convert back to ADOFAI format
-              rotation: this.camera.rotation.z * (180 / Math.PI)
-          };
-          this.cameraController.processCameraEvent(
-              entry.event,
-              entry.event.floor || 0,
-              this.elapsedTime,
-              cameraSnapshot,
-              this.currentPivotPosition
-          );
-      }
-      this.cameraController.setLastCameraTimelineIndex(newIdx);
-      
-      // Update custom background parallax
-      this.updateCustomBGParallax();
-      
-      // Reset follow smooth when tile advances (matching scrCamera.UpdateFollowCam)
-      if (this.currentTileIndex !== this._lastCamSmoothTile) {
-        this._lastCamSmoothTile = this.currentTileIndex;
-        this.cameraController.resetSmooth({
-          x: this.cameraPosition.x,
-          y: this.cameraPosition.y,
-        });
-      }
-
+      const timeInLevel = this.elapsedTime / 1000 - this.getTimeOrigin();
       const currentBPM = (this.tileBPM && this.tileBPM[this.currentTileIndex]) || 100;
 
-      // Official ADOFAI lerp-based smooth follow (matching scrCamera.UpdateFollowCam)
-      const smoothPos = this.cameraController.getSmoothPosition(
-        this.currentPivotPosition,
-        currentBPM,
-        delta,
-        this.elapsedTime,
-      );
-      this.cameraPosition.x = smoothPos.x;
-      this.cameraPosition.y = smoothPos.y;
-      this.camera.position.x = this.cameraPosition.x;
-      this.camera.position.y = this.cameraPosition.y;
+      // Two-layer camera update: rig (camParent) DOTween + local follow Lerp.
+      this.cameraController.update({
+          nowSeconds: timeInLevel,
+          deltaSeconds: delta,
+          bpm: currentBPM,
+          pitch: this.songPitch,
+          planetWorldPos: { x: this.currentPivotPosition.x, y: this.currentPivotPosition.y },
+          currentTileIndex: this.currentTileIndex,
+      });
 
-      // Get interpolated values for zoom and rotation
-      const interpolated = this.cameraController.getInterpolatedValues(this.elapsedTime);
+      // Update custom background parallax
+      this.updateCustomBGParallax();
 
-      // Zoom: ADOFAI zoom 100 = normal view, 200 = 2x zoomed out
-      this.adoZoom = interpolated.zoom;
-      this.zoom = 100 / interpolated.zoom;
-      this.camera.zoom = this.zoom * this.zoomMultiplier;
-      this.camera.updateProjectionMatrix();
+      this.syncCameraFromController();
 
       // Auto-disable tile texture when zoomed out past threshold
       // (texture is imperceptible on tiny tiles, but still costs GPU bandwidth).
       // Only interferes when the user has NOT explicitly toggled textures off.
       if (!this.disableTrackTexture && this.instancedMeshManager) {
           const zoomThreshold = 300; // ADOFAI zoom > 300 → tiles are very small
-          if (interpolated.zoom > zoomThreshold) {
+          if (this.adoZoom > zoomThreshold) {
               if (!this._textureAutoDisabled) {
                   this._textureAutoDisabled = true;
                   this.instancedMeshManager.setTileTextureEnabled(false);
@@ -4641,16 +4687,13 @@ export class Player implements IPlayer {
               this.instancedMeshManager.setTileTextureEnabled(true);
           }
       }
-      
-      // Rotation (in degrees, convert to radians)
-      this.camera.rotation.z = interpolated.rotation * (Math.PI / 180);
 
       // Sync Video Background
       if (this.videoMesh) {
           this.videoMesh.position.x = this.camera.position.x;
           this.videoMesh.position.y = this.camera.position.y;
           this.videoMesh.rotation.z = this.camera.rotation.z;
-          
+
           if (Math.abs(this.camera.zoom - this.lastVisibleCheckZoom) > 0.001) {
               this.updateVideoSize();
           }
@@ -4659,9 +4702,29 @@ export class Player implements IPlayer {
       this.updateVisibleTiles();
   }
 
+  /** Push the CameraController state onto the three.js camera. */
+  private syncCameraFromController(syncPosition: boolean = true): void {
+      if (syncPosition) {
+          const camPos = this.cameraController.getCameraPosition();
+          this.cameraPosition.x = camPos.x;
+          this.cameraPosition.y = camPos.y;
+          this.camera.position.x = camPos.x;
+          this.camera.position.y = camPos.y;
+      }
+
+      const adoZoom = this.cameraController.getCameraZoom();
+      this.adoZoom = adoZoom;
+      if (adoZoom > 0) {
+          this.zoom = 100 / adoZoom;
+          this.camera.zoom = this.zoom * this.zoomMultiplier;
+          this.camera.updateProjectionMatrix();
+      }
+
+      this.camera.rotation.z = this.cameraController.getCameraRotation() * (Math.PI / 180);
+  }
+
   public setZoom(logicalZoom: number): void {
-    const cameraMode = this.cameraController.getCameraMode();
-    cameraMode.zoom = logicalZoom;
+    this.cameraController.setCameraZoom(logicalZoom);
     this.zoom = 100 / logicalZoom;
     this.onWindowResize();
   }
@@ -4816,7 +4879,35 @@ export class Player implements IPlayer {
         if (drift > 0.3 && now - this.lastVideoSeekTime > 250) {
             this.videoElement.currentTime = targetVideoTime;
             this.lastVideoSeekTime = now;
-        }
+      }
+    }
+  }
+
+  /**
+   * AutoPlayTiles: 手动模式下，到达 auto 砖块的完美时刻时自动推进，无需玩家按键。
+   * 官方行为：nextfloor.auto 时 OttoHoldHit 自动判定（infinite margin → HitMargin.Auto）。
+   */
+  private autoAdvanceAutoTiles(timeInLevel: number): void {
+    if (!this.manualMode || this._manualDead) return;
+    const n = this.levelData.tiles.length;
+    // 用 while 循环处理连续多个 auto 砖块
+    let guard = 0;
+    while (guard < 64) {
+      guard++;
+      const tileIndex = this.currentTileIndex;
+      if (tileIndex >= n - 1) return;
+      if (!this.tileAuto[tileIndex]) return; // 当前砖块不是 auto，停止
+      const perfectTime = (this.tileStartTimes[tileIndex] || 0) + (this.tileDurations[tileIndex] || 0);
+      if (timeInLevel < perfectTime) return; // 还没到完美时刻
+      // 自动推进
+      this.currentTileIndex++;
+      this._judgeLastCorrectedTile = -1;
+      this._consecMisses = 0;
+      this.recordMargin(HitMargin.Auto);
+      const landedTile = this.tiles.get(String(tileIndex + 1)) ?? null;
+      this.judgmentDisplay?.show(landedTile, HitMargin.Auto);
+      this.playHitForTile(tileIndex + 1);
+      this.hitErrorMeter?.addHit(0, this.tileBPM[tileIndex] || 100, this.songPitch, this.getTileMarginScale(tileIndex), this.judgeConfig());
     }
   }
 

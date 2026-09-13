@@ -32,6 +32,7 @@ void main() {
   float a = tex.a * vOpacity;
   if (a < 0.004) discard;
   gl_FragColor = vec4(tex.rgb * vColor, a);
+  #include <colorspace_fragment>
 }
 `;
 
@@ -96,6 +97,9 @@ export class DecorationInstancedRenderer {
       depthTest: true,
       side: DoubleSide,
       blending,
+      // THREE warns/degrades MultiplyBlending unless the material declares
+      // premultiplied alpha; the blend itself is identical either way.
+      premultipliedAlpha: blending === MultiplyBlending,
     });
 
     const geo = new PlaneGeometry(1, 1);

@@ -16,6 +16,7 @@ export class TimelineManager {
 
     private _animatedTileIndices: Set<number> = new Set();
     private _tileRanges: { tileIdx: number; start: number; end: number }[] = [];
+    private _tileRangePrefixMaxEnd: number[] = [];
     private _tileRangesSorted: boolean = false;
     private tileStartTimes: number[];
     private tileBPM: number[];
@@ -260,41 +261,60 @@ export class TimelineManager {
                 this._tileRanges.push({ tileIdx, start, end });
             }
         }
-        // 必须按 end 排序：getActiveTileIndicesAt 的二分查找用 end 作查找键，
-        // 若按 start 排序而 end 不单调（长动画 tile 排前面），二分会错误跳过
-        // 前面 start 小但 end 大的 tile（表现为部分/全部 MoveTrack 不触发）。
-        this._tileRanges.sort((a, b) => a.end - b.end);
+        // Sort by START so "currently active" (start <= time < end) can be found
+        // by binary-searching the started prefix, then scanning backwards.
+        // (Previously sorted by end; that made every future tile under a global
+        // appear animation report as active forever, i.e. O(n) work per frame.)
+        this._tileRanges.sort((a, b) => a.start - b.start);
+        // prefixMaxEnd[i] = max(end[0..i]) → lets the backward scan stop as soon
+        // as no earlier range can still be unfinished.
+        const prefix: number[] = new Array(this._tileRanges.length);
+        let runningMax = -Infinity;
+        for (let i = 0; i < this._tileRanges.length; i++) {
+            if (this._tileRanges[i].end > runningMax) runningMax = this._tileRanges[i].end;
+            prefix[i] = runningMax;
+        }
+        this._tileRangePrefixMaxEnd = prefix;
         this._tileRangesSorted = true;
     }
 
     /**
-     * Returns tile indices whose last keyframe is after the given time.
-     * Matches the original isTileActive semantics: tile is "active" if
-     * time < last keyframe time (animation hasn't fully finished yet).
-     * Uses binary search on the sorted _tileRanges array — O(log n) to find
-     * the first unfinished tile, then O(k) linear scan for k unfinished tiles.
+     * Returns tile indices whose animation is CURRENTLY running at `time`,
+     * i.e. `start <= time < end`.
      *
-     * Tiles whose animation finished (end <= time) are excluded, which
-     * eliminates the O(n) scan of ALL animated tiles every frame.
+     * Previously this returned every tile whose last keyframe was after `time`
+     * ("unfinished"), which under a global Appear animation (`trackAnimation`
+     * != None) meant ALL future tiles were "active" every frame — O(n) per
+     * frame. Tiles that haven't started yet keep their pre-appear state and
+     * need no per-frame work.
+     *
+     * `_tileRanges` is sorted by `start`; binary-search the started prefix,
+     * then scan backwards and stop once no earlier range can still be running
+     * (`prefixMaxEnd[i] <= time`).
      */
     public getActiveTileIndicesAt(time: number): number[] {
         if (!this._tileRangesSorted || this._tileRanges.length === 0) {
             return Array.from(this._animatedTileIndices);
         }
         const ranges = this._tileRanges;
+        const prefixMax = this._tileRangePrefixMaxEnd;
+        // First index with start > time.
         let lo = 0, hi = ranges.length;
         while (lo < hi) {
             const mid = (lo + hi) >>> 1;
-            if (ranges[mid].end > time) {
-                hi = mid;
-            } else {
+            if (ranges[mid].start <= time) {
                 lo = mid + 1;
+            } else {
+                hi = mid;
             }
         }
-        // lo = first index with end > time (animation unfinished)
+        // Walk the started ranges backwards, keeping the still-running ones.
         const result: number[] = [];
-        for (let i = lo; i < ranges.length; i++) {
-            result.push(ranges[i].tileIdx);
+        for (let i = lo - 1; i >= 0; i--) {
+            if (prefixMax[i] <= time) break;
+            if (ranges[i].end > time) {
+                result.push(ranges[i].tileIdx);
+            }
         }
         return result;
     }
@@ -417,9 +437,13 @@ export class TimelineManager {
     }
 
     private instantKeyframe(entity: string, property: string, time: number, value: number): void {
-        const kfs = this.timelines.get(entity)?.get(property);
-        if (!kfs) return;
+        // Ensure the timeline exists so a zero-duration event that is the first
+        // thing on a property still registers.
+        const kfs = this.ensureTimeline(entity, property);
 
+        // Official Kill(complete:true) semantics: a zero-duration event discards
+        // any in-flight tween of the same property. Without this, a superseded
+        // tween's end keyframe (after `time`) survives and "resurrects" later.
         this.removeAfter(kfs, time + 1e-9);
         const idx = this.findKeyframeIndex(kfs, time);
         if (idx >= 0 && Math.abs(kfs[idx].time - time) < 1e-9) {
@@ -798,18 +822,20 @@ export class TimelineManager {
         if (sy !== undefined) { mesh.scale.y = sy; dirty = true; }
         if (op !== undefined) {
             mesh.userData.opacity = op;
+            // 合成轨道颜色 alpha（#RRGGBBAA）：material 直接渲染路径也要带上
+            const effectiveOpacity = op * ((mesh.userData as any).trackColorOpacity ?? 1);
             if (mesh.material) {
                 if (mesh.material instanceof ShaderMaterial && mesh.material.uniforms?.opacity) {
-                    mesh.material.uniforms.opacity.value = op;
+                    mesh.material.uniforms.opacity.value = effectiveOpacity;
                 } else {
-                    (mesh.material as any).opacity = op;
+                    (mesh.material as any).opacity = effectiveOpacity;
                 }
-                (mesh.material as any).transparent = op < 0.999;
+                (mesh.material as any).transparent = effectiveOpacity < 0.999;
             }
             mesh.visible = op > 0.001;
             mesh.traverse((child) => {
                 if (child !== mesh && (child as any).material?.opacity !== undefined) {
-                    (child as any).material.opacity = op;
+                    (child as any).material.opacity = effectiveOpacity;
                 }
             });
             dirty = true;

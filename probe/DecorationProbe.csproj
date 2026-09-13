@@ -1,0 +1,67 @@
+<Project Sdk="Microsoft.NET.Sdk">
+    <PropertyGroup>
+        <TargetFramework>net481</TargetFramework>
+        <OutputType>Library</OutputType>
+        <RootNamespace>DecorationProbe</RootNamespace>
+        <AssemblyName>DecorationProbe</AssemblyName>
+        <LangVersion>latest</LangVersion>
+        <Nullable>enable</Nullable>
+        <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+        <OutputPath>bin\</OutputPath>
+    </PropertyGroup>
+    <ItemGroup>
+        <Reference Include="UnityModManager">
+            <HintPath>..\..\Iridium\lib\ModManager\UnityModManager.dll</HintPath>
+        </Reference>
+        <Reference Include="0Harmony">
+            <HintPath>..\..\Iridium\lib\ModManager\0Harmony.dll</HintPath>
+        </Reference>
+        <Reference Include="Assembly-CSharp">
+            <HintPath>..\..\Iridium\lib\v3.3.0\Assembly-CSharp.dll</HintPath>
+        </Reference>
+        <Reference Include="Assembly-CSharp-firstpass">
+            <HintPath>..\..\Iridium\lib\v3.3.0\Assembly-CSharp-firstpass.dll</HintPath>
+        </Reference>
+        <Reference Include="RDTools">
+            <HintPath>..\..\Iridium\lib\v2.9.8\RDTools.dll</HintPath>
+        </Reference>
+        <Reference Include="DOTween">
+            <HintPath>..\..\Iridium\lib\v2.9.8\DOTween.dll</HintPath>
+        </Reference>
+        <Reference Include="DOTweenPro">
+            <HintPath>..\..\Iridium\lib\v2.9.8\DOTweenPro.dll</HintPath>
+        </Reference>
+        <Reference Include="UnityEngine">
+            <HintPath>..\..\Iridium\lib\v2.9.8\UnityEngine.dll</HintPath>
+        </Reference>
+        <Reference Include="UnityEngine.CoreModule">
+            <HintPath>..\..\Iridium\lib\v2.9.8\UnityEngine.CoreModule.dll</HintPath>
+        </Reference>
+        <Reference Include="UnityEngine.PhysicsModule">
+            <HintPath>..\..\Iridium\lib\v2.9.8\UnityEngine.PhysicsModule.dll</HintPath>
+        </Reference>
+        <Reference Include="UnityEngine.Physics2DModule">
+            <HintPath>..\..\Iridium\lib\v2.9.8\UnityEngine.Physics2DModule.dll</HintPath>
+        </Reference>
+        <Reference Include="UnityEngine.ParticleSystemModule">
+            <HintPath>..\..\Iridium\lib\v2.9.8\UnityEngine.ParticleSystemModule.dll</HintPath>
+        </Reference>
+        <Reference Include="UnityEngine.UIModule">
+            <HintPath>..\..\Iridium\lib\v2.9.8\UnityEngine.UIModule.dll</HintPath>
+        </Reference>
+        <Reference Include="UnityEngine.UI">
+            <HintPath>..\..\Iridium\lib\v2.9.8\UnityEngine.UI.dll</HintPath>
+        </Reference>
+        <Reference Include="UnityEngine.ImageConversionModule">
+            <HintPath>..\..\Iridium\lib\v2.9.8\UnityEngine.ImageConversionModule.dll</HintPath>
+        </Reference>
+    </ItemGroup>
+    <Target Name="CopyOutput" AfterTargets="Build">
+        <Copy SourceFiles="$(OutputPath)$(AssemblyName).dll"
+              DestinationFolder="..\..\Iridium\out\v3\Mods\DecorationProbe\"
+              SkipUnchangedFiles="true" />
+        <Copy SourceFiles="Info.json"
+              DestinationFolder="..\..\Iridium\out\v3\Mods\DecorationProbe\"
+              SkipUnchangedFiles="true" />
+    </Target>
+</Project>

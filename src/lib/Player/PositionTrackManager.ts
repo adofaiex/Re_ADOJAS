@@ -1,5 +1,5 @@
 import { Vector3, Vector2 } from 'three';
-import { isEventActive } from './EventUtils';
+import { isEventActive, isEnabled } from './EventUtils';
 import { Level } from 'adofai';
 
 export interface PositionTrackEvent {
@@ -70,7 +70,7 @@ export class PositionTrackManager {
 
     private parseStickToFloors(value: boolean | 'Enabled' | 'Disabled' | undefined): boolean {
         if (value === undefined || value === null) {
-            return this.levelData.settings?.stickToFloors !== false;
+            return isEnabled(this.levelData.settings?.stickToFloors, true);
         }
         if (typeof value === 'boolean') return value;
         if (typeof value === 'string') return value === 'Enabled';
@@ -96,8 +96,8 @@ export class PositionTrackManager {
                 rotation: action.rotation,
                 scale: action.scale,
                 opacity: action.opacity,
-                justThisTile: action.justThisTile === true || action.justThisTile === 'Enabled',
-                editorOnly: action.editorOnly === true || action.editorOnly === 'Enabled',
+                justThisTile: isEnabled(action.justThisTile),
+                editorOnly: isEnabled(action.editorOnly),
                 stickToFloors: action.stickToFloors,
                 disabled: action.disabled,
             });
@@ -138,7 +138,7 @@ export class PositionTrackManager {
         const workingScale: number[] = [];
         const workingOpacity: number[] = [];
         const workingStick: boolean[] = [];
-        const defaultStick = this.levelData.settings?.stickToFloors !== false;
+        const defaultStick = isEnabled(this.levelData.settings?.stickToFloors, true);
 
         for (let i = 0; i < tileCount; i++) {
             const basePos = this.tilePositions.get(i);

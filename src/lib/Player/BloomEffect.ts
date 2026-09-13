@@ -153,7 +153,13 @@ export class BloomEffect {
 
         // Now create proper hex format for Color
         const normalizedHex = `#${hex}`;
-        this.bloomColor.set(normalizedHex);
+        // 合成在 gamma 空间进行（见 combine.frag），这里必须存原始 sRGB 分量；
+        // Color.set() 会做 sRGB→linear 转换导致染色偏亮
+        this.bloomColor.setRGB(
+            parseInt(hex.slice(0, 2), 16) / 255,
+            parseInt(hex.slice(2, 4), 16) / 255,
+            parseInt(hex.slice(4, 6), 16) / 255
+        );
         // Apply color in combine shader (like Unity's _Param1)
         this.combineMaterial.uniforms.bloomColor.value.copy(this.bloomColor);
 

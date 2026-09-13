@@ -2,8 +2,8 @@
  * 异步输入系统。
  *
  * 目的：判定精度不受浏览器帧率/装饰物/渲染负载影响。
- * 方案：在 keydown/keyup 事件派发瞬间用 performance.now() 记录高精度时间戳，
- * 入队后由游戏循环按事件时间戳统一处理。即使某帧卡顿，按键的
+ * 方案：在 keydown/keyup / pointerdown/pointerup 事件派发瞬间用 performance.now()
+ * 记录高精度时间戳，入队后由游戏循环按事件时间戳统一处理。即使某帧卡顿，按键的
  * "发生时刻" 也已精确锁定，处理时通过时间戳换算成关卡时间即可。
  *
  * 注意：performance.now() 与 AudioContext.currentTime 均随真实时间推进，
@@ -34,11 +34,26 @@ export class AsyncInputManager {
     this.queue.push({ type: 'up', perfTime: performance.now() });
   };
 
+  /** 触控/鼠标指针按下 → 视为 'down' */
+  private readonly onPointerDown = (e: PointerEvent) => {
+    // 排除编辑器/UI 区域的输入控件
+    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+    this.queue.push({ type: 'down', perfTime: performance.now() });
+  };
+
+  /** 触控/鼠标指针释放 → 视为 'up' */
+  private readonly onPointerUp = (e: PointerEvent) => {
+    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+    this.queue.push({ type: 'up', perfTime: performance.now() });
+  };
+
   public attach(): void {
     if (this.attached) return;
     this.attached = true;
     window.addEventListener('keydown', this.onKeyDown, { capture: true });
     window.addEventListener('keyup', this.onKeyUp, { capture: true });
+    window.addEventListener('pointerdown', this.onPointerDown, { capture: true });
+    window.addEventListener('pointerup', this.onPointerUp, { capture: true });
   }
 
   public detach(): void {
@@ -46,6 +61,8 @@ export class AsyncInputManager {
     this.attached = false;
     window.removeEventListener('keydown', this.onKeyDown, { capture: true });
     window.removeEventListener('keyup', this.onKeyUp, { capture: true });
+    window.removeEventListener('pointerdown', this.onPointerDown, { capture: true });
+    window.removeEventListener('pointerup', this.onPointerUp, { capture: true });
   }
 
   /** 取出并清空队列（单遍遍历，无嵌套循环）。 */

@@ -50,7 +50,7 @@ export class InstancedMeshManager {
     private maxCacheSize: number = 100;
     private useInstancedMesh: boolean = true;
     private tileTexture: Texture | null = null;
-    private texScale: number = 0.6;
+    private texScale: number = 0.3;
     private iconAtlasTexture: Texture | null = null;
     private iconAtlasCols: number = 8;
     private iconSize: number = 0.44;
@@ -58,7 +58,7 @@ export class InstancedMeshManager {
     /**
      * Set the tile texture overlay and tiling scale
      */
-    public setTileTexture(texture: Texture | null, scale: number = 6): void {
+    public setTileTexture(texture: Texture | null, scale: number = 0.3): void {
         this.tileTexture = texture;
         this.texScale = scale;
         // Update uniform on all existing instanced meshes

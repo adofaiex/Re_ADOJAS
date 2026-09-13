@@ -1,0 +1,10 @@
+{
+  "Id": "DecorationProbe",
+  "DisplayName": "Decoration Probe",
+  "Author": "ADOJAS",
+  "Version": "1.0.0",
+  "Requirements": [],
+  "ManagerVersion": "0.27.0.0",
+  "AssemblyName": "DecorationProbe.dll",
+  "EntryMethod": "DecorationProbe.Main.Load"
+}

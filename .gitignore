@@ -41,3 +41,7 @@ platform/android/app/src/main/assets/web/*
 !platform/android/app/src/main/assets/web/.gitkeep
 *.apk
 *.aab
+
+# Local ADOFAI probe mod build output (Unity assembly references)
+probe/bin/
+probe/obj/

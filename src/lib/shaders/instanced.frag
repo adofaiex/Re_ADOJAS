@@ -52,4 +52,6 @@ void main() {
     if (vOpacity < 0.005) discard;
 
     gl_FragColor = vec4(finalColor, vOpacity);
+    // 直绘 canvas（bloom 关闭）时做 linear→sRGB；渲染进 bloom 的线性 RT 时该 chunk 为恒等
+    #include <colorspace_fragment>
 }

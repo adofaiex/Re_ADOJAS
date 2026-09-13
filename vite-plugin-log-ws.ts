@@ -19,6 +19,9 @@ export function logWsPlugin(): Plugin {
         const ts = new Date().toISOString();
         const line = `[${ts}] [${level}] ${message}\n`;
         appendFileSync(join(LOG_DIR, 'client.log'), line);
+        if (level === 'deco') {
+            appendFileSync(join(LOG_DIR, 'deco.log'), line);
+        }
     }
 
     return {

@@ -261,8 +261,8 @@ export default function EditorPage() {
             size="icon"
             onClick={handleBackClick}
             className={`${isDark
-                ? "text-slate-300 hover:text-white hover:bg-slate-700"
-                : "text-slate-700 hover:text-slate-900 hover:bg-slate-100"
+              ? "text-slate-300 hover:text-white hover:bg-slate-700"
+              : "text-slate-700 hover:text-slate-900 hover:bg-slate-100"
               } bg-black/20 backdrop-blur-sm`}
             title={t("common.back")}
           >
@@ -275,8 +275,8 @@ export default function EditorPage() {
             variant="ghost"
             size="icon"
             className={`${isDark
-                ? "text-slate-300 hover:text-white hover:bg-slate-700"
-                : "text-slate-700 hover:text-slate-900 hover:bg-slate-100"
+              ? "text-slate-300 hover:text-white hover:bg-slate-700"
+              : "text-slate-700 hover:text-slate-900 hover:bg-slate-100"
               } bg-black/20 backdrop-blur-sm`}
             onClick={() => fileInputRef.current?.click()}
             disabled={isLoading}
@@ -289,8 +289,8 @@ export default function EditorPage() {
             variant="ghost"
             size="icon"
             className={`${isDark
-                ? "text-slate-300 hover:text-white hover:bg-slate-700"
-                : "text-slate-700 hover:text-slate-900 hover:bg-slate-100"
+              ? "text-slate-300 hover:text-white hover:bg-slate-700"
+              : "text-slate-700 hover:text-slate-900 hover:bg-slate-100"
               } bg-black/20 backdrop-blur-sm`}
             onClick={() => audioInputRef.current?.click()}
             disabled={!adofaiFile}
@@ -302,8 +302,8 @@ export default function EditorPage() {
             variant="ghost"
             size="icon"
             className={`${isDark
-                ? "text-slate-300 hover:text-white hover:bg-slate-700"
-                : "text-slate-700 hover:text-slate-900 hover:bg-slate-100"
+              ? "text-slate-300 hover:text-white hover:bg-slate-700"
+              : "text-slate-700 hover:text-slate-900 hover:bg-slate-100"
               } bg-black/20 backdrop-blur-sm ${adofaiFile?.settings?.bgVideo ? "border border-purple-500/50" : ""}`}
             onClick={handleVideoButtonClick}
             disabled={!adofaiFile}
@@ -315,8 +315,8 @@ export default function EditorPage() {
             variant="ghost"
             size="icon"
             className={`${isDark
-                ? "text-slate-300 hover:text-white hover:bg-slate-700"
-                : "text-slate-700 hover:text-slate-900 hover:bg-slate-100"
+              ? "text-slate-300 hover:text-white hover:bg-slate-700"
+              : "text-slate-700 hover:text-slate-900 hover:bg-slate-100"
               } bg-black/20 backdrop-blur-sm`}
             onClick={handleExport}
             disabled={!adofaiFile}
@@ -328,8 +328,8 @@ export default function EditorPage() {
             variant="ghost"
             size="icon"
             className={`${isDark
-                ? "text-slate-300 hover:text-white hover:bg-slate-700"
-                : "text-slate-700 hover:text-slate-900 hover:bg-slate-100"
+              ? "text-slate-300 hover:text-white hover:bg-slate-700"
+              : "text-slate-700 hover:text-slate-900 hover:bg-slate-100"
               } bg-black/20 backdrop-blur-sm`}
             title={t("editor.save")}
           >
@@ -340,8 +340,8 @@ export default function EditorPage() {
             size="icon"
             onClick={() => setSettingsOpen(true)}
             className={`${isDark
-                ? "text-slate-300 hover:text-white hover:bg-slate-700"
-                : "text-slate-700 hover:text-slate-900 hover:bg-slate-100"
+              ? "text-slate-300 hover:text-white hover:bg-slate-700"
+              : "text-slate-700 hover:text-slate-900 hover:bg-slate-100"
               } bg-black/20 backdrop-blur-sm`}
             title={t("common.settings")}
           >
@@ -352,8 +352,8 @@ export default function EditorPage() {
             size="icon"
             onClick={() => toggleFullscreen()}
             className={`${isDark
-                ? "text-slate-300 hover:text-white hover:bg-slate-700"
-                : "text-slate-700 hover:text-slate-900 hover:bg-slate-100"
+              ? "text-slate-300 hover:text-white hover:bg-slate-700"
+              : "text-slate-700 hover:text-slate-900 hover:bg-slate-100"
               } bg-black/20 backdrop-blur-sm`}
             title={isFullscreen ? "退出全屏" : "全屏"}
           >
@@ -382,8 +382,8 @@ export default function EditorPage() {
               <Button
                 onClick={handleConfirmExit}
                 className={`${isDark
-                    ? "bg-slate-700 hover:bg-slate-600 text-white"
-                    : "bg-slate-100 hover:bg-slate-200 text-slate-900"
+                  ? "bg-slate-700 hover:bg-slate-600 text-white"
+                  : "bg-slate-100 hover:bg-slate-200 text-slate-900"
                   }`}
               >
                 {t("editor.exitDialog.discard")}
@@ -422,8 +422,8 @@ export default function EditorPage() {
                 <Button
                   onClick={handleImportVideoBackground}
                   className={`w-full justify-start gap-3 ${isDark
-                      ? "bg-purple-600 hover:bg-purple-500 text-white"
-                      : "bg-purple-500 hover:bg-purple-600 text-white"
+                    ? "bg-purple-600 hover:bg-purple-500 text-white"
+                    : "bg-purple-500 hover:bg-purple-600 text-white"
                     }`}
                 >
                   <Video className="w-5 h-5" />
@@ -432,8 +432,8 @@ export default function EditorPage() {
                 <Button
                   onClick={handleImportDecoration}
                   className={`w-full justify-start gap-3 ${isDark
-                      ? "bg-blue-600 hover:bg-blue-500 text-white"
-                      : "bg-blue-500 hover:bg-blue-600 text-white"
+                    ? "bg-blue-600 hover:bg-blue-500 text-white"
+                    : "bg-blue-500 hover:bg-blue-600 text-white"
                     }`}
                 >
                   <Image className="w-5 h-5" />
@@ -442,8 +442,8 @@ export default function EditorPage() {
                 <Button
                   onClick={() => bgImageInputRef.current?.click()}
                   className={`w-full justify-start gap-3 ${isDark
-                      ? "bg-green-600 hover:bg-green-500 text-white"
-                      : "bg-green-500 hover:bg-green-600 text-white"
+                    ? "bg-green-600 hover:bg-green-500 text-white"
+                    : "bg-green-500 hover:bg-green-600 text-white"
                     }`}
                 >
                   <Image className="w-5 h-5" />
@@ -509,65 +509,65 @@ export default function EditorPage() {
 
       {/* Full-screen Canvas Area */}
       <div ref={containerRef} className="absolute inset-0">
-{/* 右下角：判定选择 / 不死模式 / 自动播放（otto）——官方编辑器布局 */}
-      <div className="absolute bottom-4 right-4 flex items-end gap-3 select-none">
-        {/* 判定选择：单按钮循环切换（宽→标→严） */}
-        <button
-          className="shrink-0 flex items-center justify-center"
-          style={{ width: 44, height: 44 }}
-          title={`判定难度：${judgeDifficulty === "Lenient" ? "宽" : judgeDifficulty === "Strict" ? "严" : "标"}（点击切换）`}
-          onClick={handleCycleJudgeDifficulty}
-        >
-          <img
-            src={judgeDifficulty === "Lenient" ? bullseyeLenient : judgeDifficulty === "Strict" ? bullseyeStrict : bullseyeNormal}
-            alt="判定难度"
-            style={{ width: '100%', height: '100%', objectFit: 'contain' }}
-            className="drop-shadow-lg"
-            draggable={false}
-          />
-        </button>
+        {/* 右下角：判定选择 / 不死模式 / 自动播放（otto）——官方编辑器布局 */}
+        <div className="absolute bottom-4 right-4 flex items-end gap-3 select-none">
+          {/* 判定选择：单按钮循环切换（宽→标→严） */}
+          <button
+            className="shrink-0 flex items-center justify-center"
+            style={{ width: 44, height: 44 }}
+            title={`判定难度：${judgeDifficulty === "Lenient" ? "宽" : judgeDifficulty === "Strict" ? "严" : "标"}（点击切换）`}
+            onClick={handleCycleJudgeDifficulty}
+          >
+            <img
+              src={judgeDifficulty === "Lenient" ? bullseyeLenient : judgeDifficulty === "Strict" ? bullseyeStrict : bullseyeNormal}
+              alt="判定难度"
+              style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+              className="drop-shadow-lg"
+              draggable={false}
+            />
+          </button>
 
-        {/* 不死模式：关闭时降低透明度 */}
-        <button
-          className="shrink-0 flex items-center justify-center"
-          style={{ width: 44, height: 44 }}
-          title={noFail ? "不死模式：开启（miss 自动矫正）" : "不死模式：关闭"}
-          onClick={handleToggleNoFail}
-        >
-          <img
-            src={noFailImg}
-            alt="不死模式"
-            style={{ width: '100%', height: '100%', objectFit: 'contain' }}
-            className={`drop-shadow-lg transition-opacity ${noFail ? "opacity-100" : "opacity-45 grayscale"}`}
-            draggable={false}
-          />
-        </button>
+          {/* 不死模式：关闭时降低透明度 */}
+          <button
+            className="shrink-0 flex items-center justify-center"
+            style={{ width: 44, height: 44 }}
+            title={noFail ? "不死模式：开启（miss 自动矫正）" : "不死模式：关闭"}
+            onClick={handleToggleNoFail}
+          >
+            <img
+              src={noFailImg}
+              alt="不死模式"
+              style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+              className={`drop-shadow-lg transition-opacity ${noFail ? "opacity-100" : "opacity-45 grayscale"}`}
+              draggable={false}
+            />
+          </button>
 
-        {/* 自动播放（otto）：开 = 关闭手打 */}
-        <button
-          className="shrink-0 flex items-center justify-center"
-          style={{ width: 44, height: 44 }}
-          title={auto ? "自动播放：开启（点击关闭，进入手动判定）" : "自动播放：关闭（点击开启自动播放）"}
-          onClick={handleToggleManualPlay}
-          onMouseEnter={handleOttoPetEnter}
-          onMouseMove={handleOttoPetMove}
-          onMouseLeave={handleOttoPetLeave}
-        >
-          <img
-            src={ottoSrc}
-            alt="自动播放"
-            style={{ width: '100%', height: '100%', objectFit: 'contain' }}
-            className={`drop-shadow-lg transition-all duration-150 ${manualMode ? "opacity-45 grayscale" : highBPM ? "otto-red" : ""}`}
-            draggable={false}
-          />
-        </button>
-      </div>
+          {/* 自动播放（otto）：开 = 关闭手打 */}
+          <button
+            className="shrink-0 flex items-center justify-center"
+            style={{ width: 44, height: 44 }}
+            title={auto ? "自动播放：开启（点击关闭，进入手动判定）" : "自动播放：关闭（点击开启自动播放）"}
+            onClick={handleToggleManualPlay}
+            onMouseEnter={handleOttoPetEnter}
+            onMouseMove={handleOttoPetMove}
+            onMouseLeave={handleOttoPetLeave}
+          >
+            <img
+              src={ottoSrc}
+              alt="自动播放"
+              style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+              className={`drop-shadow-lg transition-all duration-150 ${manualMode ? "opacity-45 grayscale" : highBPM ? "otto-red" : ""}`}
+              draggable={false}
+            />
+          </button>
+        </div>
         <div className="absolute bottom-4 left-4 flex items-end gap-4">
           <div className="relative inline-block">
             <button
               className={`z-10 w-14 h-14 rounded-full flex items-center justify-center transition-colors ${isDark
-                  ? "bg-slate-700/80 text-slate-200 hover:bg-slate-600"
-                  : "bg-white/80 text-slate-700 hover:bg-slate-100"
+                ? "bg-slate-700/80 text-slate-200 hover:bg-slate-600"
+                : "bg-white/80 text-slate-700 hover:bg-slate-100"
                 } shadow-lg backdrop-blur-sm`}
               title={playMode === "play" ? t("editor.pause") : t("editor.play")}
               id="play-button"
@@ -582,8 +582,8 @@ export default function EditorPage() {
             {playModeActive && (
               <button
                 className={`absolute -bottom-1 -right-3 w-7 h-7 rounded-full flex items-center justify-center transition-colors z-0 ${isDark
-                    ? "bg-slate-700/80 text-slate-200 hover:bg-slate-600"
-                    : "bg-white/80 text-slate-700 hover:bg-slate-100"
+                  ? "bg-slate-700/80 text-slate-200 hover:bg-slate-600"
+                  : "bg-white/80 text-slate-700 hover:bg-slate-100"
                   } shadow-lg backdrop-blur-sm`}
                 title={t("editor.exitPlayMode")}
                 onClick={handleExitWithReset}
@@ -596,8 +596,8 @@ export default function EditorPage() {
           <div className="flex items-center gap-1">
             <button
               className={`w-7 h-7 rounded-full flex items-center justify-center transition-colors shrink-0 ${isDark
-                  ? "bg-slate-700/80 text-slate-300 hover:bg-slate-600"
-                  : "bg-white/80 text-slate-600 hover:bg-slate-100"
+                ? "bg-slate-700/80 text-slate-300 hover:bg-slate-600"
+                : "bg-white/80 text-slate-600 hover:bg-slate-100"
                 } shadow-lg backdrop-blur-sm`}
               title="Timeline"
               onClick={() => setTimelineOpen(!timelineOpen)}

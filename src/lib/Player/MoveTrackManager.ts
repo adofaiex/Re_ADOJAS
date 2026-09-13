@@ -66,7 +66,7 @@ export class MoveTrackManager {
                 tileMesh.position,
                 tileMesh.rotation as Euler,
                 tileMesh.scale,
-                1,
+                1
             );
         }
     }
@@ -110,6 +110,27 @@ export class MoveTrackManager {
             }
         }
         this.activeTileIndices = newActiveIndices;
+
+        // Apply the final (end) state once for tiles that just stopped animating.
+        // Since an animation is now considered active only while time < end, the
+        // last active frame may not land exactly on the final value.
+        if (this.pendingFinalApply.size > 0) {
+            for (const tileIdx of this.pendingFinalApply) {
+                const mesh = this.tiles.get(tileIdx.toString());
+                if (!mesh) continue;
+                const dirty = this.timelineManager.applyToTileMesh(tileIdx, mesh, time);
+                if (dirty && this.tileTransformChanged) {
+                    this.tileTransformChanged(
+                        tileIdx,
+                        mesh.position,
+                        mesh.rotation as Euler,
+                        mesh.scale,
+                        mesh.userData.opacity ?? 1
+                    );
+                }
+            }
+            this.pendingFinalApply.clear();
+        }
     }
 
     public getPlanetFollowOffset(tileIndex: number, currentTime: number): { x: number; y: number; rotation: number } {
@@ -189,9 +210,11 @@ export class MoveTrackManager {
                 if (op !== undefined) {
                     mesh.userData.opacity = op;
                     mesh.visible = op > 0.001;
+                    // 合成轨道颜色 alpha（#RRGGBBAA），reset 不吞透明度
+                    const effectiveOpacity = op * ((mesh.userData as any).trackColorOpacity ?? 1);
                     if (mesh.material) {
-                        (mesh.material as any).opacity = op;
-                        (mesh.material as any).transparent = op < 0.999;
+                        (mesh.material as any).opacity = effectiveOpacity;
+                        (mesh.material as any).transparent = effectiveOpacity < 0.999;
                     }
                 }
 

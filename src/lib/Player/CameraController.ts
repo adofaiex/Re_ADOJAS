@@ -14,27 +14,49 @@ export const CamMovementTypes = {
 export type CamMovementType = (typeof CamMovementTypes)[keyof typeof CamMovementTypes];
 
 const MOVEMENT_TYPES: CamMovementType[] = ['Player', 'Tile', 'Global', 'LastPosition', 'LastPositionNoRotation'];
+const TILE_SIZE = 1.0;
 
-export interface CameraMode {
-    relativeTo: CamMovementType;
-    anchorTileIndex: number;
-    position: { x: number; y: number };
-    zoom: number;
-    rotation: number;
-    angleOffset: number;
-    lastEventRelativePosition: { x: number; y: number };
-    lastUsedMovementType: CamMovementType;
-    lastTileCamFloor: number;
-    followMode: boolean;
+function parseMovementType(raw: any): CamMovementType | undefined {
+    if (raw === undefined || raw === null) return undefined;
+    if (typeof raw === 'string') {
+        return (MOVEMENT_TYPES as readonly string[]).includes(raw) ? (raw as CamMovementType) : undefined;
+    }
+    if (typeof raw === 'number') return MOVEMENT_TYPES[raw] || 'Player';
+    return undefined;
 }
 
-export interface PropertyTransition<T> {
+function getTilePosition(levelData: any, floorIndex: number): { x: number; y: number } {
+    const tile = levelData?.tiles?.[floorIndex];
+    return tile?.position ? { x: tile.position[0], y: tile.position[1] } : { x: 0, y: 0 };
+}
+
+function clamp01(v: number): number {
+    return v < 0 ? 0 : v > 1 ? 1 : v;
+}
+
+/**
+ * One independent DOTween track. The original game has four:
+ * moveX, moveY, rotation (vfx.camAngle), zoom (cam.zoomSize).
+ */
+interface TweenState {
     active: boolean;
-    startTime: number;
-    duration: number;
-    startValue: T;
-    endValue: T;
+    startTime: number; // seconds (timeInLevel)
+    duration: number;  // seconds
+    from: number;
+    to: number;
     ease: string;
+}
+
+function idleTween(): TweenState {
+    return { active: false, startTime: 0, duration: 0, from: 0, to: 0, ease: 'Linear' };
+}
+
+function evalTween(tw: TweenState, now: number): number {
+    if (!tw.active) return tw.to;
+    if (tw.duration <= 0) return tw.to;
+    const p = clamp01((now - tw.startTime) / tw.duration);
+    const ease = EasingFunctions[tw.ease] || EasingFunctions.Linear;
+    return tw.from + (tw.to - tw.from) * ease(p);
 }
 
 export interface CameraTimelineEntry {
@@ -42,204 +64,112 @@ export interface CameraTimelineEntry {
     event: any;
 }
 
-// ──── 工具函数 ────────────────────────────────────────────────────────────
-
-function parseMovementType(raw: any): CamMovementType | undefined {
-    if (raw === undefined || raw === null) return undefined;
-    if (typeof raw === 'string') return raw as CamMovementType;
-    if (typeof raw === 'number') return MOVEMENT_TYPES[raw] || 'Player';
-    return undefined;
-}
-
-function getTilePosition(levelData: any, floorIndex: number): { x: number; y: number } {
-    const tile = levelData.tiles?.[floorIndex];
-    return tile?.position ? { x: tile.position[0], y: tile.position[1] } : { x: 0, y: 0 };
+export interface CameraUpdateParams {
+    /** timeInLevel in seconds (same timeline as tileStartTimes). */
+    nowSeconds: number;
+    /** Frame delta in seconds. */
+    deltaSeconds: number;
+    /** Effective BPM for the current tile (tileBPM, already folds in SetSpeed). */
+    bpm: number;
+    /** Song pitch (settings.pitch / 100). */
+    pitch: number;
+    /** Current planet / pivot world position (scrCamera.UpdateFollowCam topos). */
+    planetWorldPos: { x: number; y: number };
+    /** Current tile index (tile-change detection). */
+    currentTileIndex: number;
 }
 
 // ──── CameraController ─────────────────────────────────────────────────────
 
+/**
+ * Faithful port of ADOFAI's two-layer camera:
+ *   camParent (rig, absolute world position)  ← MoveCamera DOTween
+ *   camera.localPosition (follow layer)       ← Lerp(frompos, topos, timer/camspeed)
+ *
+ * Reference: scrCamera.cs (Update / UpdateFollowCam / SetToFreeMode)
+ *            ffxCameraPlus.cs (Decode / StartEffect)
+ *            ffxPlusBase.cs (crotchet / ScrubToTime)
+ */
 export class CameraController {
-    private cameraMode: CameraMode;
+    // ── Rig (camParent) — absolute world position ──────────────────────────
+    private camParent = { x: 0, y: 0 };
+
+    // ── Camera rotation (vfx.camAngle), degrees ────────────────────────────
+    private camAngle = 0;
+
+    // ── Zoom factor (cam.zoomSize), 1 = normal (camZoom 100) ───────────────
+    private zoomSize = 1;
+
+    // ── Follow layer (camera.localPosition) ────────────────────────────────
+    private frompos = { x: 0, y: 0 };
+    private topos = { x: 0, y: 0 };
+    private pos = { x: 0, y: 0 };
+    private timer = 0;
+    private followMode = true;
+    private offset = { x: 0, y: 0 };
+    private holdOffset = { x: 0, y: 0 };
+
+    // ── Bookkeeping (matches scrCamera fields) ─────────────────────────────
+    private lastEventRelativePosition = { x: 0, y: 0 };
+    private lastUsedMovementType: CamMovementType = 'Player';
+    private lastTileCamFloor = -1;
+
+    // ── Level settings ─────────────────────────────────────────────────────
+    private legacyRelativeTo = false;
+    private followMovingPlatforms = false;
+
+    // ── Four independent tween tracks ──────────────────────────────────────
+    private moveXTween: TweenState = idleTween();
+    private moveYTween: TweenState = idleTween();
+    private rotationTween: TweenState = idleTween();
+    private zoomTween: TweenState = idleTween();
+
+    // ── Timeline ───────────────────────────────────────────────────────────
     private cameraTimeline: CameraTimelineEntry[] = [];
     private lastCameraTimelineIndex = -1;
-
-    private posXTween!: PropertyTransition<number>;
-    private posYTween!: PropertyTransition<number>;
-    private rotTween!: PropertyTransition<number>;
-    private zoomTween!: PropertyTransition<number>;
+    private lastFollowTile = -1;
 
     private levelData: any;
     private tileStartTimes: number[];
     private tileBPM: number[];
 
-    // Follow smoothing (matching C# scrCamera.UpdateFollowCam)
-    private smoothFrom: { x: number; y: number } = { x: 0, y: 0 };
-    private smoothTimer: number = 0;
-
     constructor(levelData: any, tileStartTimes: number[], tileBPM: number[]) {
         this.levelData = levelData;
         this.tileStartTimes = tileStartTimes;
         this.tileBPM = tileBPM;
-        this.cameraMode = this.defaultCameraMode();
-        this.resetTransitions();
+        this.resetCameraState();
     }
 
-    private defaultCameraMode(): CameraMode {
-        return {
-            relativeTo: 'Player',
-            anchorTileIndex: 0,
-            position: { x: 0, y: 0 },
-            zoom: 100,
-            rotation: 0,
-            angleOffset: 0,
-            lastEventRelativePosition: { x: 0, y: 0 },
-            lastUsedMovementType: 'Player',
-            lastTileCamFloor: -1,
-            followMode: true,
-        };
-    }
+    // ── Public accessors ───────────────────────────────────────────────────
 
-    private resetTransitions(): void {
-        this.posXTween = { active: false, startTime: 0, duration: 0, startValue: 0, endValue: 0, ease: 'Linear' };
-        this.posYTween = { active: false, startTime: 0, duration: 0, startValue: 0, endValue: 0, ease: 'Linear' };
-        this.rotTween = { active: false, startTime: 0, duration: 0, startValue: 0, endValue: 0, ease: 'Linear' };
-        this.zoomTween = { active: false, startTime: 0, duration: 0, startValue: 0, endValue: 0, ease: 'Linear' };
-    }
-
-    // ── 公开访问器 ────────────────────────────────────────────────────────
-
-    public getCameraMode(): CameraMode { return this.cameraMode; }
     public getCameraTimeline(): CameraTimelineEntry[] { return this.cameraTimeline; }
     public getLastCameraTimelineIndex(): number { return this.lastCameraTimelineIndex; }
     public setLastCameraTimelineIndex(i: number): void { this.lastCameraTimelineIndex = i; }
+    public isFollowMode(): boolean { return this.followMode; }
 
-    // ── 跳转到任意时刻 ──────────────────────────────────────────────────
-
-    public seek(time: number, pivot?: { x: number; y: number }): void {
-        this.resetCameraState();
-        const timeline = this.cameraTimeline;
-
-        for (const entry of timeline) {
-            if (entry.time > time) break;
-            this.processCameraEvent(
-                entry.event,
-                entry.event.floor || 0,
-                entry.time * 1000,
-                undefined,
-                pivot,
-            );
-        }
-
-        const interp = this.getInterpolatedValues(time * 1000);
-        this.cameraMode.position.x = interp.x;
-        this.cameraMode.position.y = interp.y;
-        this.cameraMode.rotation = interp.rotation;
-        this.cameraMode.zoom = interp.zoom;
-        this.resetTransitions();
-
-        // Sync lastCameraTimelineIndex so updateCameraFollow doesn't reprocess
-        let lo = 0, hi = timeline.length - 1, lastIdx = -1;
-        while (lo <= hi) {
-            const mid = (lo + hi) >>> 1;
-            if (timeline[mid].time <= time) {
-                lastIdx = mid;
-                lo = mid + 1;
-            } else {
-                hi = mid - 1;
-            }
-        }
-        this.lastCameraTimelineIndex = lastIdx;
-
-        // Set smoothFollow origin to the seeked position so the next playback
-        // frame doesn't jerky-Lerp from {0,0} (resetCameraState default).
-        const targetWorld = this.calculateTargetPosition(
-            pivot ?? { x: 0, y: 0 },
-            { x: this.cameraMode.position.x, y: this.cameraMode.position.y, zoom: this.cameraMode.zoom, rotation: this.cameraMode.rotation },
-        );
-        this.smoothFrom = { x: targetWorld.x, y: targetWorld.y };
-        this.smoothTimer = 10; // large enough that t >= 1 for any reasonable BPM
+    /** Camera world position (un-shaken). */
+    public getCameraPosition(): { x: number; y: number } {
+        return { x: this.camParent.x + this.pos.x, y: this.camParent.y + this.pos.y };
     }
 
-    // ── 跟随平滑（匹配 C# scrCamera.UpdateFollowCam） ─────────────────
-
-    /**
-     * 等价 C# UpdateFollowCam() — 当 planet 前进到新 tile 时调用。
-     * 记录当前相机位置为平滑起点，重置计时器。
-     */
-    public resetSmooth(currentPos: { x: number; y: number }): void {
-        this.smoothFrom = { x: currentPos.x, y: currentPos.y };
-        this.smoothTimer = 0;
+    /** ADOFAI zoom (100 = normal view). */
+    public getCameraZoom(): number {
+        return this.zoomSize * 100;
     }
 
-    /**
-     * 等价 C# scrCamera.Update 中的 Lerp 平滑逻辑。
-     * @param pivot 星球位置（对应 C# topos = furthestPlanet.position）
-     * @param bpm 当前 BPM
-     * @param delta 帧增量（秒）
-     * @returns 平滑后的相机位置 {x, y}
-     */
-    public getSmoothPosition(
-        pivot: { x: number; y: number },
-        bpm: number,
-        delta: number,
-        elapsedTime: number,
-    ): { x: number; y: number } {
-        // Use tween-interpolated offsets so smooth follow chases the moving target
-        const interp = this.getInterpolatedValues(elapsedTime);
-        const target = this.calculateTargetPosition(pivot, interp);
-
-        // C#: camspeed = crotchet * 2 = (60 / bpm) * 2 = 120 / bpm
-        const crotchet = 60 / Math.max(bpm, 1);
-        const camSpeed = crotchet * 2;
-
-        // distance-based speed boost (C#: num5 modifier)
-        const dx = target.x - this.smoothFrom.x;
-        const dy = target.y - this.smoothFrom.y;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-        let speedMult = 1;
-        if (dist > 5) {
-            speedMult = Math.min(1, (dist - 5) / (10 - 5)) * 0.5 + 1;
-        }
-
-        this.smoothTimer += delta;
-        const t = Math.min(this.smoothTimer * speedMult / camSpeed, 1);
-
-        return {
-            x: this.smoothFrom.x + (target.x - this.smoothFrom.x) * t,
-            y: this.smoothFrom.y + (target.y - this.smoothFrom.y) * t,
-        };
+    /** Set the zoom directly (editor zoom controls). */
+    public setCameraZoom(adoZoom: number): void {
+        this.zoomSize = adoZoom / 100;
+        this.zoomTween = idleTween();
     }
 
-    // ── 状态重置 ──────────────────────────────────────────────────────────
-
-    public resetCameraState(): void {
-        const s = this.levelData.settings;
-        if (s) {
-            const rt = parseMovementType(s.relativeTo) || 'Player';
-            this.cameraMode = this.defaultCameraMode();
-            this.cameraMode.relativeTo = rt;
-            this.cameraMode.position = s.position ? { x: s.position[0], y: s.position[1] } : { x: 0, y: 0 };
-            this.cameraMode.zoom = s.zoom ?? 100;
-            this.cameraMode.rotation = s.rotation ?? 0;
-            this.cameraMode.angleOffset = s.angleOffset ?? 0;
-            this.cameraMode.followMode = rt === 'Player';
-            this.cameraMode.lastUsedMovementType = rt;
-            if (rt === 'Tile') {
-                const p = getTilePosition(this.levelData, 0);
-                this.cameraMode.lastEventRelativePosition = p;
-                this.cameraMode.lastTileCamFloor = 0;
-            }
-        } else {
-            this.cameraMode = this.defaultCameraMode();
-        }
-        this.resetTransitions();
-        this.smoothFrom = { x: 0, y: 0 };
-        this.smoothTimer = 0;
+    /** Camera rotation in degrees. */
+    public getCameraRotation(): number {
+        return this.camAngle;
     }
 
-    // ── 时间线构建 ────────────────────────────────────────────────────────
+    // ── Timeline ───────────────────────────────────────────────────────────
 
-    /** Directly load a pre-sorted, repeat-expanded timeline. */
     public loadCameraTimeline(entries: CameraTimelineEntry[]): void {
         this.cameraTimeline = entries;
     }
@@ -279,369 +209,421 @@ export class CameraController {
         this.cameraTimeline = entries;
     }
 
-    // ── 公开更新入口 ──────────────────────────────────────────────────────
+    // ── State reset ────────────────────────────────────────────────────────
 
-    public update(elapsedTime: number, pivot?: { x: number; y: number }): void {
-        const timeline = this.cameraTimeline;
-        let idx = this.lastCameraTimelineIndex;
-        while (idx + 1 < timeline.length && timeline[idx + 1].time <= elapsedTime) {
-            idx++;
-            const e = timeline[idx];
-            this.processCameraEvent(e.event, e.event.floor || 0, elapsedTime * 1000, undefined, pivot);
+    public resetCameraState(): void {
+        const s = this.levelData?.settings ?? {};
+        this.legacyRelativeTo = s.legacyCamRelativeTo === true;
+        this.followMovingPlatforms = false;
+
+        this.moveXTween = idleTween();
+        this.moveYTween = idleTween();
+        this.rotationTween = idleTween();
+        this.zoomTween = idleTween();
+
+        this.camParent = { x: 0, y: 0 };
+        this.camAngle = 0;
+        this.zoomSize = 1;
+
+        this.frompos = { x: 0, y: 0 };
+        this.topos = { x: 0, y: 0 };
+        this.pos = { x: 0, y: 0 };
+        this.timer = 0;
+        this.followMode = true;
+        this.offset = { x: 0, y: 0 };
+        this.holdOffset = { x: 0, y: 0 };
+
+        this.lastEventRelativePosition = { x: 0, y: 0 };
+        this.lastUsedMovementType = 'Player';
+        this.lastTileCamFloor = -1;
+        this.lastFollowTile = -1;
+
+        this.lastCameraTimelineIndex = -1;
+
+        // The original game injects a synthetic ffxCameraPlus on floor 0 that
+        // applies the level camera settings (scnGame.cs:1084-1093).
+        const rt = parseMovementType(s.relativeTo) ?? 'Player';
+        const synthetic = {
+            eventType: 'MoveCamera',
+            duration: 0,
+            position: Array.isArray(s.position) ? s.position : [0, 0],
+            rotation: s.rotation ?? 0,
+            zoom: s.zoom ?? 100,
+            relativeTo: rt,
+            ease: 'Linear',
+            angleOffset: 0,
+            floor: 0,
+        };
+        this.startEffect(
+            synthetic,
+            0,
+            0,
+            getTilePosition(this.levelData, 0),
+            { x: 0, y: 0 },
+            this.tileBPM?.[0] || 100,
+            1,
+        );
+    }
+
+    /** Reset just rotation + zoom (used by editor "reset camera"). */
+    public resetRotationAndZoom(): void {
+        this.camAngle = 0;
+        this.zoomSize = 1;
+        this.rotationTween = idleTween();
+        this.zoomTween = idleTween();
+    }
+
+    // ── Seek ───────────────────────────────────────────────────────────────
+
+    public seek(timeSeconds: number, planetWorldPos: { x: number; y: number }, currentTileIndex: number, pitch: number = 1): void {
+        this.resetCameraState();
+
+        let idx = -1;
+        for (let i = 0; i < this.cameraTimeline.length; i++) {
+            const entry = this.cameraTimeline[i];
+            if (entry.time > timeSeconds) break;
+            idx = i;
+            const floor = entry.event.floor ?? 0;
+            this.applyTweens(entry.time);
+            // Keep the follow layer at its steady state so Player→free mode
+            // switches during the replay see the correct camera world position.
+            if (this.followMode) {
+                this.frompos = { x: planetWorldPos.x, y: planetWorldPos.y };
+                this.topos = { x: planetWorldPos.x, y: planetWorldPos.y };
+                this.pos = { x: planetWorldPos.x, y: planetWorldPos.y };
+            }
+            this.startEffect(
+                entry.event,
+                floor,
+                entry.time,
+                getTilePosition(this.levelData, floor),
+                planetWorldPos,
+                this.tileBPM?.[floor] || 100,
+                pitch,
+            );
         }
         this.lastCameraTimelineIndex = idx;
+
+
+        // Evaluate tweens at the seek time.
+        this.applyTweens(timeSeconds);
+
+        // Put the follow layer at its steady state so playback resumes cleanly.
+        if (this.followMode) {
+            this.frompos = { x: planetWorldPos.x, y: planetWorldPos.y };
+            this.topos = { x: planetWorldPos.x, y: planetWorldPos.y };
+            this.pos = { x: planetWorldPos.x, y: planetWorldPos.y };
+            this.timer = 1e9;
+        } else {
+            this.frompos = { x: 0, y: 0 };
+            this.topos = { x: 0, y: 0 };
+            this.pos = { x: 0, y: 0 };
+            this.timer = 0;
+        }
+        this.lastFollowTile = currentTileIndex;
     }
 
-    // ── 属性插值 ──────────────────────────────────────────────────────────
+    // ── Per-frame update (scrCamera.Update) ────────────────────────────────
 
-    public getInterpolatedValues(elapsedTime: number): CameraMode['position'] & { zoom: number; rotation: number } {
-        const t = elapsedTime / 1000;
-        const res = {
-            x: this.cameraMode.position.x,
-            y: this.cameraMode.position.y,
-            zoom: this.cameraMode.zoom,
-            rotation: this.cameraMode.rotation,
-        };
+    public update(params: CameraUpdateParams): void {
+        const { nowSeconds, deltaSeconds, bpm, pitch, planetWorldPos, currentTileIndex } = params;
 
-        const apply = (tr: PropertyTransition<number>, set: (v: number) => void) => {
-            if (!tr.active) return;
-            const p = Math.min(Math.max((t - tr.startTime) / tr.duration, 0), 1);
-            if (p >= 1) {
-                tr.active = false;
-                set(tr.endValue);
-                return;
+        // Rewind guard: if time went backwards, restart from settings.
+        if (this.lastCameraTimelineIndex >= 0) {
+            const cur = this.cameraTimeline[this.lastCameraTimelineIndex];
+            if (cur && nowSeconds < cur.time) {
+                this.resetCameraState();
             }
-            const ease = EasingFunctions[tr.ease] || EasingFunctions.Linear;
-            set(tr.startValue + (tr.endValue - tr.startValue) * ease(p));
-        };
+        }
 
-        apply(this.posXTween, v => res.x = v);
-        apply(this.posYTween, v => res.y = v);
-        apply(this.rotTween, v => res.rotation = v);
-        apply(this.zoomTween, v => res.zoom = v);
+        // Process all triggered camera events (ffxCameraPlus.StartEffect).
+        let idx = this.lastCameraTimelineIndex;
+        while (idx + 1 < this.cameraTimeline.length && this.cameraTimeline[idx + 1].time <= nowSeconds) {
+            idx++;
+            const entry = this.cameraTimeline[idx];
+            const floor = entry.event.floor ?? 0;
+            this.applyTweens(entry.time);
+            this.startEffect(
+                entry.event,
+                floor,
+                entry.time,
+                getTilePosition(this.levelData, floor),
+                planetWorldPos,
+                this.tileBPM?.[floor] || bpm,
+                pitch,
+            );
+        }
+        this.lastCameraTimelineIndex = idx;
 
-        return res;
+
+        // UpdateFollowCam: called on tile change only (scrCamera.UpdateFollowCam).
+        if (currentTileIndex !== this.lastFollowTile) {
+            this.lastFollowTile = currentTileIndex;
+            this.updateFollowCam(planetWorldPos);
+        }
+
+        // camspeed = 60 / (bpm * planetSpeed * pitch) * 2  (custom/editor level).
+        // tileBPM already folds in planetSpeed, so use bpm * pitch.
+        const effectiveBpm = Math.max(bpm, 1e-6);
+        const effectivePitch = Math.max(pitch, 1e-6);
+        const camspeed = (60 / (effectiveBpm * effectivePitch)) * 2;
+
+        this.timer += deltaSeconds;
+
+        // Evaluate the four tracks at the current time.
+        this.applyTweens(nowSeconds);
+
+        // Follow layer Lerp.
+        if (this.followMode) {
+            const dist = Math.hypot(this.topos.x - this.frompos.x, this.topos.y - this.frompos.y);
+            let num5 = 1;
+            if (this.followMovingPlatforms) {
+                num5 = (dist > 5 ? Math.min(1, (dist - 5) / 5) : 0) * 0.5 + 1;
+            }
+            const t = camspeed > 0 ? clamp01(this.timer / (camspeed / num5)) : 1;
+            const tx = this.topos.x + this.offset.x + this.holdOffset.x;
+            const ty = this.topos.y + this.offset.y + this.holdOffset.y;
+            this.pos.x = this.frompos.x + (tx - this.frompos.x) * t;
+            this.pos.y = this.frompos.y + (ty - this.frompos.y) * t;
+        } else {
+            this.pos.x = 0;
+            this.pos.y = 0;
+        }
     }
 
-    public calculateTargetPosition(
-        pivot: { x: number; y: number },
-        interpolated?: { x: number; y: number; zoom: number; rotation: number },
-    ): { x: number; y: number } {
-        const pos = interpolated ?? { x: this.cameraMode.position.x, y: this.cameraMode.position.y } as any;
-        const ref = this.getModeReference(this.cameraMode.relativeTo, pivot);
-        return { x: ref.x + pos.x, y: ref.y + pos.y };
-    }
+    // ── Core event processing (ffxCameraPlus.StartEffect) ──────────────────
 
-    // ── 核心事件处理（对应 ffxCameraPlus.StartEffect） ────────────────────
-    // C# 调用顺序：Decode() → StartEffect()。合并后步骤为：
-    //   1) Decode → 2) Dedup → 3) Conditional Kill → 4) NaN归零 → 5) 有效模式
-    //   6) vector2 → 7) 模式切换+finalPos → 8) 记录模式 → 9) 更新cameraMode → 10) 创建tween
-
-    public processCameraEvent(
+    private startEffect(
         event: any,
         floorIndex: number,
-        elapsedTime: number,
-        cameraSnapshot?: { position: { x: number; y: number }; zoom: number; rotation: number },
-        pivotPos?: { x: number; y: number },
+        nowSeconds: number,
+        floorPos: { x: number; y: number },
+        planetWorldPos: { x: number; y: number },
+        bpm: number,
+        pitch: number,
     ): void {
         if (!isEventActive(event)) return;
 
-        // When a camera event fires, reset smooth follow from the current camera position
-        // (matching C#: camera events tween camParent, overriding follow mode)
-        if (cameraSnapshot) {
-            this.smoothFrom = { x: cameraSnapshot.position.x, y: cameraSnapshot.position.y };
-            this.smoothTimer = 0;
-        }
-
-        // Step 1 — 解码事件属性（对应 C# Decode()）
-        const TILE_SIZE = 1.0;
-        const eventDuration = event.duration ?? 0;
-        const eventEase = event.ease || 'Linear';
+        // ── Decode ─────────────────────────────────────────────────────────
+        const effectiveBpm = Math.max(bpm, 1e-6);
+        const effectivePitch = Math.max(pitch, 1e-6);
+        const duration = (Number(event.duration) || 0) * (60 / (effectiveBpm * effectivePitch));
+        const ease = event.ease || 'Linear';
 
         const rawPos = event.position;
-        const posHasX = Array.isArray(rawPos) && rawPos[0] !== null && rawPos[0] !== undefined;
-        const posHasY = Array.isArray(rawPos) && rawPos[1] !== null && rawPos[1] !== undefined;
-        const positionUsed = Array.isArray(rawPos) && isFieldEnabled(event, 'position');
-        const targetPos = { x: posHasX ? rawPos[0] * TILE_SIZE : NaN, y: posHasY ? rawPos[1] * TILE_SIZE : NaN };
-
-        const rotationUsed = event.rotation !== undefined && event.rotation !== null && isFieldEnabled(event, 'rotation');
-        const targetRot = rotationUsed ? event.rotation : 0;
-
-        const zoomUsed = event.zoom !== undefined && event.zoom !== null && isFieldEnabled(event, 'zoom');
-        const targetZoom = zoomUsed ? event.zoom : 100;
-
-        const rawMT = event.relativeTo;
-        let movementType: CamMovementType | undefined;
-        let movementTypeUsed = false;
-        if (rawMT !== undefined && rawMT !== null && isFieldEnabled(event, 'relativeTo')) {
-            movementTypeUsed = true;
-            movementType = parseMovementType(rawMT);
-        }
-
-        const isLastPosition = movementType === 'LastPosition' || movementType === 'LastPositionNoRotation';
-        const pivot = pivotPos ?? { x: 0, y: 0 };
-
-        // Compute current world position for val2/vector2 (matching C# camParent.position)
-        const currentWorldRef = this.getModeReference(this.cameraMode.relativeTo, pivot);
-        const currentWorldPos = {
-            x: currentWorldRef.x + this.cameraMode.position.x,
-            y: currentWorldRef.y + this.cameraMode.position.y,
+        const posArr = Array.isArray(rawPos) ? rawPos : null;
+        const positionUsed = posArr !== null && isFieldEnabled(event, 'position');
+        const targetPos = {
+            x: posArr && posArr[0] !== null && posArr[0] !== undefined ? Number(posArr[0]) * TILE_SIZE : NaN,
+            y: posArr && posArr[1] !== null && posArr[1] !== undefined ? Number(posArr[1]) * TILE_SIZE : NaN,
         };
 
-        // Step 2 — 去重 movementType
+        const rotationUsed = event.rotation !== undefined && event.rotation !== null && isFieldEnabled(event, 'rotation');
+        const targetRot = rotationUsed ? Number(event.rotation) : 0;
+
+        const zoomUsed = event.zoom !== undefined && event.zoom !== null && isFieldEnabled(event, 'zoom');
+        const targetZoom = (zoomUsed ? Number(event.zoom) : 100) / 100;
+
+        let movementTypeUsed = event.relativeTo !== undefined && event.relativeTo !== null && isFieldEnabled(event, 'relativeTo');
+        const movementType = parseMovementType(event.relativeTo);
+
+        // ── Dedup relativeTo ───────────────────────────────────────────────
         if (movementTypeUsed &&
-            movementType !== CamMovementTypes.Global &&
-            !isLastPosition &&
+            movementType !== 'Global' &&
+            movementType !== 'LastPosition' &&
+            movementType !== 'LastPositionNoRotation' &&
             positionUsed &&
             (isNaN(targetPos.x) || isNaN(targetPos.y)) &&
-            movementType === this.cameraMode.lastUsedMovementType &&
-            (movementType !== CamMovementTypes.Tile || floorIndex === this.cameraMode.lastTileCamFloor)) {
+            movementType === this.lastUsedMovementType &&
+            (movementType !== 'Tile' || floorIndex === this.lastTileCamFloor)) {
             movementTypeUsed = false;
         }
 
-        // Step 3 — 条件性 Kill（对应 C# Kill(complete: true)）
+        const isLastPosition = movementType === 'LastPosition' || movementType === 'LastPositionNoRotation';
+
+        // ── Conditional Kill(complete: true) ───────────────────────────────
         if (positionUsed || movementTypeUsed) {
-            if (!isNaN(targetPos.x) || movementTypeUsed) {
-                if (this.posXTween.active) {
-                    this.cameraMode.position.x = this.posXTween.endValue;
-                }
-                this.posXTween.active = false;
-            }
-            if (!isNaN(targetPos.y) || movementTypeUsed) {
-                if (this.posYTween.active) {
-                    this.cameraMode.position.y = this.posYTween.endValue;
-                }
-                this.posYTween.active = false;
-            }
+            if (!isNaN(targetPos.x) || movementTypeUsed) this.killTween(this.moveXTween, v => { this.camParent.x = v; });
+            if (!isNaN(targetPos.y) || movementTypeUsed) this.killTween(this.moveYTween, v => { this.camParent.y = v; });
         }
         if (rotationUsed || (movementTypeUsed && isLastPosition)) {
-            if (this.rotTween.active) {
-                this.cameraMode.rotation = this.rotTween.endValue;
-            }
-            this.rotTween.active = false;
+            this.killTween(this.rotationTween, v => { this.camAngle = v; });
         }
         if (zoomUsed) {
-            if (this.zoomTween.active) {
-                this.cameraMode.zoom = this.zoomTween.endValue;
-            }
-            this.zoomTween.active = false;
+            this.killTween(this.zoomTween, v => { this.zoomSize = v; });
         }
 
-        // Step 4 — NaN 位置归零
+        // ── NaN zeroing ────────────────────────────────────────────────────
         const vector = { x: targetPos.x, y: targetPos.y };
-        if (movementTypeUsed && !isLastPosition && movementType !== CamMovementTypes.Global) {
+        if (movementTypeUsed) {
             if (isNaN(vector.x)) vector.x = 0;
             if (isNaN(vector.y)) vector.y = 0;
         }
 
-        // Step 5 — 有效参照方式
-        const camMovementType: CamMovementType = movementTypeUsed && movementType !== undefined
-            ? movementType
-            : this.cameraMode.lastUsedMovementType;
-
-        // Step 6 — vector2 (uses world position, matching C# camParent.position)
-        const vector2: { x: number; y: number } = positionUsed
+        const camMovementType: CamMovementType =
+            movementTypeUsed && movementType ? movementType : this.lastUsedMovementType;
+        const camParentBefore = { x: this.camParent.x, y: this.camParent.y };
+        const vector2 = positionUsed
             ? { x: vector.x, y: vector.y }
             : {
-                x: this.cameraMode.lastEventRelativePosition.x - currentWorldPos.x,
-                y: this.cameraMode.lastEventRelativePosition.y - currentWorldPos.y,
-              };
+                x: this.lastEventRelativePosition.x - camParentBefore.x,
+                y: this.lastEventRelativePosition.y - camParentBefore.y,
+            };
 
-        // Step 7 — 模式切换 + finalPos
-        const oldRef = this.getModeReference(this.cameraMode.relativeTo, pivot);
+        let finalPos = { x: 0, y: 0 };
+        let rotationOffset = 0;
 
-        let finalPos: { x: number; y: number } = { x: 0, y: 0 };
-
-        switch (camMovementType) {
-            case 'Player': {
-                if (!this.cameraMode.followMode) {
-                    const worldPos = {
-                        x: oldRef.x + this.cameraMode.position.x,
-                        y: oldRef.y + this.cameraMode.position.y,
-                    };
-                    this.cameraMode.position.x = worldPos.x - pivot.x;
-                    this.cameraMode.position.y = worldPos.y - pivot.y;
-                    this.cameraMode.followMode = true;
+        if (this.legacyRelativeTo && !movementTypeUsed) {
+            finalPos = positionUsed
+                ? { x: vector.x + camParentBefore.x, y: vector.y + camParentBefore.y }
+                : { x: camParentBefore.x, y: camParentBefore.y };
+        } else {
+            switch (camMovementType) {
+                case 'Player': {
+                    if (!this.followMode) {
+                        // C#: camParent.position = cam.transform.position - planet;
+                        //     cam.transform.MoveXY(camParent.position_before);
+                        //     followMode = true; UpdateFollowCam(force: true)
+                        const position = { x: this.camParent.x, y: this.camParent.y };
+                        this.camParent.x = position.x - planetWorldPos.x;
+                        this.camParent.y = position.y - planetWorldPos.y;
+                        this.pos = { x: planetWorldPos.x, y: planetWorldPos.y };
+                        this.followMode = true;
+                        this.frompos = { x: this.pos.x, y: this.pos.y };
+                        this.topos = { x: planetWorldPos.x, y: planetWorldPos.y };
+                        this.timer = 0;
+                    }
+                    finalPos = { x: vector2.x, y: vector2.y };
+                    break;
                 }
-                finalPos = positionUsed
-                    ? { x: vector2.x, y: vector2.y }
-                    : { x: this.cameraMode.position.x, y: this.cameraMode.position.y };
-                break;
-            }
-            case 'Tile': {
-                if (this.cameraMode.followMode) {
-                    const worldPos = {
-                        x: oldRef.x + this.cameraMode.position.x,
-                        y: oldRef.y + this.cameraMode.position.y,
-                    };
-                    const fp = getTilePosition(this.levelData, floorIndex);
-                    this.cameraMode.position.x = worldPos.x - fp.x;
-                    this.cameraMode.position.y = worldPos.y - fp.y;
-                    this.cameraMode.followMode = false;
+                case 'Tile': {
+                    if (this.followMode) {
+                        // C#: camParent.position = cam.transform.position; SetToFreeMode()
+                        const camWorld = this.cameraWorldPos();
+                        this.camParent.x = camWorld.x;
+                        this.camParent.y = camWorld.y;
+                        this.setToFreeMode();
+                    }
+                    this.lastEventRelativePosition = { x: floorPos.x, y: floorPos.y };
+                    this.lastTileCamFloor = floorIndex;
+                    finalPos = { x: vector2.x + floorPos.x, y: vector2.y + floorPos.y };
+                    break;
                 }
-                const floorPos = getTilePosition(this.levelData, floorIndex);
-                this.cameraMode.lastEventRelativePosition = { x: floorPos.x, y: floorPos.y };
-                this.cameraMode.lastTileCamFloor = floorIndex;
-                // Always use vector2 (matching C#: finalPos = val2 + floorPos, relative = finalPos - floorPos = val2)
-                finalPos = { x: vector2.x, y: vector2.y };
-                break;
-            }
-            case 'Global': {
-                if (this.cameraMode.followMode) {
-                    const worldPos = {
-                        x: oldRef.x + this.cameraMode.position.x,
-                        y: oldRef.y + this.cameraMode.position.y,
-                    };
-                    const origin = this.getGlobalOrigin();
-                    this.cameraMode.position.x = worldPos.x - origin.x;
-                    this.cameraMode.position.y = worldPos.y - origin.y;
-                    this.cameraMode.followMode = false;
+                case 'Global': {
+                    if (this.followMode) {
+                        const camWorld = this.cameraWorldPos();
+                        this.camParent.x = camWorld.x;
+                        this.camParent.y = camWorld.y;
+                        this.setToFreeMode();
+                    }
+                    this.lastEventRelativePosition = { x: 0, y: 0 };
+                    finalPos = { x: vector2.x, y: vector2.y };
+                    break;
                 }
-                this.cameraMode.lastEventRelativePosition = { x: 0, y: 0 };
-                // Matching C#: finalPos = val2
-                finalPos = { x: vector2.x, y: vector2.y };
-                break;
-            }
-            case 'LastPosition':
-            case 'LastPositionNoRotation': {
-                if (positionUsed) {
-                    finalPos = {
-                        x: (isNaN(targetPos.x) ? this.cameraMode.position.x : this.cameraMode.position.x + targetPos.x),
-                        y: (isNaN(targetPos.y) ? this.cameraMode.position.y : this.cameraMode.position.y + targetPos.y),
-                    };
-                } else {
-                    finalPos = { x: this.cameraMode.position.x, y: this.cameraMode.position.y };
+                case 'LastPosition':
+                case 'LastPositionNoRotation': {
+                    const vector4 = { x: this.camParent.x, y: this.camParent.y };
+                    if (camMovementType === 'LastPosition') rotationOffset = this.camAngle;
+                    finalPos = positionUsed
+                        ? { x: vector.x + vector4.x, y: vector.y + vector4.y }
+                        : { x: vector4.x, y: vector4.y };
+                    break;
                 }
-                break;
             }
         }
 
-        // Step 8 — 记录 lastUsedMovementType
-        if (movementTypeUsed && movementType !== undefined) {
-            this.cameraMode.lastUsedMovementType = movementType;
-            if (movementType !== 'LastPosition' && movementType !== 'LastPositionNoRotation') {
-                this.cameraMode.relativeTo = movementType;
-                this.cameraMode.anchorTileIndex = movementType === 'Tile' ? floorIndex : 0;
-            }
+        if (movementTypeUsed && movementType) {
+            this.lastUsedMovementType = movementType;
         }
 
-        // Step 9 — 更新 cameraMode（pre 值在修改前保存，用于 tween 起始值）
-        const prePosX = this.cameraMode.position.x;
-        const prePosY = this.cameraMode.position.y;
-        const preRotation = this.cameraMode.rotation;
-        const preZoom = this.cameraMode.zoom;
-
-        if (positionUsed) {
-            if (!movementTypeUsed || (!isLastPosition && movementType !== 'LastPosition')) {
-                if (!isNaN(targetPos.x)) this.cameraMode.position.x = targetPos.x;
-                if (!isNaN(targetPos.y)) this.cameraMode.position.y = targetPos.y;
-            } else if (isLastPosition) {
-                if (!isNaN(targetPos.x)) this.cameraMode.position.x = (this.cameraMode.position.x || 0) + targetPos.x;
-                if (!isNaN(targetPos.y)) this.cameraMode.position.y = (this.cameraMode.position.y || 0) + targetPos.y;
-            }
-        } else if (movementTypeUsed) {
-            this.cameraMode.position.x = finalPos.x;
-            this.cameraMode.position.y = finalPos.y;
-        }
-
-        if (rotationUsed) {
-            let rotOffset = 0;
-            if (camMovementType === 'LastPosition') {
-                rotOffset = cameraSnapshot?.rotation ?? this.cameraMode.rotation;
-            }
-            this.cameraMode.rotation = targetRot + rotOffset;
-        }
-
-        if (zoomUsed) {
-            this.cameraMode.zoom = targetZoom;
-        }
-
-        if (event.angleOffset !== undefined && event.angleOffset !== null) {
-            this.cameraMode.angleOffset = event.angleOffset;
-        }
-
-        // Step 10 — 创建新 tween
-        const floorBPM = this.tileBPM?.[floorIndex] || 100;
-        let dur = eventDuration;
-        if (floorBPM > 20000) {
-            const isPlayer = !movementTypeUsed || movementType === 'Player';
-            if (isPlayer) dur = 0;
-        }
-        const durationSeconds = dur * (60 / floorBPM);
-        const now = elapsedTime / 1000;
-
+        // ── Create the four independent tweens ─────────────────────────────
         if (positionUsed || movementTypeUsed) {
-            if (durationSeconds > 0 && !isNaN(finalPos.x)) {
-                this.posXTween = {
-                    active: true, startTime: now, duration: durationSeconds,
-                    startValue: prePosX,
-                    endValue: finalPos.x,
-                    ease: eventEase,
-                };
-            } else {
-                this.posXTween.active = false;
+            if (!isNaN(finalPos.x)) {
+                this.startTween(this.moveXTween, this.camParent.x, finalPos.x, duration, ease, nowSeconds, v => { this.camParent.x = v; });
             }
-
-            if (durationSeconds > 0 && !isNaN(finalPos.y)) {
-                this.posYTween = {
-                    active: true, startTime: now, duration: durationSeconds,
-                    startValue: prePosY,
-                    endValue: finalPos.y,
-                    ease: eventEase,
-                };
-            } else {
-                this.posYTween.active = false;
+            if (!isNaN(finalPos.y)) {
+                this.startTween(this.moveYTween, this.camParent.y, finalPos.y, duration, ease, nowSeconds, v => { this.camParent.y = v; });
             }
         }
-
         if (rotationUsed || (movementTypeUsed && isLastPosition)) {
-            if (durationSeconds > 0) {
-                this.rotTween = {
-                    active: true, startTime: now, duration: durationSeconds,
-                    startValue: preRotation,
-                    endValue: this.cameraMode.rotation,
-                    ease: eventEase,
-                };
-            } else {
-                this.rotTween.active = false;
-            }
+            this.startTween(this.rotationTween, this.camAngle, targetRot + rotationOffset, duration, ease, nowSeconds, v => { this.camAngle = v; });
         }
-
         if (zoomUsed) {
-            if (durationSeconds > 0) {
-                this.zoomTween = {
-                    active: true, startTime: now, duration: durationSeconds,
-                    startValue: preZoom,
-                    endValue: this.cameraMode.zoom,
-                    ease: eventEase,
-                };
-            } else {
-                this.zoomTween.active = false;
-            }
+            this.startTween(this.zoomTween, this.zoomSize, targetZoom, duration, ease, nowSeconds, v => { this.zoomSize = v; });
         }
     }
 
-    // ── 内部工具 ──────────────────────────────────────────────────────────
+    // ── Tween helpers ──────────────────────────────────────────────────────
 
-    private getGlobalOrigin(): { x: number; y: number } {
-        const t0 = this.levelData.tiles?.[0];
-        return t0?.position ? { x: t0.position[0], y: t0.position[1] } : { x: 0, y: 0 };
+    private killTween(tw: TweenState, setValue: (v: number) => void): void {
+        if (tw.active) {
+            setValue(tw.to);
+            tw.active = false;
+        }
     }
 
-    private getModeReference(
-        mode: CamMovementType,
-        pivot: { x: number; y: number },
-        tileIndex?: number,
-    ): { x: number; y: number } {
-        switch (mode) {
-            case 'Player':
-                return { x: pivot.x, y: pivot.y };
-            case 'Tile':
-                return getTilePosition(this.levelData, tileIndex ?? this.cameraMode.anchorTileIndex);
-            case 'Global':
-                return this.getGlobalOrigin();
-            default:
-                return { x: pivot.x, y: pivot.y };
+    private startTween(
+        tw: TweenState,
+        from: number,
+        to: number,
+        duration: number,
+        ease: string,
+        now: number,
+        setValue: (v: number) => void,
+    ): void {
+        tw.from = from;
+        tw.to = to;
+        tw.ease = ease;
+        if (duration > 0) {
+            tw.active = true;
+            tw.startTime = now;
+            tw.duration = duration;
+        } else {
+            tw.active = false;
+            tw.startTime = now;
+            tw.duration = 0;
+            setValue(to);
+        }
+    }
+
+    private applyTweens(now: number): void {
+        if (this.moveXTween.active) {
+            this.camParent.x = evalTween(this.moveXTween, now);
+            if (now >= this.moveXTween.startTime + this.moveXTween.duration) this.moveXTween.active = false;
+        }
+        if (this.moveYTween.active) {
+            this.camParent.y = evalTween(this.moveYTween, now);
+            if (now >= this.moveYTween.startTime + this.moveYTween.duration) this.moveYTween.active = false;
+        }
+        if (this.rotationTween.active) {
+            this.camAngle = evalTween(this.rotationTween, now);
+            if (now >= this.rotationTween.startTime + this.rotationTween.duration) this.rotationTween.active = false;
+        }
+        if (this.zoomTween.active) {
+            this.zoomSize = evalTween(this.zoomTween, now);
+            if (now >= this.zoomTween.startTime + this.zoomTween.duration) this.zoomTween.active = false;
+        }
+    }
+
+    // ── Follow helpers ─────────────────────────────────────────────────────
+
+    private cameraWorldPos(): { x: number; y: number } {
+        return { x: this.camParent.x + this.pos.x, y: this.camParent.y + this.pos.y };
+    }
+
+    private setToFreeMode(): void {
+        this.frompos = { x: 0, y: 0 };
+        this.topos = { x: 0, y: 0 };
+        this.pos = { x: 0, y: 0 };
+        this.followMode = false;
+    }
+
+    private updateFollowCam(planetWorldPos: { x: number; y: number }): void {
+        if (this.followMode) {
+            // C#: frompos = camera.localPosition - shake; topos = planet.world; timer = 0
+            this.frompos = { x: this.pos.x, y: this.pos.y };
+            this.topos = { x: planetWorldPos.x, y: planetWorldPos.y };
+            this.timer = 0;
         }
     }
 }

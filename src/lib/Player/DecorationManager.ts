@@ -4,6 +4,7 @@ import createTrackMesh from '../Geo/mesh_reserve';
 import { isEventActive, isEnabled } from './EventUtils';
 import { getIconTexture, getIconTextureForCustomFloor, createIconSprite } from './IconLoader';
 import { debugLog } from './DebugLog';
+import { probeLog, probeFlush } from './DecorationProbeLogger';
 import { DecorationInstancedRenderer, DecoInstanceSlot } from './DecorationInstancedRenderer';
 import { ParticleDecorationSystem } from './ParticleDecoration';
 import type { ParticleConfig } from './ParticleDecoration';
@@ -262,6 +263,10 @@ const defaultDecorationConfig: DecorationConfig = {
     imageSmoothing: false,
 };
 
+// Throttled rendered-position probe (only for debugging specific tags).
+const POS_PROBE_TAGS = new Set<string>(['polygon', 'polygon_oval', 'polygon_emerald', 'polygon2ph', 'bubbles', 'particles_lv1']);
+const posProbeLast = new Map<string, number>();
+
 class DecorationInstance {
     public config: DecorationConfig;
     public container: Group;
@@ -362,6 +367,14 @@ class DecorationInstance {
             && c.parallaxOffset[0] === 0 && c.parallaxOffset[1] === 0
             && !c.lockRotation && !c.lockScale
             && !c.stickToFloor;
+
+        probeLog(`SETUP|type=${c.decorationType}|floor=${c.floor}|tag=${c.tag}|relativeTo=${c.relativeTo}` +
+            `|pos=(${c.position[0]},${c.position[1]})|scale=(${c.scale[0]},${c.scale[1]})|rot=${c.rotation}` +
+            `|opacity=${c.opacity}|color=${c.color}|depth=${c.depth}|lockScale=${c.lockScale}|scaleMul=${c.scaleMultiplier}` +
+            `|objType=${c.objectType ?? ''}|image=${c.decorationImage ?? ''}` +
+            `|pivotOffset=(${c.pivotOffset[0]},${c.pivotOffset[1]})` +
+            `|parallax=(${c.parallax[0]},${c.parallax[1]})` +
+            `|parallaxOffset=(${c.parallaxOffset[0]},${c.parallaxOffset[1]})`);
     }
 
     public setupVisual(texture: Texture | null): void {
@@ -405,6 +418,8 @@ class DecorationInstance {
                 const mat = new SpriteMaterial({
                     map: texture, color: 0xffffff, transparent: true, opacity: this.currentOpacity,
                     blending: blend as Blending, depthWrite: false,
+                    // Silence THREE's MultiplyBlending premultipliedAlpha warning.
+                    premultipliedAlpha: blend === MultiplyBlending,
                 });
                 if (this.config.blendMode === DecorationBlendMode.Subtract) mat.blendEquation = ReverseSubtractEquation;
                 const target = this.config.maskingTarget || this.config.tag || this.config.id || '';
@@ -543,6 +558,26 @@ class DecorationInstance {
         }
     }
 
+    /** Throttled rendered-position probe (debug aid for specific tags). */
+    private probeRenderedPosition(posX: number, posY: number, totalScaleMul: number): void {
+        if (!this.config.tag || !POS_PROBE_TAGS.has(this.config.tag)) return;
+        const key = `${this.config.tag}|${this.config.id}`;
+        const nowMs = performance.now();
+        const last = posProbeLast.get(key) ?? 0;
+        if (nowMs - last <= 500) return;
+        posProbeLast.set(key, nowMs);
+        probeLog(`POS|tag=${this.config.tag}|id=${this.config.id}|floor=${this.config.floor}` +
+            `|anchor=(${this.startPos.x.toFixed(4)},${this.startPos.y.toFixed(4)})` +
+            `|cur=(${this.currentPosition.x.toFixed(4)},${this.currentPosition.y.toFixed(4)})` +
+            `|pos=(${posX.toFixed(4)},${posY.toFixed(4)})` +
+            `|scaleVec=(${this.currentScale.x.toFixed(4)},${this.currentScale.y.toFixed(4)})` +
+            `|baseSize=(${this.baseSizeX.toFixed(4)},${this.baseSizeY.toFixed(4)})` +
+            `|totalScaleMul=${totalScaleMul.toFixed(4)}` +
+            `|containerScale=(${this.container.scale.x.toFixed(4)},${this.container.scale.y.toFixed(4)})` +
+            `|rot=${this.currentRotation.toFixed(2)}|visible=${this.container.visible}` +
+            `|instanced=${!!this.instSlot}|static=${this._isStaticWorld}`);
+    }
+
     public updatePosition(camPos: Vector3, camRot: number, camZoom: number, tilePositions?: Map<number, { x: number; y: number; z: number; rotation: number }>, adoZoom?: number, runtime?: DecorationRuntimeContext): void {
         if (this._isStaticWorld) {
             // Parallax=0 → world-fixed: no camera displacement
@@ -560,6 +595,7 @@ class DecorationInstance {
             this._scaleMul = camScaleMul * floorScaleMul;
             this.container.scale.set(this.currentScale.x * this._scaleMul, this.currentScale.y * this._scaleMul, 1);
             if (this.instSlot) this.syncInstance();
+            this.probeRenderedPosition(this.currentPosition.x, this.currentPosition.y, this._scaleMul);
             return;
         }
         // Official camera model (scrCamera.UpdateSize):
@@ -654,6 +690,20 @@ class DecorationInstance {
         this.container.position.y = posY;
         this.container.scale.set(this.currentScale.x * totalScaleMul, this.currentScale.y * totalScaleMul, 1);
         if (this.instSlot) this.syncInstance();
+        this.probeRenderedPosition(posX, posY, totalScaleMul);
+
+        // Probe log: planet object decoration per-frame state
+        if (this.config.decorationType === DecorationType.Object && this.config.objectType === 'Planet') {
+            const childScale = this.visualGroup.children[0]?.scale;
+            probeLog(`POS|${this.container.name}` +
+                `|pos=(${posX.toFixed(4)},${posY.toFixed(4)})` +
+                `|scaleVec=(${this.currentScale.x.toFixed(4)},${this.currentScale.y.toFixed(4)})` +
+                `|totalScaleMul=${totalScaleMul.toFixed(4)}` +
+                `|containerScale=(${this.container.scale.x.toFixed(4)},${this.container.scale.y.toFixed(4)})` +
+                `|childScale=(${childScale?.x?.toFixed(4) ?? '?'},${childScale?.y?.toFixed(4) ?? '?'})` +
+                `|opacity=${this.currentOpacity.toFixed(3)}` +
+                `|rot=${(this.currentRotation).toFixed(2)}`);
+        }
     }
 
     public setCulledVisible(vis: boolean): void {
@@ -899,6 +949,8 @@ export class DecorationManager {
     // 误剔除。该值随观察到的最大半宽/半高增长（美术图常达数千单位）。
     private _staticQueryPad = 8;
     private _tilePositions: Map<number, { x: number; y: number; z: number; rotation: number }> = new Map();
+    // Floors referenced by stickToFloor decorations this frame (avoids sampling all tiles)
+    private _stickFloors: Set<number> = new Set();
     private _visibleStaticSet: Set<DecorationInstance> = new Set();
     // base z → rank counter, rebuilt each frame for same-depth tie-breaking
     private _rankCounters: Map<number, number> = new Map();
@@ -1152,6 +1204,28 @@ export class DecorationManager {
                 if (event.maskingTarget !== undefined && !event.disabled?.maskingTarget) {
                     tm.addDiscreteKeyframe(kv, 'maskingTarget', eventTime, String(event.maskingTarget));
                 }
+
+                // Probe log: MoveDecoration event
+                const tagStr = String(event.tag ?? '');
+                probeLog(`MOVE|floor=${floor}|tags=${tagStr}|time=${eventTime.toFixed(4)}|dur=${duration.toFixed(4)}|ease=${ease}` +
+                    `|relativeTo=${movementType}|isLastPos=${isLastPos}`);
+                if (event.positionOffset !== undefined && !event.disabled?.positionOffset) {
+                    const p = this.parseVec2(event.positionOffset, [0, 0]);
+                    probeLog(`  TARGET|pos=(${p[0]},${p[1]})|posWorld=(${(p[0] * ts).toFixed(4)},${(p[1] * ts).toFixed(4)})`);
+                }
+                if (event.scale !== undefined && !event.disabled?.scale) {
+                    const s = this.parseVec2(event.scale, [100, 100]);
+                    probeLog(`  TARGET|scale=(${s[0]},${s[1]})|scaleNorm=(${(s[0] / 100).toFixed(4)},${(s[1] / 100).toFixed(4)})`);
+                }
+                if (event.rotationOffset !== undefined && !event.disabled?.rotationOffset) {
+                    probeLog(`  TARGET|rot=${event.rotationOffset}`);
+                }
+                if (event.opacity !== undefined && !event.disabled?.opacity) {
+                    probeLog(`  TARGET|opacity=${(event.opacity / 100).toFixed(3)}`);
+                }
+                if (event.color !== undefined && !event.disabled?.color) {
+                    probeLog(`  TARGET|color=${event.color}`);
+                }
             }
         }
     }
@@ -1189,6 +1263,17 @@ export class DecorationManager {
         const ts = this.tileSize;
         const isCam = relativeTo === DecPlacementType.Camera || relativeTo === DecPlacementType.CameraAspect;
 
+        // ADOFAI LevelEvent.FixDefaultValues: AddDecoration/AddText without an
+        // explicit `parallax` inherit it from `depth` (with ±1 collapsed to 0).
+        const getsDepthParallax = event.eventType === 'AddDecoration' || event.eventType === 'AddText';
+        const rawDepth = Number(event.depth ?? 0);
+        const derivedParallax = (rawDepth === 1 || rawDepth === -1) ? 0 : rawDepth;
+        const decoParallax: [number, number] = (event.parallax !== undefined && event.parallax !== null)
+            ? this.parseVec2(event.parallax, [100, 100])
+            : (getsDepthParallax ? [derivedParallax, derivedParallax] : [100, 100]);
+        // Official zeroes parallaxOffset when parallax is zero (scrDecoration.Setup).
+        const parallaxZero = decoParallax[0] === 0 && decoParallax[1] === 0;
+
         const floor = event.floor !== undefined ? event.floor
             : event.parentFloorNum !== undefined ? event.parentFloorNum
                 : 0;
@@ -1209,8 +1294,8 @@ export class DecorationManager {
             rotation: event.rotation || 0,
             rotationOffset: event.rotationOffset || 0,
             scale: this.parseVec2(event.scale, [100, 100]),
-            parallax: this.parseVec2(event.parallax, [100, 100]),
-            parallaxOffset: [rawParallaxOffset[0] * ts, rawParallaxOffset[1] * ts],
+            parallax: decoParallax,
+            parallaxOffset: parallaxZero ? [0, 0] : [rawParallaxOffset[0] * ts, rawParallaxOffset[1] * ts],
             pivotOffset: [rawPivotOffset[0] * (isCam ? 1 : ts), rawPivotOffset[1] * (isCam ? 1 : ts)],
             depth: event.depth || 0,
             color: (() => {
@@ -1226,11 +1311,11 @@ export class DecorationManager {
                 return 'ffffff';
             })(),
             opacity: event.opacity !== undefined ? event.opacity : 100,
-            lockScale: event.lockScale === true,
-            lockRotation: event.lockRotation === true,
+            lockScale: isEnabled(event.lockScale),
+            lockRotation: isEnabled(event.lockRotation),
             visible: parseEventVisible(event.visible),
             scaleMultiplier: event.scaleMultiplier !== undefined ? event.scaleMultiplier : 1,
-            stickToFloor: event.stickToFloor === true,
+            stickToFloor: isEnabled(event.stickToFloor),
             floor,
             objectType: event.objectType,
             planetColorType: event.planetColorType,
@@ -1244,7 +1329,7 @@ export class DecorationManager {
             blendMode: event.blendMode || DecorationBlendMode.None,
             maskingType: event.maskingType || MaskingType.None,
             maskingTarget: event.maskingTarget || '',
-            imageSmoothing: event.imageSmoothing === true,
+            imageSmoothing: isEnabled(event.imageSmoothing),
         };
 
         const deco = new DecorationInstance(config);
@@ -1254,6 +1339,16 @@ export class DecorationManager {
         deco.startPos.copy(this.computeStartPos(initialPosition, relativeTo, floor));
         deco.pivotPos.copy(deco.startPos);
         deco.currentPosition.copy(deco.startPos);
+
+        // Probe: raw → world anchor so we can diff against ADOFAI/reference.
+        {
+            const tilePos = this.levelData?.tiles?.[floor]?.position;
+            probeLog(`ANCHOR|tag=${config.tag}|floor=${floor}|relativeTo=${relativeTo}` +
+                `|rawPos=(${rawPos[0]},${rawPos[1]})|initial=(${initialPosition[0]},${initialPosition[1]})` +
+                `|tilePos=(${tilePos ? tilePos[0] : '?'},${tilePos ? tilePos[1] : '?'})` +
+                `|startPos=(${deco.startPos.x.toFixed(4)},${deco.startPos.y.toFixed(4)})` +
+                `|pivotOffset=(${config.pivotOffset?.[0]},${config.pivotOffset?.[1]})|depth=${config.depth}`);
+        }
 
         if (decoType === DecorationType.Text) {
             if (!this.setupTextVisual(deco, event)) { deco.dispose(); return null; }
@@ -1306,13 +1401,13 @@ export class DecorationManager {
         if (objType === 'Planet') {
             const [pColor, pAlpha] = parseDecoColor(event.planetColor, 'ffffff');
             const mat = new MeshBasicMaterial({ color: new Color(pColor), transparent: true, opacity: pAlpha });
-            const sphere = new Mesh(new CircleGeometry(0.4, 32), mat);
+            const sphere = new Mesh(new CircleGeometry(0.25, 32), mat);
             sphere.name = 'planetBody';
             g.add(sphere);
             if (event.planetTailColor) {
                 const [tColor, tAlpha] = parseDecoColor(event.planetTailColor, 'ffffff');
                 const tailMat = new MeshBasicMaterial({ color: new Color(tColor), transparent: true, opacity: tAlpha * 0.5 });
-                const tail = new Mesh(new RingGeometry(0.35, 0.5, 32), tailMat);
+                const tail = new Mesh(new RingGeometry(0.22, 0.32, 32), tailMat);
                 tail.name = 'planetTail';
                 g.add(tail);
             }
@@ -1453,7 +1548,7 @@ export class DecorationManager {
             rotationOverTime: this.parseVec2(event.rotationOverTime, [0, 0]),
             randomTextureTiling: this.parseVec2(event.randomTextureTiling, [1, 1]),
             maxParticles: event.maxParticles ?? 100,
-            loop: event.loop === true,
+            loop: isEnabled(event.loop),
             playDuration: event.playDuration ?? 5,
             simulationSpeed: event.simulationSpeed ?? 100,
             randomSeed: event.randomSeed ?? 0,
@@ -1746,6 +1841,7 @@ export class DecorationManager {
         // Same-depth tie-break ranks: rebuilt every frame in creation order so
         // equal-depth overlaps resolve deterministically (later creation on top).
         this._rankCounters.clear();
+        this._stickFloors.clear();
         for (let i = 0; i < len; i++) {
             const d = list[i];
             if (this._timelineManager && (d.config.tag || this._timelineManager.hasAnyTimeline(`deco:${d.config.id}`))) {
@@ -1753,10 +1849,9 @@ export class DecorationManager {
                 animCount++;
             }
             d.updateZRank(this._rankCounters);
-            if (d.config.stickToFloor || d.config.relativeTo === DecPlacementType.RedPlanet
-                || d.config.relativeTo === DecPlacementType.BluePlanet
-                || d.config.relativeTo === DecPlacementType.GreenPlanet) {
+            if (d.config.stickToFloor) {
                 needsTilePositions = true;
+                this._stickFloors.add(d.config.floor ?? -1);
             }
         }
         // Build current tile positions for stickToFloor/followPlanet decorations
@@ -1770,12 +1865,14 @@ export class DecorationManager {
         const tilePositions = needsTilePositions && timelineManager ? this._tilePositions : undefined;
         if (tilePositions) {
             this._tilePositions.clear();
-            for (const [idx, pos] of timelineManager!.sampleAllPosition(now)) {
-                const sx = timelineManager!.sample(`tile:${idx}`, 'scaleX', now);
-                const sy = timelineManager!.sample(`tile:${idx}`, 'scaleY', now);
+            for (const floor of this._stickFloors) {
+                const pos = timelineManager!.samplePosition(`tile:${floor}`, now);
+                if (!pos) continue;
+                const sx = timelineManager!.sample(`tile:${floor}`, 'scaleX', now);
+                const sy = timelineManager!.sample(`tile:${floor}`, 'scaleY', now);
                 const scale = sx !== undefined ? ((sx + (sy ?? sx)) / 2) : 1;
-                const rot = needsStickRotation ? (timelineManager!.sample(`tile:${idx}`, 'rotation', now) ?? 0) : 0;
-                this._tilePositions.set(idx, { x: pos.x, y: pos.y, z: scale, rotation: rot });
+                const rot = needsStickRotation ? (timelineManager!.sample(`tile:${floor}`, 'rotation', now) ?? 0) : 0;
+                this._tilePositions.set(floor, { x: pos.x, y: pos.y, z: scale, rotation: rot });
             }
         }
         if (!camMoved && animCount === 0 && !tilePositions) {
