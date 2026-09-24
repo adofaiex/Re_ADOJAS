@@ -253,7 +253,12 @@ export class TimelineManager {
             let start = Infinity, end = -Infinity;
             for (const kfs of props.values()) {
                 if (kfs.length > 0) {
-                    if (kfs[0].time < start) start = kfs[0].time;
+                    // time 0 的 base 关键帧只是初值（buildTileMoveTrack 写入），
+                    // 不能当作动画窗口起点——否则全局 appear 动画会让每块
+                    // "还没到的砖"在 [0, entry] 内一直算作 active（O(n) 每帧）。
+                    let s = kfs[0].time;
+                    if (s <= 0 && kfs.length > 1 && kfs[1].time > 0) s = kfs[1].time;
+                    if (s < start) start = s;
                     if (kfs[kfs.length - 1].time > end) end = kfs[kfs.length - 1].time;
                 }
             }
