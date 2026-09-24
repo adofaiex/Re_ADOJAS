@@ -87,6 +87,8 @@ export class Player implements IPlayer {
   // Dirty tile tracking: only tiles in this set get their instanced mesh synced.
   // Most tiles are static each frame — this avoids iterating all visible tiles.
   private dirtyTiles: Set<number> = new Set();
+  /** 被 MoveTrack/PositionTrack 移动过的砖块（原始位置可能不在视野内，需按当前位置单独判定可见性） */
+  private _movedTiles: Set<number> = new Set();
 
   // Spatial indexing for fast visibility checks
   private spatialGrid: Map<number, number[]> = new Map();
@@ -191,6 +193,13 @@ export class Player implements IPlayer {
   private tileStartDist: number[] = [];
   private tileEndDist: number[] = [];
   private tileAuto: boolean[] = [];
+  // SetPlanetRotation（星球缓速）：逐砖继承的 ease/easeParts/easePartBehavior
+  private tilePlanetEase: string[] = [];
+  private tilePlanetEaseParts: number[] = [];
+  private tilePlanetEaseBehavior: string[] = [];
+  // Pause 事件的“角度校准”（隐性缓速）：回正偏移（弧度）与回正时长（秒）
+  private tilePauseOffset: number[] = [];
+  private tilePauseTweenDuration: number[] = [];
   private tileEvents: Map<number, any[]> = new Map();
   private tileCameraEvents: Map<number, any[]> = new Map();
   private tileSetHitsoundEvents: Map<number, any[]> = new Map();
@@ -232,6 +241,8 @@ export class Player implements IPlayer {
   
   // Decoration Manager
   private decorationManager: DecorationManager | null = null;
+  /** 装饰物是否已完成创建与时间轴构建（延迟加载时为 false） */
+  private _decorationsBuilt = false;
 
   // MoveTrack Manager
   private moveTrackManager: MoveTrackManager | null = null;
@@ -258,6 +269,8 @@ export class Player implements IPlayer {
   private customBGMesh: Mesh | null = null;
   private customBGTexture: Texture | null = null;
   private customBGImages: Map<string, string> = new Map(); // filename -> URL
+  /** 最近一次 CustomBackground 事件（图片后到/手动载入时重放用） */
+  private _lastCustomBGEvent: any = null;
   
   // Shared Renderer Resources
   private geometryCache: Map<string, BufferGeometry> = new Map();
@@ -279,7 +292,7 @@ export class Player implements IPlayer {
 
   private music: IMusic = new HTMLAudioMusic();
 
-  constructor(levelData: Level, rendererType: 'webgl' | 'webgpu' = 'webgpu') {
+  constructor(levelData: Level, rendererType: 'webgl' | 'webgpu' = 'webgpu', opts?: { deferDecorations?: boolean }) {
     this.rendererType = rendererType;
     this.levelData = levelData;
 
@@ -341,6 +354,11 @@ export class Player implements IPlayer {
         }
       });
     }
+
+    // SetPlanetRotation：解析逐砖继承的星球旋转缓速（ease/easeParts/easePartBehavior）
+    this.buildTilePlanetEase();
+    // Pause：解析逐砖的角度校准回正（隐性星球缓速）
+    this.buildPauseTweens();
 
     // Initialize HitsoundManager
     // Default type is used as fallback when no per-tile override exists
@@ -458,11 +476,17 @@ export class Player implements IPlayer {
       this.tileStartTimes,
       this.tileBPM
     );
-    this.decorationManager.init();
-
-    // Build decoration keyframes into TimelineManager for unified seeking
-    this.decorationManager.buildTimelineKeyframes(this.timelineManager);
-    (this.decorationManager as any)._timelineManager = this.timelineManager;
+    if (opts?.deferDecorations) {
+      // 装饰物分帧/异步创建（加载界面显示进度）——见 buildDecorationsAsync()
+      this.decorationManager.collectDecoSources();
+      this._decorationsBuilt = false;
+    } else {
+      this.decorationManager.init();
+      // Build decoration keyframes into TimelineManager for unified seeking
+      this.decorationManager.buildTimelineKeyframes(this.timelineManager);
+      (this.decorationManager as any)._timelineManager = this.timelineManager;
+      this._decorationsBuilt = true;
+    }
 
     // Initialize MoveTrack Manager with TimelineManager
     this.moveTrackManager = new MoveTrackManager(this.timelineManager);
@@ -476,6 +500,10 @@ export class Player implements IPlayer {
     // 否则 MoveTrack 每帧覆盖 iOpacity 时会吞掉轨道颜色透明度。
     this.moveTrackManager.tileTransformChanged = (tileIndex, position, rotation, scale, opacity) => {
       const mesh = this.tiles.get(tileIndex.toString());
+      // 砖块被移动到新位置：同步逻辑 mesh 位置，并登记为"移动过"，使其能按新位置重新判定可见性
+      if (mesh) mesh.position.copy(position);
+      this._movedTiles.add(tileIndex);
+      this.lastVisibleCheckPos.set(Infinity, Infinity, Infinity);
       const colorOpacity = mesh?.userData.trackColorOpacity ?? 1;
       const effectiveOpacity = opacity * colorOpacity;
       if (this.instancedMeshManager) {
@@ -763,6 +791,129 @@ export class Player implements IPlayer {
     }
     for (; idx < n; idx++) {
       this.tileMarginScales[idx] = current;
+    }
+  }
+
+  /**
+   * SetPlanetRotation：解析每块砖的星球旋转缓速参数（官方 scrFloor.planetEase*，逐砖继承）。
+   * - ease：缓动曲线（Linear = 不缓速）
+   * - easeParts：把该砖的旋转切成几段分别缓动
+   * - easePartBehavior：Mirror（奇段反向）/ Repeat（每段同向）
+   */
+  private buildTilePlanetEase(): void {
+    const n = this.levelData.tiles?.length ?? 0;
+    this.tilePlanetEase = new Array(n).fill('Linear');
+    this.tilePlanetEaseParts = new Array(n).fill(1);
+    this.tilePlanetEaseBehavior = new Array(n).fill('Mirror');
+    if (n === 0) return;
+
+    const s: any = this.levelData.settings || {};
+    let ease: string = typeof s.planetEase === 'string' ? s.planetEase : 'Linear';
+    let parts: number = typeof s.planetEaseParts === 'number' ? s.planetEaseParts : 1;
+    let behavior: string = typeof s.planetEasePartBehavior === 'string' ? s.planetEasePartBehavior : 'Mirror';
+
+    const actions = this.levelData.actions;
+    const byFloor = new Map<number, any[]>();
+    if (actions) {
+      for (let i = 0; i < actions.length; i++) {
+        const a = actions[i];
+        if (a?.eventType === 'SetPlanetRotation') {
+          const floor = Math.max(0, Math.floor(a.floor ?? 0));
+          if (!byFloor.has(floor)) byFloor.set(floor, []);
+          byFloor.get(floor)!.push(a);
+        }
+      }
+    }
+
+    for (let i = 0; i < n; i++) {
+      const evs = byFloor.get(i);
+      if (evs) {
+        for (const e of evs) {
+          if (typeof e.ease === 'string') ease = e.ease;
+          if (typeof e.easeParts === 'number') parts = e.easeParts;
+          if (typeof e.easePartBehavior === 'string') behavior = e.easePartBehavior;
+        }
+      }
+      this.tilePlanetEase[i] = ease;
+      this.tilePlanetEaseParts[i] = parts;
+      this.tilePlanetEaseBehavior[i] = behavior;
+    }
+  }
+
+  /**
+   * 官方 scrMisc.EasedAngle 的“进度”等价形式：
+   * 把线性进度 p(0..1) 映射为按 ease/easeParts/easePartBehavior 缓动后的进度。
+   */
+  private easedAngleProgress(p: number, easeName: string, parts: number, behavior: string): number {
+    if (parts <= 0 || easeName === 'Linear' || p <= 0) return p;
+    const ease = EasingFunctions[easeName] || EasingFunctions.Linear;
+    const x = p * parts;
+    const loops = Math.floor(Math.abs(x));
+    const frac = x - loops;
+    const within = (loops % 2 !== 0 && behavior !== 'Repeat')
+      ? 1 - ease(1 - frac)
+      : ease(frac);
+    return (loops + within) / parts;
+  }
+
+  /**
+   * Pause 事件的“角度校准”（官方 scrPlanet.HandlePause，等价 WebADOFAI pauseTween）：
+   * 逐砖算出 pause 后需要回正的修饰角偏移 `-num7` 与回正时长（一个 crotchet），
+   * 播放时在砖块起始按 OutSine 把该偏移回零——这就是隐性的星球“缓速/校准”。
+   *
+   * 官方量（scrPlanet.HandlePause）在 ADOJAS 角坐标系下的对应：
+   *   dir   = isCW ? 1 : -1
+   *   de    = (|baseAngle|≈0 或 ≈2π) ? 0 : (π - |baseAngle|) * dir
+   *   exit  = nextEntryAngle - π*dir
+   *   snap  = exit - π*(extraBeats+1)*dir + de
+   *   num7  = angleCorrectionType * (mod(entry) - mod(snap)) * dir * sign(mod(snap) < mod(entry))
+   */
+  private buildPauseTweens(): void {
+    const n = this.levelData.tiles?.length ?? 0;
+    this.tilePauseOffset = new Array(n).fill(0);
+    this.tilePauseTweenDuration = new Array(n).fill(0);
+    if (n < 2) return;
+    const actions = this.levelData.actions;
+    if (!actions) return;
+
+    // 逐 floor 累计 extraBeats，并取该 floor 最后一个 Pause/FreeRoam 的 angleCorrectionDir
+    const extraBeats = new Array(n).fill(0);
+    const correction = new Array(n).fill(0);
+    for (let i = 0; i < actions.length; i++) {
+      const a = actions[i];
+      if (a?.eventType !== 'Pause' && a?.eventType !== 'FreeRoam') continue;
+      const f = Math.max(0, Math.floor(a.floor ?? 0));
+      if (f >= n) continue;
+      extraBeats[f] += (typeof a.duration === 'number' ? a.duration : 0);
+      const dir = a.angleCorrectionDir;
+      if (dir === 'Forward') correction[f] = 1;
+      else if (dir === 'None') correction[f] = 0;
+      else if (dir === 'Backward') correction[f] = -1;
+      else if (typeof dir === 'number') correction[f] = dir;
+    }
+
+    const TWO_PI = Math.PI * 2;
+    const mod2pi = (x: number) => ((x % TWO_PI) + TWO_PI) % TWO_PI;
+
+    for (let i = 0; i < n - 1; i++) {
+      const eb = extraBeats[i];
+      const act = correction[i];
+      if (eb <= 0 || act === 0) continue;
+      const totalAngle = this.tileTotalAngle[i] ?? 0;
+      const B = this.tileIsCW[i] ? 1 : -1;
+      const entry = this.tileStartAngle[i] ?? 0;
+      const nextEntry = entry + totalAngle;              // 该砖出口＝下一砖入口角
+      const baseAngle = totalAngle - B * eb * Math.PI;   // 去掉 extraBeats 的基础旋转
+      const aLen = Math.abs(baseAngle);
+      const de = (aLen < 0.002 || Math.abs(aLen - TWO_PI) < 0.002) ? 0 : (Math.PI - aLen) * B;
+      const targetExit = nextEntry - Math.PI * B;
+      const snap = targetExit - Math.PI * (eb + 1) * B + de;
+      const m2 = mod2pi(entry);
+      const m6 = mod2pi(snap);
+      const num7 = act * (m2 - m6) * B * (m6 < m2 ? 1 : -1);
+      this.tilePauseOffset[i] = -num7;
+      const bpm = this.tileBPM[i] || 100;
+      this.tilePauseTweenDuration[i] = 60 / (bpm * this.songPitch);
     }
   }
 
@@ -1878,6 +2029,53 @@ export class Player implements IPlayer {
     
     this.startRenderLoop();
   }
+
+  /**
+   * 分帧/异步创建装饰物并构建时间轴（加载界面可显示进度）。
+   * loadMethod 对应"谱面载入方式"设置：
+   *   sync   → 同步完成（无进度，最快）
+   *   async  → 每帧分块创建（不卡 UI，可显示进度）
+   *   worker → 同样分块（THREE 对象必须在主线程创建，无法真正放进 Worker）
+   */
+  public async buildDecorationsAsync(
+    loadMethod: 'sync' | 'async' | 'worker' = 'async',
+    onProgress?: (fraction: number, phase: string) => void,
+  ): Promise<void> {
+    const dm = this.decorationManager;
+    if (!dm || this._decorationsBuilt) return;
+
+    const total = dm.decoSourceCount;
+    const tStart = performance.now();
+    // 分帧创建期间隐藏装饰物，避免未定位的实例堆在原点闪现（加载弹窗覆盖时也干净）
+    dm.setRootVisible(false);
+    if (loadMethod === 'sync') {
+      while (dm.materializeChunk(total || 1)) { /* drain synchronously */ }
+    } else {
+      // 每帧按时间预算分块，避免重型装饰（文字/粒子）撑爆一帧
+      const budgetMs = loadMethod === 'worker' ? 12 : 8;
+      while (dm.materializedCount < total) {
+        // Player 在加载途中被销毁则中止
+        if (this.decorationManager !== dm) return;
+        const frameStart = performance.now();
+        while (dm.materializedCount < total && performance.now() - frameStart < budgetMs) {
+          dm.materializeChunk(32);
+        }
+        onProgress?.(total > 0 ? dm.materializedCount / total : 1, 'decorations');
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      }
+    }
+    if (this.decorationManager !== dm) return;
+    const tMat = performance.now();
+    dm.finishMaterialize();
+    const tEv = performance.now();
+    dm.buildTimelineKeyframes(this.timelineManager);
+    const tKf = performance.now();
+    (dm as any)._timelineManager = this.timelineManager;
+    this._decorationsBuilt = true;
+    dm.setRootVisible(true);
+    onProgress?.(1, 'decorations');
+    debugLog(`[Decoration] build: count=${total} materialize=${(tMat - tStart).toFixed(0)}ms events=${(tEv - tMat).toFixed(0)}ms keyframes=${(tKf - tEv).toFixed(0)}ms`);
+  }
   
   private setupEventListeners(): void {
     if (!this.container) return;
@@ -2479,7 +2677,8 @@ export class Player implements IPlayer {
           case 'Bloom': this.processBloomEvent(ev); break;
           case 'Flash': this.processFlashEvent(ev); break;
           case 'ShakeScreen': this.processShakeScreenEvent(ev); break;
-          case 'SetCustomBG': this.processCustomBGEvent(ev); break;
+          case 'SetCustomBG':
+          case 'CustomBackground': this.processCustomBGEvent(ev); break;
           case 'RecolorTrack': this.processRecolorEvent(ev); break;
         }
       }
@@ -2560,6 +2759,9 @@ export class Player implements IPlayer {
   
   private updateDecorations(): void {
     if (!this.decorationManager) return;
+    // 装饰物仍在分帧创建 / 构建时间轴：跳过逐帧更新。否则每帧 O(装饰数) 的采样
+    // 会与分帧加载抢主线程，导致加载时页面几乎卡死（页面在渲染但进度不动）。
+    if (!this._decorationsBuilt) return;
 
     const timeInLevelMs = this.elapsedTime - this.getTimeOrigin() * 1000;
 
@@ -2773,13 +2975,18 @@ export class Player implements IPlayer {
     // pans the view by dragging, and the controller position is only applied on
     // seek / playback. Only zoom + rotation are synced every frame.
     if ((!this.isPlaying || this.isPaused) && this.cameraController) {
+      let _t = performance.now();
       this.syncCameraFromController(false);
+      this.perfAdd('syncCam', performance.now() - _t); _t = performance.now();
       this.updateVisibleTiles();
+      this.perfAdd('visibleTiles', performance.now() - _t); _t = performance.now();
       this.syncInstancedTiles();
+      this.perfAdd('instanced', performance.now() - _t); _t = performance.now();
       // Keep decorations in sync with the seeked time while not actively playing
       // (editor scrubbing / paused playback). During playback updateDecorations
       // is driven from updatePlayer instead.
       this.updateDecorations();
+      this.perfAdd('decorations', performance.now() - _t);
     }
     // Selection green flash animation (disabled during playback)
     if (this.selectedTileIndex !== null && !this.isPlaying) {
@@ -2834,6 +3041,7 @@ export class Player implements IPlayer {
         this.camera.position.y += shake.y;
       }
       
+      const _glT = performance.now();
       try {
         const isWebGPU = this.rendererType === 'webgpu';
         const backendReady = !isWebGPU || (this.renderer as any).backend !== null;
@@ -2885,6 +3093,7 @@ export class Player implements IPlayer {
         this.camera.position.x = unshakenX;
         this.camera.position.y = unshakenY;
       }
+      this.perfAdd('gl', performance.now() - _glT);
     }
   }
 
@@ -3108,7 +3317,8 @@ export class Player implements IPlayer {
   }
   
   private processCustomBGEvent(event: any): void {
-      // SetCustomBG event properties:
+      this._lastCustomBGEvent = event;
+      // CustomBackground / SetCustomBG event properties:
       // - color: background color (hex string)
       // - image: image filename
       // - imageColor: tint color for image
@@ -3127,7 +3337,9 @@ export class Player implements IPlayer {
       }
       
       // Update custom background image
-      const imagePath = event.image;
+      // 官方字段：bgImage / bgImageColor / bgDisplayMode / loopBG / lockRot / scalingRatio / parallax
+      // 兼容旧写法 image / imageColor / fitScreen / looping
+      const imagePath = event.bgImage ?? event.image;
       
       if (!imagePath || imagePath === '') {
           // Remove custom background
@@ -3176,7 +3388,11 @@ export class Player implements IPlayer {
           this.customBGTexture = texture;
           
           // Calculate mesh size based on fitScreen and scalingRatio
-          const fitScreen = event.fitScreen !== false;
+          // bgDisplayMode: FitToScreen(默认) / Tiled / Unscaled
+          const displayMode = event.bgDisplayMode;
+          const fitScreen = displayMode
+              ? displayMode !== 'Unscaled'
+              : isEnabled(event.fitScreen, true);
           const scalingRatio = event.scalingRatio || 100;
           const scale = scalingRatio / 100;
           
@@ -3200,7 +3416,8 @@ export class Player implements IPlayer {
           const geometry = new PlaneGeometry(meshWidth, meshHeight);
           
           // Apply image color tint
-          const imageColor = event.imageColor ? this.formatHexColor(event.imageColor) : '#ffffff';
+          const imageColorHex = event.imageColor ?? event.bgImageColor;
+          const imageColor = imageColorHex ? this.formatHexColor(imageColorHex) : '#ffffff';
           const color = new Color(imageColor);
           
           const material = new MeshBasicMaterial({
@@ -3218,7 +3435,12 @@ export class Player implements IPlayer {
           // Store parallax for update
           (this.customBGMesh as any).parallaxData = {
               parallax: event.parallax || [100, 100],
-              lockRot: event.lockRot || false
+              // lockRot / bgLockRot 可能是 "Enabled"/"Disabled" 字符串 → 用 isEnabled
+              lockRot: isEnabled(event.lockRot ?? event.bgLockRot),
+              // fitScreen：背景要跟着相机缩放，每帧重算尺寸覆盖视口
+              fitScreen,
+              baseW: meshWidth,
+              baseH: meshHeight,
           };
       });
   }
@@ -3229,17 +3451,28 @@ export class Player implements IPlayer {
       const data = (this.customBGMesh as any).parallaxData;
       if (!data) return;
       
+      // 官方 scrParallax.SetTrans: pos = (cameraPos - posCamAtStart) * parallax + startPosition
+      // 起点为 0 → pos = cameraPos * parallax。
+      //   100% → 跟随相机（屏幕固定）；0% → 固定世界原点。
       const parallax = data.parallax || [100, 100];
       const px = parallax[0] / 100;
       const py = parallax[1] / 100;
-      
-      // Apply inverse parallax (move opposite to camera)
-      this.customBGMesh.position.x = -this.camera.position.x * (1 - px);
-      this.customBGMesh.position.y = -this.camera.position.y * (1 - py);
-      
-      // Apply rotation lock
+      this.customBGMesh.position.x = this.camera.position.x * px;
+      this.customBGMesh.position.y = this.camera.position.y * py;
+
+      // 官方 lockRot：直接取相机旋转（不加负号）
       if (data.lockRot) {
-          this.customBGMesh.rotation.z = -this.camera.rotation.z;
+          this.customBGMesh.rotation.z = this.camera.rotation.z;
+      } else {
+          this.customBGMesh.rotation.z = 0;
+      }
+
+      // fitScreen：摄像机缩放时背景要跟着重新铺满视口（每帧重算，不能只在创建时算一次）
+      if (data.fitScreen && data.baseW > 0 && data.baseH > 0) {
+          const z = this.camera.zoom || 1;
+          const frustumW = (this.camera.right - this.camera.left) / z;
+          const frustumH = (this.camera.top - this.camera.bottom) / z;
+          this.customBGMesh.scale.set(frustumW / data.baseW, frustumH / data.baseH, 1);
       }
   }
 
@@ -3772,8 +4005,8 @@ export class Player implements IPlayer {
         event = { ...event, duration: event.duration * secPerBeat };
     }
     
-    // Parse plane (0 = FG, 1 = BG, default FG)
-    const plane = event.plane === 1 ? 'BG' : 'FG';
+    // plane 是字符串 "Foreground"/"Background"（兼容数字 1/0 与 "BG"/"FG"）
+    const plane = (event.plane === 'Background' || event.plane === 'BG' || event.plane === 1) ? 'BG' : 'FG';
     
     this.flashEffect.startFlash(
         this.elapsedTime / 1000,
@@ -3793,7 +4026,7 @@ export class Player implements IPlayer {
     const duration = (event.duration ?? 1) * secPerBeat;
     const ease = event.ease || 'Linear';
     const fadeOut = isEnabled(event.fadeOut);
-    const plane = event.plane === 1 ? 'BG' : 'FG';
+    const plane = (event.plane === 'Background' || event.plane === 'BG' || event.plane === 1) ? 'BG' : 'FG';
     
     this.shakeScreen.startShake(
         this.elapsedTime / 1000,
@@ -4135,7 +4368,7 @@ export class Player implements IPlayer {
     const zoom = this.camera.zoom || 1.0;
     
     const distSq = this.cameraPosition.distanceToSquared(this.lastVisibleCheckPos);
-    if (distSq < 0.01 && Math.abs(zoom - this.lastVisibleCheckZoom) < 0.01) {
+    if (distSq < 0.01 && Math.abs(zoom - this.lastVisibleCheckZoom) < 0.01 && this._movedTiles.size === 0) {
         return;
     }
     
@@ -4170,6 +4403,19 @@ export class Player implements IPlayer {
           }
         }
       }
+    }
+
+    // 被 MoveTrack/PositionTrack 移动过的砖块：原始位置可能不在视野内，按【当前位置】单独判定。
+    if (this._movedTiles.size > 0) {
+      for (const idx of this._movedTiles) {
+        const m = this.tiles.get(String(idx));
+        if (!m) continue;
+        if (m.position.x >= left - margin && m.position.x <= right + margin &&
+            m.position.y >= bottom - margin && m.position.y <= top + margin) {
+          newVisibleSet.add(idx);
+        }
+      }
+      this._movedTiles.clear();
     }
 
     // Fast path: identical visible set → nothing to add/remove/re-layer.
@@ -4634,7 +4880,21 @@ export class Player implements IPlayer {
         const totalAngle = this.tileTotalAngle[tileIndex];
         // 倒计时期间（timeInLevel < tileStartTimes[0] 为负）progress 为负，
         // 球反向绕 tile0 旋转——这正是倒计时动画（c34c790 及更早版本的行为，无问题）。
-        const currentAngle = startAngle + totalAngle * progress;
+        // SetPlanetRotation：非 Linear 时把线性进度换成缓动进度（官方 scrMisc.EasedAngle）。
+        const planetEase = this.tilePlanetEase[tileIndex];
+        const easedProgress = (progress >= 0 && planetEase && planetEase !== 'Linear')
+            ? this.easedAngleProgress(progress, planetEase, this.tilePlanetEaseParts[tileIndex], this.tilePlanetEaseBehavior[tileIndex])
+            : progress;
+        // Pause 角度校准：砖块起始把修饰角偏移按 OutSine 回零（隐性星球缓速）
+        let pauseOffset = 0;
+        const pOff = this.tilePauseOffset[tileIndex];
+        if (pOff !== 0) {
+            const pd = this.tilePauseTweenDuration[tileIndex];
+            const elapsed = timeInLevel - startTime;
+            const k = pd > 0 ? Math.min(1, Math.max(0, elapsed / pd)) : 1;
+            pauseOffset = pOff * (1 - EasingFunctions.OutSine(k));
+        }
+        const currentAngle = startAngle + totalAngle * easedProgress + pauseOffset;
 
         const clampedProgress = Math.max(0, Math.min(1, progress));
         const currentDist = startDist + (endDist - startDist) * clampedProgress;
@@ -4839,6 +5099,31 @@ export class Player implements IPlayer {
    */
   public registerCustomBGImage(filename: string, url: string): void {
     this.customBGImages.set(filename, url);
+    // 背景图后注册（ZIP 载入顺序 / 手动载入）：如果它正是当前背景引用的图，
+    // 立即重放一次，让背景即时生效。
+    const matches = (wanted?: string): boolean =>
+      !!wanted && (wanted === filename || wanted.split(/[/\\]/).pop() === filename);
+    const ev = this._lastCustomBGEvent;
+    if (ev && matches((ev.bgImage ?? ev.image) as string)) {
+      this.processCustomBGEvent(ev);
+      return;
+    }
+    // 关卡初始背景（settings.bgImage），此前一直没被应用
+    const s: any = this.levelData.settings || {};
+    if (matches(s.bgImage)) {
+      this.processCustomBGEvent({
+        eventType: 'CustomBackground',
+        color: s.backgroundColor,
+        bgImage: s.bgImage,
+        bgImageColor: s.bgImageColor,
+        bgDisplayMode: s.bgDisplayMode,
+        loopBG: s.bgLooping,
+        lockRot: s.bgLockRot,
+        scalingRatio: s.scalingRatio,
+        parallax: s.bgParallax,
+        imageSmoothing: s.bgSmoothing,
+      });
+    }
   }
   
   /**

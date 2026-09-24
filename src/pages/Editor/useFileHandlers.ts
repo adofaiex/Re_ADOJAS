@@ -55,7 +55,7 @@ interface UseFileHandlersProps {
   setLoadingProgress: (progress: number) => void
   setLoadingStatus: (status: string) => void
   setAdofaiFile: (file: any) => void
-  initializePlayer: (loadedLevel: any) => void
+  initializePlayer: (loadedLevel: any) => Player | null
   settings: any
   t: (key: string) => string
   containerRef: React.RefObject<HTMLDivElement>
@@ -74,32 +74,36 @@ export function useFileHandlers({
   previewerRef
 }: UseFileHandlersProps) {
 
-  // 辅助函数：初始化玩家并合成打拍音
+  // 辅助函数：初始化玩家、分帧创建装饰物并合成打拍音
   const initializePlayerWithHitsounds = async (loadedLevel: any, isVeryLargeFile: boolean = false): Promise<void> => {
-    initializePlayer(loadedLevel)
+    const player = initializePlayer(loadedLevel)
+
+    // 装饰物：按"谱面载入方式"设置分帧/异步创建（sync 同步，async/worker 逐帧），并展示进度
+    if (player) {
+      const decoFrom = isVeryLargeFile ? 85 : 95
+      const decoTo = isVeryLargeFile ? 93 : 97
+      setLoadingStatus(t("loading.buildingDecorations"))
+      let lastPct = -1
+      await player.buildDecorationsAsync(settings.loadMethod, (fraction) => {
+        // 只在整数百分比变化时刷新 React 状态，避免每帧 setState 触发整页重渲染
+        const pct = Math.round(decoFrom + (decoTo - decoFrom) * fraction)
+        if (pct !== lastPct) {
+          lastPct = pct
+          setLoadingProgress(pct)
+        }
+      })
+    }
 
     // Synthesize hitsounds with progress display
     if (previewerRef.current) {
-      if (isVeryLargeFile) {
-        // 对于超大文件，显示详细的合成进度
-        setLoadingProgress(85)
-        setLoadingStatus(t("loading.synthesizingHitsounds"))
+      const hsFrom = isVeryLargeFile ? 93 : 97
+      const hsSpan = isVeryLargeFile ? 6 : 3
+      setLoadingProgress(hsFrom)
+      setLoadingStatus(t("loading.synthesizingHitsounds"))
 
-        await previewerRef.current.preSynthesizeHitsoundsWithProgress((percent) => {
-          // Map 0-100 to 85-99
-          const mappedPercent = 85 + (percent / 100) * 14
-          setLoadingProgress(mappedPercent)
-        })
-      } else {
-        setLoadingProgress(96)
-        setLoadingStatus(t("loading.synthesizingHitsounds"))
-
-        await previewerRef.current.preSynthesizeHitsoundsWithProgress((percent) => {
-          // Map 0-100 to 96-100
-          const mappedPercent = 96 + (percent / 100) * 4
-          setLoadingProgress(mappedPercent)
-        })
-      }
+      await previewerRef.current.preSynthesizeHitsoundsWithProgress((percent) => {
+        setLoadingProgress(hsFrom + (percent / 100) * hsSpan)
+      })
     }
   }
 
@@ -548,11 +552,12 @@ export function useFileHandlers({
           bgImages.add(bgImage)
         }
 
-        // Check SetCustomBG events
+        // 自定义背景：官方事件是 CustomBackground（字段 bgImage）；兼容旧的 SetCustomBG/image
         const actions = loadedLevel.actions || []
         actions.forEach((action: any) => {
-          if (action.eventType === 'SetCustomBG' && action.image) {
-            bgImages.add(action.image)
+          if (action.eventType === 'CustomBackground' || action.eventType === 'SetCustomBG') {
+            const img = action.bgImage || action.image
+            if (img) bgImages.add(img)
           }
         })
 

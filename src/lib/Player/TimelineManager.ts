@@ -620,6 +620,19 @@ export class TimelineManager {
         return this.timelines.has(entity) || this.discreteTimelines.has(entity);
     }
 
+    /**
+     * 该实体实际拥有时间轴的属性集合（连续 + 离散）。
+     * 供装饰物逐帧采样时跳过不存在的属性，避免每帧数十次无用的 Map 查找/二分。
+     */
+    public getProperties(entity: string): Set<string> {
+        const out = new Set<string>();
+        const cont = this.timelines.get(entity);
+        if (cont) for (const k of cont.keys()) out.add(k);
+        const disc = this.discreteTimelines.get(entity);
+        if (disc) for (const k of disc.keys()) out.add(k);
+        return out;
+    }
+
     public reset(): void {
         this.lastTriggerIndex = -1;
     }

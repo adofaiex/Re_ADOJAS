@@ -247,9 +247,16 @@ export async function autoLoadAssets(
     } catch { /* ignore */ }
   }
 
-  // 4. 背景图片
-  const bgImage = settings.bgImage as string | undefined
-  if (bgImage) {
+  // 4. 背景图片：settings.bgImage + 所有 CustomBackground（/旧 SetCustomBG）事件引用的 bgImage
+  const bgImages = new Set<string>()
+  if (settings.bgImage) bgImages.add(settings.bgImage as string)
+  for (const a of (levelData.actions || [])) {
+    if (a.eventType === 'CustomBackground' || a.eventType === 'SetCustomBG') {
+      const img = a.bgImage || a.image
+      if (img) bgImages.add(img)
+    }
+  }
+  for (const bgImage of bgImages) {
     try {
       const p = join(levelDir, bgImage)
       if (existsSync(p)) loaders.registerCustomBGImage(bgImage, URL.createObjectURL(readFileBlob(p)))

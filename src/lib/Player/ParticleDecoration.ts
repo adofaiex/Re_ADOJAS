@@ -254,8 +254,10 @@ export class ParticleDecorationSystem {
       const arc = Math.max(0, Math.min(360, this.cfg.arc || 360)) * Math.PI / 180
       let angle = this.rng.range(0, arc)
       if (this.cfg.arcMode.toLowerCase() === 'loop' && arc > 0) angle = this.simulationTime % arc
+      // 官方 shape.scale 会把 Circle 当椭圆缩放（shape.scale = scale/100*tileSize）
       const radius = Math.sqrt(this.rng.next()) * this.cfg.shapeRadius * this.cfg.tileSize
-      p.x = Math.cos(angle) * radius; p.y = Math.sin(angle) * radius
+      p.x = Math.cos(angle) * radius * sx
+      p.y = Math.sin(angle) * radius * sy
     } else {
       p.x = this.rng.range(-sx / 2, sx / 2); p.y = this.rng.range(-sy / 2, sy / 2)
     }

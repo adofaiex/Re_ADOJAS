@@ -149,7 +149,7 @@ export function useEditorState() {
   }, [handleManualHit])
 
   // Initialize player with level data
-  const initializePlayer = useCallback((loadedLevel: any): void => {
+  const initializePlayer = useCallback((loadedLevel: any): Player | null => {
     setAdofaiFile(loadedLevel)
 
     // Clean up old Player
@@ -161,7 +161,10 @@ export function useEditorState() {
 
     // Create new Player
     if (containerRef.current) {
-      const player = new Player(loadedLevel)
+      // 装饰物按"谱面载入方式"分帧/异步创建（sync 时仍同步，见 buildDecorationsAsync）
+      const player = new Player(loadedLevel, 'webgpu', {
+        deferDecorations: settings.loadMethod !== 'sync',
+      })
       player.createPlayer(containerRef.current)
       player.setRenderer(settings.renderer)
       player.setRenderMethod(settings.renderMethod)
@@ -180,7 +183,9 @@ export function useEditorState() {
         player.enableManualPlay({ noFail })
       }
       player.setJudgmentI18n?.({ t })
+      return player
     }
+    return null
   }, [settings, manualMode, noFail, t, bindOttoEvents])
 
   // File handlers

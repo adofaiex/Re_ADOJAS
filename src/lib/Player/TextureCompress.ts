@@ -94,10 +94,12 @@ export async function loadCompressedTexture(url: string, maxDim: number = MAX_TE
         const blob = await res.blob();
 
         let bitmap: ImageBitmap;
+        let origW = 0, origH = 0;
         try {
             // 先探测尺寸：超限才带 resize 解码，避免无谓的重采样开销
             const head = new Uint8Array(await blob.slice(0, 64 * 1024).arrayBuffer());
             const dims = sniffImageDimensions(head);
+            if (dims) { origW = dims.w; origH = dims.h; }
             if (dims && Math.max(dims.w, dims.h) > maxDim) {
                 const scale = maxDim / Math.max(dims.w, dims.h);
                 bitmap = await createImageBitmap(blob, {
@@ -105,16 +107,19 @@ export async function loadCompressedTexture(url: string, maxDim: number = MAX_TE
                     resizeHeight: Math.max(1, Math.round(dims.h * scale)),
                     resizeQuality: 'medium',
                     premultiplyAlpha: 'none',
+                    // ImageBitmap 会忽略 texture.flipY，必须在创建时翻转，
+                    // 才能和 <img>/TextureLoader 的 flipY=true 行为一致（否则图上下颠倒）
+                    imageOrientation: 'flipY',
                 });
                 // 个别浏览器忽略 resize 参数 → 兜底 canvas 缩放
                 if (Math.max(bitmap.width, bitmap.height) > maxDim + 1) {
                     bitmap = await downscaleBitmap(bitmap, maxDim);
                 }
             } else if (dims) {
-                bitmap = await createImageBitmap(blob, { premultiplyAlpha: 'none' });
+                bitmap = await createImageBitmap(blob, { premultiplyAlpha: 'none', imageOrientation: 'flipY' });
             } else {
                 // 头部无法识别的格式：解码后按需 canvas 缩放
-                bitmap = await createImageBitmap(blob);
+                bitmap = await createImageBitmap(blob, { imageOrientation: 'flipY' });
                 if (Math.max(bitmap.width, bitmap.height) > maxDim) {
                     bitmap = await downscaleBitmap(bitmap, maxDim);
                 }
@@ -136,11 +141,18 @@ export async function loadCompressedTexture(url: string, maxDim: number = MAX_TE
             });
         }
 
+        if (!origW || !origH) { origW = (bitmap as any).width; origH = (bitmap as any).height; }
         const tex = new Texture(bitmap as unknown as HTMLImageElement);
+        // 记录【原图】像素尺寸：装饰物世界尺寸必须按原图算（官方用 sprite 原始尺寸），
+        // 否则超过上限被缩放过的图会算小。
+        tex.userData = { ...(tex.userData || {}), origWidth: origW, origHeight: origH };
         tex.colorSpace = SRGBColorSpace;
         tex.generateMipmaps = false;
         tex.minFilter = LinearFilter;
         tex.magFilter = LinearFilter;
+        // 翻转已经在 createImageBitmap(imageOrientation:'flipY') 完成；这里保持 false，
+        // 避免个别仍对 ImageBitmap 应用 UNPACK_FLIP_Y_WEBGL 的浏览器二次翻转。
+        tex.flipY = false;
         tex.needsUpdate = true;
         return tex;
     } catch (err) {

@@ -6,6 +6,17 @@ const TILE_WIDTH = 0.2695;
 const TILE_LENGTH = 0.49;
 const OUTLINE = 0.0125;
 
+// 官方世界 → ADOJAS 本地世界的换算系数（装饰图用官方尺寸公式，需换算）。
+// 官方 Long 砖块网格 0.75 / ADOJAS 0.49 ≈ 0.6533。
+// 下面拆成两个可独立调整的旋钮，便于分别校准"尺寸"和"位置偏移"。
+export const OFFICIAL_TO_ADOJAS_SCALE = 0.49 / 0.75;
+// 装饰物【尺寸】系数（baseSizeX/Y）
+// 官方世界比 ADOJAS 本地大 1/0.6533 倍：装饰图内部画的砖块是按官方砖块尺寸画的，
+// 要让它和 ADOJAS 的真砖块对齐，装饰图整体乘 0.6533。
+export const DECO_SIZE_SCALE = OFFICIAL_TO_ADOJAS_SCALE;
+// 装饰物【位置/偏移】系数（position / positionOffset / parallaxOffset / pivotOffset，经由 tileSize）
+export const DECO_POSITION_SCALE = 1.0;
+
 const fmod = (a: number, b: number): number => {
     return a - b * Math.floor(a / b);
 };

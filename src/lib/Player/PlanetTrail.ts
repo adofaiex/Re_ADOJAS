@@ -48,6 +48,12 @@ export class PlanetTrail {
 
   setPlanetRadius(radius: number): void { this.planetRadius = radius; }
 
+  /** 更新拖尾颜色（SetPlanetTailColor 等运行时改色） */
+  setColor(color: Color): void {
+    this.material.color.copy(color);
+    this.material.needsUpdate = true;
+  }
+
   private buildMesh(pts: Vector3[]): void {
     const posAttr = this.geometry.getAttribute('position') as BufferAttribute;
     const positions = posAttr.array as Float32Array;

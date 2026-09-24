@@ -1,15 +1,26 @@
-import { Group, Mesh, Sprite, Vector2, Color, Texture, MeshBasicMaterial, SpriteMaterial, Material, CanvasTexture, CircleGeometry, RingGeometry, BufferGeometry, BufferAttribute, SRGBColorSpace, DoubleSide, Scene, PlaneGeometry, Vector3, WebGLRenderTarget, Float32BufferAttribute, NormalBlending, AdditiveBlending, MultiplyBlending, CustomBlending, AddEquation, ReverseSubtractEquation, LinearFilter, LinearMipMapLinearFilter, Blending, Points, PointsMaterial, AlwaysStencilFunc, EqualStencilFunc, NotEqualStencilFunc, ReplaceStencilOp, KeepStencilOp } from 'three';
+import { Group, Mesh, Sprite, Vector2, Color, Texture, MeshBasicMaterial, SpriteMaterial, Material, CanvasTexture, CircleGeometry, SphereGeometry, BufferGeometry, BufferAttribute, SRGBColorSpace, DoubleSide, Scene, PlaneGeometry, Vector3, WebGLRenderTarget, Float32BufferAttribute, NormalBlending, AdditiveBlending, MultiplyBlending, CustomBlending, AddEquation, ReverseSubtractEquation, LinearFilter, LinearMipMapLinearFilter, Blending, AlwaysStencilFunc, EqualStencilFunc, NotEqualStencilFunc, ReplaceStencilOp, KeepStencilOp } from 'three';
 import { TimelineManager } from './TimelineManager';
-import createTrackMesh from '../Geo/mesh_reserve';
+import createTrackMesh, { DECO_SIZE_SCALE, DECO_POSITION_SCALE } from '../Geo/mesh_reserve';
 import { isEventActive, isEnabled } from './EventUtils';
 import { getIconTexture, getIconTextureForCustomFloor, createIconSprite } from './IconLoader';
 import { debugLog } from './DebugLog';
-import { probeLog, probeFlush } from './DecorationProbeLogger';
 import { DecorationInstancedRenderer, DecoInstanceSlot } from './DecorationInstancedRenderer';
 import { ParticleDecorationSystem } from './ParticleDecoration';
 import type { ParticleConfig } from './ParticleDecoration';
 import { loadCompressedTexture } from './TextureCompress';
+import { PlanetTrail } from './PlanetTrail';
 
+
+
+// ── Object 装饰物 Planet：与玩家 Planet 一致的球体 + 拖尾参数 ──
+/** 玩家 Planet 的球体半径（见 Planet.ts） */
+const PLANET_BODY_RADIUS = 0.25;
+/** 拖尾时间窗口（秒），与 Player.computePlanetTrails 一致 */
+const PLANET_TRAIL_DURATION = 0.4;
+/** 拖尾最多采样点数 */
+const PLANET_TRAIL_MAX_POINTS = 120;
+/** 拖尾位置历史环大小 */
+const PLANET_TRAIL_HIST = 256;
 
 
 /**
@@ -215,20 +226,22 @@ class DecorationSpatialGrid {
      * Returns decorations in cells overlapping [minX, minY] – [maxX, maxY].
      * The same decoration may be reported once even if it spans multiple cells,
      * because we only index by its anchor world position.
+     *
+     * 注意：不要按单元格区间双重循环——调用方会用巨大的 `_staticQueryPad`（超大型装饰）
+     * 外扩查询范围，区间可能覆盖成千上万格导致每帧卡顿。改为只遍历【实际存在装饰】的格子，
+     * 非空格子数 ≤ 装饰数，复杂度稳定为 O(装饰数)。
      */
     public query(minX: number, minY: number, maxX: number, maxY: number): DecorationInstance[] {
-        const startCX = Math.floor(minX / this.cellSize);
-        const endCX = Math.floor(maxX / this.cellSize);
-        const startCY = Math.floor(minY / this.cellSize);
-        const endCY = Math.floor(maxY / this.cellSize);
         const out: DecorationInstance[] = [];
-        for (let cx = startCX; cx <= endCX; cx++) {
-            for (let cy = startCY; cy <= endCY; cy++) {
-                const bucket = this.cells.get(this.key(cx, cy));
-                if (bucket) {
-                    for (let i = 0; i < bucket.length; i++) out.push(bucket[i]);
-                }
-            }
+        const cs = this.cellSize;
+        for (const [k, bucket] of this.cells) {
+            const comma = k.indexOf(',');
+            const cx = +k.slice(0, comma);
+            const cy = +k.slice(comma + 1);
+            const cellMinX = cx * cs, cellMaxX = cellMinX + cs;
+            const cellMinY = cy * cs, cellMaxY = cellMinY + cs;
+            if (cellMaxX < minX || cellMinX > maxX || cellMaxY < minY || cellMinY > maxY) continue;
+            for (let i = 0; i < bucket.length; i++) out.push(bucket[i]);
         }
         this.lastQueryCount = out.length;
         return out;
@@ -264,8 +277,6 @@ const defaultDecorationConfig: DecorationConfig = {
 };
 
 // Throttled rendered-position probe (only for debugging specific tags).
-const POS_PROBE_TAGS = new Set<string>(['polygon', 'polygon_oval', 'polygon_emerald', 'polygon2ph', 'bubbles', 'particles_lv1']);
-const posProbeLast = new Map<string, number>();
 
 class DecorationInstance {
     public config: DecorationConfig;
@@ -289,7 +300,15 @@ class DecorationInstance {
     public baseSizeY = 1;
     public instSlot: DecoInstanceSlot | null = null;
     public particles: ParticleDecorationSystem | null = null;
-    public planetTrailParticles: Points | null = null;
+    public planetTrail: PlanetTrail | null = null;
+    // 拖尾位置历史（世界坐标），供 PlanetTrail 重建 ribbon
+    private _trailHist: Float64Array = new Float64Array(PLANET_TRAIL_HIST * 2);
+    private _trailHistTime: Float64Array = new Float64Array(PLANET_TRAIL_HIST);
+    private _trailHead = 0;
+    private _trailCount = 0;
+    // 上一次真正构建成 ribbon 的点数（用于跳过无变化帧的重建）
+    private _trailBuilt = false;
+    private _trailBuiltN = 0;
     public sourceEvent: any = null;
     private instRenderer: DecorationInstancedRenderer | null = null;
     private originalVisible: boolean = true;
@@ -313,6 +332,8 @@ class DecorationInstance {
     // 时间轴采样缓存：避免每帧重复触发 image load 或相同值导致的 transform 重算
     public _manager: any = null;
     private _lastImage: string | null = null;
+    // 该装饰实际拥有时间轴的属性（惰性缓存，供逐帧采样跳过不存在的属性）
+    private _animProps: Set<string> | null = null;
     private _lastText: string | null = null;
     private _lastPlanetColor: string | null = null;
     private _lastPlanetTailColor: string | null = null;
@@ -367,14 +388,6 @@ class DecorationInstance {
             && c.parallaxOffset[0] === 0 && c.parallaxOffset[1] === 0
             && !c.lockRotation && !c.lockScale
             && !c.stickToFloor;
-
-        probeLog(`SETUP|type=${c.decorationType}|floor=${c.floor}|tag=${c.tag}|relativeTo=${c.relativeTo}` +
-            `|pos=(${c.position[0]},${c.position[1]})|scale=(${c.scale[0]},${c.scale[1]})|rot=${c.rotation}` +
-            `|opacity=${c.opacity}|color=${c.color}|depth=${c.depth}|lockScale=${c.lockScale}|scaleMul=${c.scaleMultiplier}` +
-            `|objType=${c.objectType ?? ''}|image=${c.decorationImage ?? ''}` +
-            `|pivotOffset=(${c.pivotOffset[0]},${c.pivotOffset[1]})` +
-            `|parallax=(${c.parallax[0]},${c.parallax[1]})` +
-            `|parallaxOffset=(${c.parallaxOffset[0]},${c.parallaxOffset[1]})`);
     }
 
     public setupVisual(texture: Texture | null): void {
@@ -397,10 +410,12 @@ class DecorationInstance {
                 texture.magFilter = LinearFilter;
                 texture.minFilter = texture.generateMipmaps ? LinearMipMapLinearFilter : LinearFilter;
             }
-            const texW = texture.image?.width || 100;
-            const texH = texture.image?.height || 100;
-            this.baseSizeX = texW / 100;
-            this.baseSizeY = texH / 100;
+            // 用【原图】像素尺寸（官方用 sprite 原始尺寸）。texture.image 可能是被
+            // TextureCompress 缩放过的版本，直接用它会把超限大图算小。
+            const texW = (texture.userData as any)?.origWidth || texture.image?.width || 100;
+            const texH = (texture.userData as any)?.origHeight || texture.image?.height || 100;
+            this.baseSizeX = (texW / 100) * DECO_SIZE_SCALE;
+            this.baseSizeY = (texH / 100) * DECO_SIZE_SCALE;
             // Instanced path for Image/Text (no masking). Mask decorations keep Sprite fallback.
             // Batch by texture+blend+renderOrder(-depth) so layering matches original sprites.
             const canInstance = this.instRenderer
@@ -466,6 +481,7 @@ class DecorationInstance {
         if (this.objectGroup) { this.visualGroup.remove(this.objectGroup); this.objectGroup = null; }
         if (this.iconSprite) { (this.iconSprite.material as Material).dispose(); this.iconSprite = null; }
         if (this.particles) { this.particles.dispose(); this.particles = null; }
+        this.disposePlanetTrail();
     }
 
     /** Compute depth z + renderOrder from config.depth.
@@ -558,26 +574,6 @@ class DecorationInstance {
         }
     }
 
-    /** Throttled rendered-position probe (debug aid for specific tags). */
-    private probeRenderedPosition(posX: number, posY: number, totalScaleMul: number): void {
-        if (!this.config.tag || !POS_PROBE_TAGS.has(this.config.tag)) return;
-        const key = `${this.config.tag}|${this.config.id}`;
-        const nowMs = performance.now();
-        const last = posProbeLast.get(key) ?? 0;
-        if (nowMs - last <= 500) return;
-        posProbeLast.set(key, nowMs);
-        probeLog(`POS|tag=${this.config.tag}|id=${this.config.id}|floor=${this.config.floor}` +
-            `|anchor=(${this.startPos.x.toFixed(4)},${this.startPos.y.toFixed(4)})` +
-            `|cur=(${this.currentPosition.x.toFixed(4)},${this.currentPosition.y.toFixed(4)})` +
-            `|pos=(${posX.toFixed(4)},${posY.toFixed(4)})` +
-            `|scaleVec=(${this.currentScale.x.toFixed(4)},${this.currentScale.y.toFixed(4)})` +
-            `|baseSize=(${this.baseSizeX.toFixed(4)},${this.baseSizeY.toFixed(4)})` +
-            `|totalScaleMul=${totalScaleMul.toFixed(4)}` +
-            `|containerScale=(${this.container.scale.x.toFixed(4)},${this.container.scale.y.toFixed(4)})` +
-            `|rot=${this.currentRotation.toFixed(2)}|visible=${this.container.visible}` +
-            `|instanced=${!!this.instSlot}|static=${this._isStaticWorld}`);
-    }
-
     public updatePosition(camPos: Vector3, camRot: number, camZoom: number, tilePositions?: Map<number, { x: number; y: number; z: number; rotation: number }>, adoZoom?: number, runtime?: DecorationRuntimeContext): void {
         if (this._isStaticWorld) {
             // Parallax=0 → world-fixed: no camera displacement
@@ -595,7 +591,6 @@ class DecorationInstance {
             this._scaleMul = camScaleMul * floorScaleMul;
             this.container.scale.set(this.currentScale.x * this._scaleMul, this.currentScale.y * this._scaleMul, 1);
             if (this.instSlot) this.syncInstance();
-            this.probeRenderedPosition(this.currentPosition.x, this.currentPosition.y, this._scaleMul);
             return;
         }
         // Official camera model (scrCamera.UpdateSize):
@@ -690,20 +685,6 @@ class DecorationInstance {
         this.container.position.y = posY;
         this.container.scale.set(this.currentScale.x * totalScaleMul, this.currentScale.y * totalScaleMul, 1);
         if (this.instSlot) this.syncInstance();
-        this.probeRenderedPosition(posX, posY, totalScaleMul);
-
-        // Probe log: planet object decoration per-frame state
-        if (this.config.decorationType === DecorationType.Object && this.config.objectType === 'Planet') {
-            const childScale = this.visualGroup.children[0]?.scale;
-            probeLog(`POS|${this.container.name}` +
-                `|pos=(${posX.toFixed(4)},${posY.toFixed(4)})` +
-                `|scaleVec=(${this.currentScale.x.toFixed(4)},${this.currentScale.y.toFixed(4)})` +
-                `|totalScaleMul=${totalScaleMul.toFixed(4)}` +
-                `|containerScale=(${this.container.scale.x.toFixed(4)},${this.container.scale.y.toFixed(4)})` +
-                `|childScale=(${childScale?.x?.toFixed(4) ?? '?'},${childScale?.y?.toFixed(4) ?? '?'})` +
-                `|opacity=${this.currentOpacity.toFixed(3)}` +
-                `|rot=${(this.currentRotation).toFixed(2)}`);
-        }
     }
 
     public setCulledVisible(vis: boolean): void {
@@ -714,6 +695,93 @@ class DecorationInstance {
             this.container.visible = effective;
         }
         if (this.instSlot) this.syncInstance();
+        // Planet 装饰拖尾（世界坐标，独立于 container 变换）
+        if (this.planetTrail) {
+            if (effective) this._updatePlanetTrail(this._manager ? (this._manager.currentTime || 0) : 0);
+            else { this.planetTrail.clear(); this._trailBuilt = false; this._trailBuiltN = 0; }
+        }
+    }
+
+    /** 创建与玩家 Planet 相同的拖尾（ribbon 挂在 manager 容器，使用世界坐标）。 */
+    public initPlanetTrail(color: Color, parent: Group): void {
+        this.disposePlanetTrail();
+        const trail = new PlanetTrail(color, PLANET_BODY_RADIUS);
+        parent.add(trail.mesh);
+        this.planetTrail = trail;
+        this._trailHead = 0;
+        this._trailCount = 0;
+        this._trailBuilt = false;
+        this._trailBuiltN = 0;
+    }
+
+    public setPlanetTrailColor(color: Color): void {
+        this.planetTrail?.setColor(color);
+    }
+
+    public disposePlanetTrail(): void {
+        if (!this.planetTrail) return;
+        const mesh = this.planetTrail.mesh;
+        if (mesh.parent) mesh.parent.remove(mesh);
+        this.planetTrail.dispose();
+        this.planetTrail = null;
+        this._trailHead = 0;
+        this._trailCount = 0;
+        this._trailBuilt = false;
+        this._trailBuiltN = 0;
+    }
+
+    public resetPlanetTrail(): void {
+        this._trailHead = 0;
+        this._trailCount = 0;
+        this._trailBuilt = false;
+        this._trailBuiltN = 0;
+        this.planetTrail?.clear();
+    }
+
+    /** 记录本帧世界位置并按 Player.computePlanetTrails 的窗口重建拖尾。 */
+    private _updatePlanetTrail(now: number): void {
+        const trail = this.planetTrail;
+        if (!trail) return;
+        const x = this.container.position.x;
+        const y = this.container.position.y;
+        // 只在位置有明显变化时记录，避免静止时堆叠成退化“坨”
+        const lastIdx0 = this._trailCount > 0 ? (this._trailHead - 1 + PLANET_TRAIL_HIST) % PLANET_TRAIL_HIST : -1;
+        const moved = lastIdx0 < 0
+            || Math.abs(this._trailHist[lastIdx0 * 2] - x) > 0.0005
+            || Math.abs(this._trailHist[lastIdx0 * 2 + 1] - y) > 0.0005;
+        if (moved) {
+            const head = this._trailHead;
+            this._trailHist[head * 2] = x;
+            this._trailHist[head * 2 + 1] = y;
+            this._trailHistTime[head] = now;
+            this._trailHead = (head + 1) % PLANET_TRAIL_HIST;
+            if (this._trailCount < PLANET_TRAIL_HIST) this._trailCount++;
+        }
+        const minT = now - PLANET_TRAIL_DURATION;
+        const lastIdx = (this._trailHead - 1 + PLANET_TRAIL_HIST) % PLANET_TRAIL_HIST;
+        let n = 0;
+        for (let i = 0; i < this._trailCount && n < PLANET_TRAIL_MAX_POINTS; i++) {
+            const idx = (lastIdx - i + PLANET_TRAIL_HIST) % PLANET_TRAIL_HIST;
+            if (this._trailHistTime[idx] < minT) break;
+            n++;
+        }
+        if (n < 2) {
+            if (this._trailBuilt) { trail.clear(); this._trailBuilt = false; this._trailBuiltN = 0; }
+            return;
+        }
+        // 未移动且采样点数不变时输出完全相同，跳过重建（避免每帧重复分配）
+        if (!moved && this._trailBuilt && n === this._trailBuiltN) return;
+        const arr = new Float64Array(n * 2);
+        for (let i = 0; i < n; i++) {
+            const idx = (lastIdx - i + PLANET_TRAIL_HIST) % PLANET_TRAIL_HIST;
+            const k = (n - 1 - i) * 2;
+            arr[k] = this._trailHist[idx * 2];
+            arr[k + 1] = this._trailHist[idx * 2 + 1];
+        }
+        trail.setPoints(arr);
+        trail.mesh.position.set(0, 0, 0);
+        this._trailBuilt = true;
+        this._trailBuiltN = n;
     }
 
     public updateAnimation(now: number, tm?: TimelineManager): void {
@@ -730,10 +798,16 @@ class DecorationInstance {
         // 每装饰独立时间轴：deco:{id}
         const kv = this.config.id ? `deco:${this.config.id}` : '';
         if (!kv) return;
+        // 该装饰实际拥有时间轴的属性（惰性缓存）。完全没有时间轴时直接跳过，
+        // 避免每帧对 2 万+ 装饰各做数十次无用的 Map 查找/二分。
+        if (this._animProps === null) this._animProps = tm.getProperties(kv);
+        const props = this._animProps;
+        if (props.size === 0) return;
+        const has = (p: string): boolean => props.has(p);
         let dirty = false;
 
-        const sampleAny = (prop: string): number | undefined => tm.sample(kv, prop, now);
-        const sampleAnyDiscrete = (prop: string): string | boolean | number | undefined => tm.sampleDiscrete(kv, prop, now);
+        const sampleAny = (prop: string): number | undefined => has(prop) ? tm.sample(kv, prop, now) : undefined;
+        const sampleAnyDiscrete = (prop: string): string | boolean | number | undefined => has(prop) ? tm.sampleDiscrete(kv, prop, now) : undefined;
 
         // 数值动画属性
         const px = sampleAny('positionX');
@@ -909,6 +983,7 @@ class DecorationInstance {
         this._lastTrackColor = null;
         this._lastTrackOpacity = null;
         this._lastTrackIcon = null;
+        this.resetPlanetTrail();
         this.container.visible = this.originalVisible;
         this._instVisible = this.originalVisible;
         this.updateTransform();
@@ -930,6 +1005,9 @@ export class DecorationManager {
     private taggedDecorations: Map<string, DecorationInstance[]> = new Map();
     private decorationEventsTimeline: { time: number; event: any }[] = [];
     private pendingDecorationEvents: any[] = [];
+    // 装饰事件源（AddDecoration/AddText/AddObject/AddParticle）与分帧创建游标
+    private _decoSources: any[] = [];
+    private _materializeIndex = 0;
     private tileSize: number = 1.0;
     private textureCache: Map<string, Texture> = new Map();
     private floorGeoCache: Map<string, { positions: Float32Array; indices: Uint32Array; mask: Float32Array; vertexCount: number }> = new Map();
@@ -940,6 +1018,8 @@ export class DecorationManager {
     private placeholderTexture: Texture | null = null;
     private _lastCamX = 0; private _lastCamY = 0; private _lastCamZoom = 0;
     private _lastNow = 0;
+    /** 当前播放时间（秒），供 DecorationInstance 的 Planet 拖尾采样使用 */
+    public currentTime = 0;
     private _particlesStarted: Set<DecorationInstance> = new Set();
     private _timelineManager: TimelineManager | null = null;
     private _staticGrid: DecorationSpatialGrid = new DecorationSpatialGrid(32);
@@ -968,32 +1048,61 @@ export class DecorationManager {
         this.tileStartTimes = tileStartTimes;
         this.tileBPM = tileBPM;
         const s = levelData.settings || {};
-        this.tileSize = s.tileShape === 'Long' ? 1.5 : 1.0;
+        // 装饰物的所有世界单位（position / positionOffset / parallaxOffset / pivotOffset）
+        // 都由 tileSize 推导，统一乘官方→ADOJAS 系数，和装饰尺寸保持一致。
+        this.tileSize = (s.tileShape === 'Long' ? 1.5 : 1.0) * DECO_POSITION_SCALE;
         this.container = new Group();
         this.container.name = 'DecorationContainer';
         this.scene.add(this.container);
         this.instancedRenderer = new DecorationInstancedRenderer(this.container);
     }
 
-    public init(): void {
-        this.clear();
+    private static isDecoEvent(dec: any): boolean {
+        return !!dec && (dec.eventType === 'AddDecoration' || dec.eventType === 'AddText'
+            || dec.eventType === 'AddObject' || dec.eventType === 'AddParticle');
+    }
+
+    /** 收集所有装饰事件源（只登记，不创建 THREE 实例）。 */
+    public collectDecoSources(): void {
+        this._decoSources = [];
+        this._materializeIndex = 0;
         const rootDecos = this.levelData.decorations || (this.levelData as any).__decorations || [];
         const tiles = this.levelData.tiles || [];
 
         for (const dec of rootDecos) {
-            if (dec.eventType === 'AddDecoration' || dec.eventType === 'AddText' || dec.eventType === 'AddObject' || dec.eventType === 'AddParticle') {
-                this.tryCreateDecoration(dec);
-            }
+            if (DecorationManager.isDecoEvent(dec)) this._decoSources.push(dec);
         }
         for (const tile of tiles) {
             if (tile.addDecorations) {
+                const floor = tile.seqID ?? tiles.indexOf(tile);
                 for (const dec of tile.addDecorations) {
-                    if (dec.eventType === 'AddDecoration' || dec.eventType === 'AddText' || dec.eventType === 'AddObject' || dec.eventType === 'AddParticle') {
-                        this.tryCreateDecoration({ ...dec, floor: dec.floor ?? tile.seqID ?? tiles.indexOf(tile) });
+                    if (DecorationManager.isDecoEvent(dec)) {
+                        this._decoSources.push({ ...dec, floor: dec.floor ?? floor });
                     }
                 }
             }
         }
+    }
+
+    public get decoSourceCount(): number { return this._decoSources.length; }
+    public get materializedCount(): number { return this._materializeIndex; }
+
+    /** 控制整棵装饰物容器的可见性（分帧加载期间隐藏，避免半成品闪现在原点）。 */
+    public setRootVisible(v: boolean): void {
+        this.container.visible = v;
+    }
+
+    /** 分帧创建：最多创建 count 个装饰实例，返回是否仍有剩余。 */
+    public materializeChunk(count: number): boolean {
+        const end = Math.min(this._decoSources.length, this._materializeIndex + Math.max(1, count));
+        for (; this._materializeIndex < end; this._materializeIndex++) {
+            this.tryCreateDecoration(this._decoSources[this._materializeIndex]);
+        }
+        return this._materializeIndex < this._decoSources.length;
+    }
+
+    /** 创建完成后收尾：构建装饰事件时间轴 + 日志。 */
+    public finishMaterialize(): void {
         this.buildDecorationEventsTimeline();
         debugLog('[DecorationManager] Spatial grid Patch: enabled | total=' + this.decoList.length
             + ' static=' + this._staticDecos.length
@@ -1002,15 +1111,55 @@ export class DecorationManager {
             + ' cellSize=' + 32);
     }
 
+    public init(): void {
+        this.clear();
+        this.collectDecoSources();
+        while (this.materializeChunk(4096)) { /* drain synchronously */ }
+        this.finishMaterialize();
+    }
+
     public buildTimelineKeyframes(tm: TimelineManager): void {
         const ts = this.tileSize;
         const entries = this.decorationEventsTimeline;
+
+        // tag → 事件索引。否则每个装饰都要扫描完整事件表，复杂度 O(decos × events)，
+        // 大关卡（上万装饰 × 数万事件）会直接卡死。事件顺序与 entries 一致；
+        // 单个事件含多个 tag 时会进入多个列表。
+        const byTag = new Map<string, { time: number; event: any }[]>();
+        for (const entry of entries) {
+            const event = entry.event;
+            if (!isEventActive(event)) continue;
+            const tags = (event.tag || 'NO TAG').split(/\s+/).filter(Boolean);
+            for (const tg of tags) {
+                let list = byTag.get(tg);
+                if (!list) { list = []; byTag.set(tg, list); }
+                list.push(entry);
+            }
+        }
 
         // 每个装饰独立时间轴（deco:{id}），事件按 tag 匹配展开到各装饰，
         // 目标值基于装饰自身初始值计算——同 tag 不同 scale/position 的装饰互不影响。
         for (const deco of this.decoList) {
             const kv = `deco:${deco.config.id}`;
             const decoTags = (deco.config.tag || 'NO TAG').split(/\s+/).filter(Boolean);
+            // 该装饰匹配到的事件（多 tag 时合并去重并按时间排序）
+            let matched: { time: number; event: any }[];
+            if (decoTags.length === 1) {
+                matched = byTag.get(decoTags[0]) || [];
+            } else {
+                const seen = new Set<any>();
+                matched = [];
+                for (const tg of decoTags) {
+                    const list = byTag.get(tg);
+                    if (!list) continue;
+                    for (const e of list) {
+                        if (seen.has(e)) continue;
+                        seen.add(e);
+                        matched.push(e);
+                    }
+                }
+                matched.sort((a, b) => a.time - b.time);
+            }
 
             const [baseColorHex] = parseDecoColor(deco.config.color, 'ffffff');
             const [baseCR, baseCG, baseCB] = hexToRGB01(baseColorHex);
@@ -1024,11 +1173,8 @@ export class DecorationManager {
             let curStartX = basePosX;
             let curStartY = basePosY;
 
-            for (const entry of entries) {
+            for (const entry of matched) {
                 const { time: eventTime, event } = entry;
-                if (!isEventActive(event)) continue;
-                const eventTags = (event.tag || 'NO TAG').split(/\s+/).filter(Boolean);
-                if (!decoTags.some(t => eventTags.includes(t))) continue;
 
                 // SetText / SetObject：离散轨（decText / 物体属性）
                 if (event.eventType === 'SetText') {
@@ -1204,28 +1350,6 @@ export class DecorationManager {
                 if (event.maskingTarget !== undefined && !event.disabled?.maskingTarget) {
                     tm.addDiscreteKeyframe(kv, 'maskingTarget', eventTime, String(event.maskingTarget));
                 }
-
-                // Probe log: MoveDecoration event
-                const tagStr = String(event.tag ?? '');
-                probeLog(`MOVE|floor=${floor}|tags=${tagStr}|time=${eventTime.toFixed(4)}|dur=${duration.toFixed(4)}|ease=${ease}` +
-                    `|relativeTo=${movementType}|isLastPos=${isLastPos}`);
-                if (event.positionOffset !== undefined && !event.disabled?.positionOffset) {
-                    const p = this.parseVec2(event.positionOffset, [0, 0]);
-                    probeLog(`  TARGET|pos=(${p[0]},${p[1]})|posWorld=(${(p[0] * ts).toFixed(4)},${(p[1] * ts).toFixed(4)})`);
-                }
-                if (event.scale !== undefined && !event.disabled?.scale) {
-                    const s = this.parseVec2(event.scale, [100, 100]);
-                    probeLog(`  TARGET|scale=(${s[0]},${s[1]})|scaleNorm=(${(s[0] / 100).toFixed(4)},${(s[1] / 100).toFixed(4)})`);
-                }
-                if (event.rotationOffset !== undefined && !event.disabled?.rotationOffset) {
-                    probeLog(`  TARGET|rot=${event.rotationOffset}`);
-                }
-                if (event.opacity !== undefined && !event.disabled?.opacity) {
-                    probeLog(`  TARGET|opacity=${(event.opacity / 100).toFixed(3)}`);
-                }
-                if (event.color !== undefined && !event.disabled?.color) {
-                    probeLog(`  TARGET|color=${event.color}`);
-                }
             }
         }
     }
@@ -1340,16 +1464,6 @@ export class DecorationManager {
         deco.pivotPos.copy(deco.startPos);
         deco.currentPosition.copy(deco.startPos);
 
-        // Probe: raw → world anchor so we can diff against ADOFAI/reference.
-        {
-            const tilePos = this.levelData?.tiles?.[floor]?.position;
-            probeLog(`ANCHOR|tag=${config.tag}|floor=${floor}|relativeTo=${relativeTo}` +
-                `|rawPos=(${rawPos[0]},${rawPos[1]})|initial=(${initialPosition[0]},${initialPosition[1]})` +
-                `|tilePos=(${tilePos ? tilePos[0] : '?'},${tilePos ? tilePos[1] : '?'})` +
-                `|startPos=(${deco.startPos.x.toFixed(4)},${deco.startPos.y.toFixed(4)})` +
-                `|pivotOffset=(${config.pivotOffset?.[0]},${config.pivotOffset?.[1]})|depth=${config.depth}`);
-        }
-
         if (decoType === DecorationType.Text) {
             if (!this.setupTextVisual(deco, event)) { deco.dispose(); return null; }
         } else if (decoType === DecorationType.Object) {
@@ -1395,22 +1509,29 @@ export class DecorationManager {
         return true;
     }
 
+    /** Planet 装饰拖尾：复用已存在的 trail（仅改色），否则新建。 */
+    private attachPlanetTrail(deco: DecorationInstance, colorStr: string | undefined): void {
+        const [hex] = parseDecoColor(colorStr, 'ffffff');
+        const color = new Color(hex);
+        if (deco.planetTrail) {
+            deco.setPlanetTrailColor(color);
+            return;
+        }
+        deco.initPlanetTrail(color, this.container);
+    }
+
     private setupObjectVisual(deco: DecorationInstance, event: any): boolean {
         const g = new Group();
         const objType = event.objectType || 'Planet';
         if (objType === 'Planet') {
             const [pColor, pAlpha] = parseDecoColor(event.planetColor, 'ffffff');
             const mat = new MeshBasicMaterial({ color: new Color(pColor), transparent: true, opacity: pAlpha });
-            const sphere = new Mesh(new CircleGeometry(0.25, 32), mat);
+            // 与玩家 Planet 相同的球体外观（见 Planet.ts）
+            const sphere = new Mesh(new SphereGeometry(PLANET_BODY_RADIUS, 32, 32), mat);
             sphere.name = 'planetBody';
             g.add(sphere);
-            if (event.planetTailColor) {
-                const [tColor, tAlpha] = parseDecoColor(event.planetTailColor, 'ffffff');
-                const tailMat = new MeshBasicMaterial({ color: new Color(tColor), transparent: true, opacity: tAlpha * 0.5 });
-                const tail = new Mesh(new RingGeometry(0.22, 0.32, 32), tailMat);
-                tail.name = 'planetTail';
-                g.add(tail);
-            }
+            // 与玩家相同的拖尾 ribbon；颜色优先 planetTailColor，否则用 planetColor
+            this.attachPlanetTrail(deco, event.planetTailColor ?? event.planetColor);
         } else if (objType === 'Floor') {
             const trackAngle = event.trackAngle ?? 0;
             const angle0 = -180;
@@ -1808,6 +1929,7 @@ export class DecorationManager {
         const now = elapsedTime / 1000;
         const dt = Math.min(0.1, Math.max(0, now - this._lastNow));
         this._lastNow = now;
+        this.currentTime = now;
         const camZ = cameraZoom;
         // 粒子系统驱动
         for (const d of this.decoList) {
@@ -1844,7 +1966,8 @@ export class DecorationManager {
         this._stickFloors.clear();
         for (let i = 0; i < len; i++) {
             const d = list[i];
-            if (this._timelineManager && (d.config.tag || this._timelineManager.hasAnyTimeline(`deco:${d.config.id}`))) {
+            // 只有真正拥有时间轴的装饰才需要逐帧采样（tag 本身不代表有动画）
+            if (this._timelineManager && this._timelineManager.hasAnyTimeline(`deco:${d.config.id}`)) {
                 d.updateAnimation(now, this._timelineManager!);
                 animCount++;
             }
@@ -1900,7 +2023,7 @@ export class DecorationManager {
         const sLen = this._staticDecos.length;
         for (let i = 0; i < sLen; i++) {
             const d = this._staticDecos[i];
-            if ((this._timelineManager && (d.config.tag || this._timelineManager.hasAnyTimeline(`deco:${d.config.id}`))) && !this._visibleStaticSet.has(d)) {
+            if ((this._timelineManager && this._timelineManager.hasAnyTimeline(`deco:${d.config.id}`)) && !this._visibleStaticSet.has(d)) {
                 visibleStatic.push(d);
             }
         }
@@ -1995,17 +2118,8 @@ export class DecorationManager {
         }
         if (props.planetTailColor !== undefined) {
             deco.config.planetTailColor = props.planetTailColor;
-            if (deco.planetTrailParticles && deco.planetTrailParticles.geometry) {
-                const [tailC] = parseDecoColor(props.planetTailColor, 'ffffff');
-                const tailColorRGB = hexToRGB01(tailC);
-                const colors = deco.planetTrailParticles.geometry.getAttribute('color');
-                if (colors) {
-                    for (let i = 0; i < colors.count; i++) {
-                        colors.setXYZ(i, tailColorRGB[0], tailColorRGB[1], tailColorRGB[2]);
-                    }
-                    colors.needsUpdate = true;
-                }
-            }
+            const [tailC] = parseDecoColor(props.planetTailColor, 'ffffff');
+            deco.setPlanetTrailColor(new Color(tailC));
         }
         if (props.trackColor !== undefined) {
             deco.config.trackColor = props.trackColor;
@@ -2085,6 +2199,9 @@ export class DecorationManager {
         this.taggedDecorations.clear();
         this.floorGeoCache.clear();
         this.decorationEventsTimeline = [];
+        this._decoSources = [];
+        this._materializeIndex = 0;
+        this.pendingDecorationEvents = [];
         this._tilePositions.clear();
         this.instancedRenderer.clear();
         if (hadDecos) {
