@@ -292,7 +292,7 @@ export class TileColorManager {
   private recolorTimes: [number, number][] = [];
   private recolorRecord: number = 0;
 
-  // Official TweenColor semantics (scrFloor.cs): Single/Stripes recolors ease
+  // TweenColor semantics: Single/Stripes recolors ease
   // from the CURRENT displayed color to the target over the event duration.
   private colorFades: Map<number, TileColorFade> = new Map();
 
@@ -488,7 +488,7 @@ export class TileColorManager {
     }
   }
 
-  /** Start an eased color fade for a tile (official TweenColor). */
+  /** Start an eased color fade for a tile (TweenColor). */
   startColorFade(index: number, fromColor: string, fromBg: string, toColor: string, toBg: string, startTime: number, duration: number, fromAlpha: number, ease: string = 'Linear'): void {
     if (duration <= 0) return;
     this.colorFades.set(index, { fromColor, fromBg, toColor, toBg, startTime, duration, fromAlpha, ease });

@@ -725,7 +725,7 @@ export class InstancedMeshManager {
     /**
      * Assign a depth layer to a tile (real-time, derived from tile id for visible tiles).
      *
-     * Official Floor sorting: tile[x] renders ABOVE tile[x+1]. Per-instance renderOrder
+     * Floor sorting: tile[x] renders ABOVE tile[x+1]. Per-instance renderOrder
      * does not exist inside one InstancedMesh, so the layer is encoded as a small world-z
      * offset and resolved by the depth buffer (depthWrite=true), which works across ALL
      * instanced shape batches regardless of which mesh a tile belongs to.

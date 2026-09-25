@@ -3,6 +3,9 @@ import { EasingFunctions } from './Easing';
 
 interface FlashTransition {
     active: boolean;
+    /** 保持态：材质停在 endColor/endOpacity，不随时间变化（duration=0 的瞬时闪屏、
+     *  StayBlack 都属此类），直到下一次 Flash 覆盖或 Kill。 */
+    hold: boolean;
     startTime: number;
     duration: number;
     startColor: Color;
@@ -17,22 +20,39 @@ function easeOutQuad(t: number): number {
     return t * (2 - t);
 }
 
+/**
+ * Flash 事件（全屏 plane）。
+ *
+ * plane 决定渲染层级（与实况一致）：
+ *   - Background：只压暗【背景】（背景图/视频/清屏色），砖块、球、装饰都不受影响。
+ *     它属于主场景：renderOrder 压到所有场景物体之下（只在背景图之后），
+ *     世界 z 放到极远处并开启深度测试 —— 于是任何在它前面的物体
+ *     （砖块/装饰/球，无论是靠 renderOrder 还是靠深度）都会盖住它。
+ *   - Foreground：屏幕空间叠层，画在最上层（主场景渲染完之后）。
+ */
 export class FlashEffect {
+    /** 背景闪光平面的世界 z：比所有场景内容都远（但在背景视频 -500 之前）。 */
+    private static readonly BG_QUAD_Z = -400;
+
     private enabled: boolean = true;
 
     private fgTransition: FlashTransition;
     private bgTransition: FlashTransition;
 
+    /** 前景闪光叠层（屏幕空间 -1..1，最上层） */
     private fgQuad: Mesh;
-    private bgQuad: Mesh;
     private fgMaterial: MeshBasicMaterial;
+    private overlayScene: Scene;
+    private overlayCamera: OrthographicCamera;
+
+    /** 背景闪光（主场景，砖块下面一层） */
+    private bgQuad: Mesh;
     private bgMaterial: MeshBasicMaterial;
-    private scene: Scene;
-    private camera: OrthographicCamera;
 
     constructor() {
         const defaultTransition = (): FlashTransition => ({
             active: false,
+            hold: false,
             startTime: 0,
             duration: 0,
             startColor: new Color(1, 1, 1),
@@ -52,31 +72,41 @@ export class FlashEffect {
             depthTest: false,
             depthWrite: false,
         });
+        // 背景闪光：透明混合，但**开启深度测试**——放在砖块后面的 z 上，
+        // 这样砖块（不透明，先写深度）会把它挡住，只盖住背景。
         this.bgMaterial = new MeshBasicMaterial({
             color: 0xffffff,
             transparent: true,
             opacity: 0,
-            depthTest: false,
+            depthTest: true,
             depthWrite: false,
         });
 
-        this.scene = new Scene();
-        this.camera = new OrthographicCamera(-1, 1, 1, -1, 0, 1);
+        this.overlayScene = new Scene();
+        this.overlayCamera = new OrthographicCamera(-1, 1, 1, -1, 0, 1);
 
-        const geometry = new PlaneGeometry(2, 2);
-        this.bgQuad = new Mesh(geometry, this.bgMaterial);
-        this.bgQuad.position.z = -1;
-        this.bgQuad.renderOrder = 1000;
-        this.scene.add(this.bgQuad);
-
-        this.fgQuad = new Mesh(geometry, this.fgMaterial);
+        this.fgQuad = new Mesh(new PlaneGeometry(2, 2), this.fgMaterial);
         this.fgQuad.position.z = -0.5;
         this.fgQuad.renderOrder = 1001;
-        this.scene.add(this.fgQuad);
+        this.overlayScene.add(this.fgQuad);
+
+        // 1x1 平面，按主相机视口缩放。renderOrder 压到背景图（-1000000）之后、
+        // 其余所有场景物体之前；再配合极远的 z + 深度测试兜底。
+        this.bgQuad = new Mesh(new PlaneGeometry(1, 1), this.bgMaterial);
+        this.bgQuad.renderOrder = -100000;
+        this.bgQuad.frustumCulled = false;
+        this.bgQuad.visible = false;
+    }
+
+    /** 把背景闪光平面挂到主场景（砖块下面那一层）。 */
+    attachToScene(scene: Scene): void {
+        if (this.bgQuad.parent) this.bgQuad.parent.remove(this.bgQuad);
+        scene.add(this.bgQuad);
     }
 
     setEnabled(enabled: boolean): void {
         this.enabled = enabled;
+        if (!enabled) this.bgQuad.visible = false;
     }
 
     getEnabled(): boolean {
@@ -111,6 +141,7 @@ export class FlashEffect {
         if (flashStyle === 'StayBlack') {
             const transition = plane === 'FG' ? this.fgTransition : this.bgTransition;
             transition.active = true;
+            transition.hold = false;
             transition.startTime = currentTime;
             transition.duration = 0;
             transition.startColor.set(0, 0, 0);
@@ -135,7 +166,6 @@ export class FlashEffect {
 
         if (flashStyle === 'Reverse') {
             // Start from current color/opacity, end at target
-            const transition = plane === 'FG' ? this.fgTransition : this.bgTransition;
             const material = plane === 'FG' ? this.fgMaterial : this.bgMaterial;
             startColorStr = this.colorToHex(material.color);
             startOpacity = material.opacity;
@@ -148,7 +178,7 @@ export class FlashEffect {
             startOpacity = (event.opacity !== undefined ? event.opacity : 100) / 100;
             endOpacity = 0;
         } else {
-            // Standard Flash: same as ffxFlashPlus or legacy Flash
+            // Standard Flash: same as legacy Flash
             startOpacity = event.startOpacity !== undefined
                 ? event.startOpacity / 100
                 : (event.opacity !== undefined ? event.opacity / 100 : 1);
@@ -161,6 +191,7 @@ export class FlashEffect {
         const material = plane === 'FG' ? this.fgMaterial : this.bgMaterial;
 
         transition.active = true;
+        transition.hold = false;
         transition.startTime = currentTime;
         transition.duration = duration;
         transition.startColor.set(this.normalizeHexColor(startColorStr));
@@ -181,8 +212,21 @@ export class FlashEffect {
         return r + g + b;
     }
 
-    private normalizeHexColor(hex: string): string {
-        let result = hex.startsWith('#') ? hex.slice(1) : hex;
+    private normalizeHexColor(value: any): string {
+        // 颜色可能是 hex 字符串、数字、[r,g,b] 或 { r,g,b }（关卡文件两种写法都有）。
+        if (typeof value === 'number') {
+            return '#' + (value >>> 0).toString(16).padStart(6, '0').slice(-6);
+        }
+        if (Array.isArray(value)) {
+            return '#' + value.slice(0, 3).map(v =>
+                Math.round(Math.min(1, Math.max(0, Number(v))) * 255).toString(16).padStart(2, '0')).join('');
+        }
+        if (value && typeof value === 'object' && typeof value.r === 'number') {
+            return '#' + [value.r, value.g, value.b].map(v =>
+                Math.round(Math.min(1, Math.max(0, Number(v))) * 255).toString(16).padStart(2, '0')).join('');
+        }
+        if (typeof value !== 'string' || value.length === 0) return '#ffffff';
+        let result = value.startsWith('#') ? value.slice(1) : value;
         if (result.length === 8) result = result.slice(0, 6);
         return '#' + result;
     }
@@ -194,16 +238,14 @@ export class FlashEffect {
     ): boolean {
         if (!transition.active) return false;
 
-        if (transition.flashStyle === 'StayBlack') {
-            // Persists until killed
-            return true;
-        }
-
-        if (transition.duration <= 0) {
+        // 保持态（duration=0 的瞬时闪屏 / StayBlack）：材质停在终值并持续可见，
+        // 直到下一次 Flash 或 Kill 覆盖。duration=0 的零时长 tween 立即结束，
+        // 材质就停在 endColor —— 静帧闪白/闪黑全靠这个"停住"。
+        if (transition.hold || transition.duration <= 0) {
             material.color.copy(transition.endColor);
             material.opacity = transition.endOpacity;
-            transition.active = false;
-            return false;
+            transition.hold = true;
+            return true;
         }
 
         const elapsed = currentTime - transition.startTime;
@@ -224,10 +266,13 @@ export class FlashEffect {
         material.opacity = transition.startOpacity + (transition.endOpacity - transition.startOpacity) * progress;
 
         if (finished) {
-            transition.active = false;
+            // 结束后材质停在 endColor/endOpacity（不会复位）——这正是"静帧闪屏"的来源：
+            // endOpacity>0 时画面会一直保持（例如淡入到 25% 就一直 25%），
+            // endOpacity=0 时只是不再绘制。下一次 Flash 或 Kill 才会覆盖它。
+            transition.hold = true;
         }
 
-        return !finished;
+        return true;
     }
 
     isActive(): boolean {
@@ -242,31 +287,40 @@ export class FlashEffect {
         return this.bgTransition.active;
     }
 
-    renderFlash(renderer: WebGLRenderer, currentTime: number): void {
+    /**
+     * 主场景渲染【之前】调用：更新背景闪光（plane=Background）的颜色与世界变换。
+     * 平面铺满视口并跟随主相机（位置/旋转/缩放），从而只覆盖背景。
+     */
+    updateBG(camera: OrthographicCamera, currentTime: number): void {
+        const active = this.enabled && this.updateTransition(this.bgTransition, this.bgMaterial, currentTime);
+        if (!active || this.bgMaterial.opacity <= 0.001) {
+            this.bgQuad.visible = false;
+            return;
+        }
+
+        // 与自定义背景同一套换算：铺满视口（含相机 zoom），跟随相机位置/旋转
+        const zoom = camera.zoom || 1;
+        this.bgQuad.scale.set(
+            (camera.right - camera.left) / zoom,
+            (camera.top - camera.bottom) / zoom,
+            1,
+        );
+        // 极远的 z：任何在它前面的物体都会通过深度测试盖住它，只留下背景被压暗。
+        this.bgQuad.position.set(camera.position.x, camera.position.y, FlashEffect.BG_QUAD_Z);
+        this.bgQuad.rotation.z = camera.rotation.z;
+        this.bgQuad.visible = true;
+    }
+
+    /** 主场景渲染【之后】调用：渲染前景闪光叠层（plane=Foreground），画在最上层。 */
+    renderFG(renderer: WebGLRenderer, currentTime: number): void {
         if (!this.enabled) return;
-
-        // Update StayBlack persisted state
-        if (this.fgTransition.active && this.fgTransition.flashStyle === 'StayBlack') {
-            this.fgMaterial.color.set(0, 0, 0);
-            this.fgMaterial.opacity = 1;
-        }
-        if (this.bgTransition.active && this.bgTransition.flashStyle === 'StayBlack') {
-            this.bgMaterial.color.set(0, 0, 0);
-            this.bgMaterial.opacity = 1;
-        }
-
-        const fgActive = this.updateTransition(this.fgTransition, this.fgMaterial, currentTime);
-        const bgActive = this.updateTransition(this.bgTransition, this.bgMaterial, currentTime);
-
-        const fgVisible = this.fgMaterial.opacity > 0.001;
-        const bgVisible = this.bgMaterial.opacity > 0.001;
-
-        if (!fgVisible && !bgVisible) return;
+        const active = this.updateTransition(this.fgTransition, this.fgMaterial, currentTime);
+        if (!active || this.fgMaterial.opacity <= 0.001) return;
 
         const oldAutoClear = renderer.autoClear;
         renderer.autoClear = false;
         renderer.clearDepth();
-        renderer.render(this.scene, this.camera);
+        renderer.render(this.overlayScene, this.overlayCamera);
         renderer.autoClear = oldAutoClear;
     }
 
@@ -281,8 +335,11 @@ export class FlashEffect {
     stop(): void {
         this.fgTransition.active = false;
         this.bgTransition.active = false;
+        this.fgTransition.hold = false;
+        this.bgTransition.hold = false;
         this.fgMaterial.opacity = 0;
         this.bgMaterial.opacity = 0;
+        this.bgQuad.visible = false;
     }
 
     reset(): void {
@@ -309,6 +366,7 @@ export class FlashEffect {
         this.bgMaterial.dispose();
         this.fgQuad.geometry.dispose();
         this.bgQuad.geometry.dispose();
+        if (this.bgQuad.parent) this.bgQuad.parent.remove(this.bgQuad);
     }
 }
 

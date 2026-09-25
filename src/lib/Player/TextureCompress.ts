@@ -125,11 +125,31 @@ export async function loadCompressedTexture(url: string, maxDim: number = MAX_TE
                 }
             }
         } catch {
-            // createImageBitmap 不可用（老浏览器）：退回 <img> 全尺寸路径
+            // createImageBitmap 失败/不可用（超大图、老浏览器）：退回 <img> 解码 + canvas 缩放。
+            // 关键：**必须仍然缩到 maxDim**，否则超过 GPU 上限的图会直接上传失败/爆显存。
             return await new Promise<Texture | null>((resolve) => {
                 const img = new Image();
                 img.onload = () => {
-                    const tex = new Texture(img);
+                    const ow = img.naturalWidth || img.width;
+                    const oh = img.naturalHeight || img.height;
+                    let src: HTMLImageElement | HTMLCanvasElement = img;
+                    if (Math.max(ow, oh) > maxDim) {
+                        const scale = maxDim / Math.max(ow, oh);
+                        const cw = Math.max(1, Math.round(ow * scale));
+                        const ch = Math.max(1, Math.round(oh * scale));
+                        const canvas = document.createElement('canvas');
+                        canvas.width = cw;
+                        canvas.height = ch;
+                        const ctx = canvas.getContext('2d');
+                        if (ctx) {
+                            ctx.imageSmoothingEnabled = true;
+                            ctx.imageSmoothingQuality = 'medium';
+                            ctx.drawImage(img, 0, 0, cw, ch);
+                            src = canvas;
+                        }
+                    }
+                    const tex = new Texture(src);
+                    tex.userData = { ...(tex.userData || {}), origWidth: ow, origHeight: oh };
                     tex.colorSpace = SRGBColorSpace;
                     tex.generateMipmaps = false;
                     tex.minFilter = LinearFilter;
@@ -143,7 +163,7 @@ export async function loadCompressedTexture(url: string, maxDim: number = MAX_TE
 
         if (!origW || !origH) { origW = (bitmap as any).width; origH = (bitmap as any).height; }
         const tex = new Texture(bitmap as unknown as HTMLImageElement);
-        // 记录【原图】像素尺寸：装饰物世界尺寸必须按原图算（官方用 sprite 原始尺寸），
+        // 记录【原图】像素尺寸：装饰物世界尺寸必须按原图算（用 sprite 原始尺寸），
         // 否则超过上限被缩放过的图会算小。
         tex.userData = { ...(tex.userData || {}), origWidth: origW, origHeight: origH };
         tex.colorSpace = SRGBColorSpace;

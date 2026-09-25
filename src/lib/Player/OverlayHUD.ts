@@ -92,7 +92,7 @@ export class OverlayHUD {
     ctx.restore();
   }
 
-  /** 死亡界面：完成度 / 死亡次数 / XAcc（官方 Fail2Action 显示 txtPercent + deaths）。 */
+  /** 死亡界面：完成度 / 死亡次数 / XAcc（显示 txtPercent + deaths）。 */
   private drawDeath(ctx: CanvasRenderingContext2D, w: number, h: number): void {
     const pct = (this.percentComplete * 100).toFixed(2);
     const xacc = (this.xAcc * 100).toFixed(2);
@@ -118,7 +118,7 @@ export class OverlayHUD {
     ctx.textAlign = 'start';
   }
 
-  /** 判定统计：各判定等级计数 + XAcc（官方配色）。 */
+  /** 判定统计：各判定等级计数 + XAcc（配色）。 */
   private drawMargins(ctx: CanvasRenderingContext2D, w: number, h: number): void {
     const c = this.marginCounts;
     if (!c || c.length === 0) return;

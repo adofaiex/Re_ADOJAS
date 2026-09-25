@@ -6,7 +6,7 @@
  * - 三角符号是判定时间的指针，随 averageAngle 平滑移动
  * - 判定痕迹（tick）：每次判定在判定条上方画一个判定颜色的圆角小长方形，tickLife=3s 淡出
  *
- * 归一化（官方 AddHit）：angleNorm = 误差角度(deg) × (60 / Counted边界角度)
+ * 归一化（AddHit）：angleNorm = 误差角度(deg) × (60 / Counted边界角度)
  */
 import { getBoundariesInDeg, JudgeConfig, HitMargin } from './Judge';
 
@@ -17,8 +17,8 @@ interface Tick {
   maxLife: number;
 }
 
-const TICK_LIFE = 3.0;     // 官方 tickLife
-const SENSITIVITY = 0.2;   // 官方 sensitivity
+const TICK_LIFE = 3.0;     // tickLife
+const SENSITIVITY = 0.2;   // sensitivity
 const MAX_TICKS = 60;
 
 // 判定条分段（与 SVG viewBox 0..520 同比例）：Miss | Bad | Good | Perfect | Good | Bad | Miss
@@ -67,7 +67,7 @@ export class HitErrorMeter {
     this.cx = w / 2;
     this.barW = Math.min(w * 0.44, 380);
     this.barH = 14;
-    this.barY = h - 85; // 底部偏上（官方 pos y=0.03）
+    this.barY = h - 85; // 底部偏上（归一化 pos y=0.03）
   }
 
   /** 是否显示（有判定痕迹或指针非零时） */
@@ -87,7 +87,7 @@ export class HitErrorMeter {
     const bounds = getBoundariesInDeg(bpmTimesSpeed, pitch, marginScale, config);
     if (bounds.countedDeg <= 0) return;
 
-    // 归一化到 ±60（官方：angleDiff *= 60/counted）
+    // 归一化到 ±60（angleDiff *= 60/counted）
     // 左=早（快），右=晚（慢）：errorAngleDeg 正=晚 → 右
     let angle = errorAngleDeg * (60 / bounds.countedDeg);
     if (angle < -60) angle = -60.0001 - Math.random() * 3;
@@ -108,7 +108,7 @@ export class HitErrorMeter {
     this.visible = true;
   }
 
-  /** 官方 CalculateTickColor：按归一化角度与 Perfect/Pure 边界比较 */
+  /** CalculateTickColor：按归一化角度与 Perfect/Pure 边界比较 */
   private calcTickColor(angle: number, bounds: { countedDeg: number; perfectDeg: number; pureDeg: number }): string {
     const perfectN = 60 * (bounds.perfectDeg / bounds.countedDeg);
     const pureN = 60 * (bounds.pureDeg / bounds.countedDeg);

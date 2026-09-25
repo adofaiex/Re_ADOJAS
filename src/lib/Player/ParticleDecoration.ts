@@ -189,6 +189,14 @@ export class ParticleDecorationSystem {
   public stop(clear = true): void { this.started = false; if (clear) this.clearParticles() }
   private clearParticles(): void { this.pool.push(...this.particles); this.particles.length = 0; if (this.mesh) this.mesh.count = 0 }
   public setVisible(value: boolean): void { this.visible = value; if (this.mesh) this.mesh.visible = value }
+  /** SetDepth：renderer.sortingOrder = -depth（映射为 renderOrder）。 */
+  public setRenderOrder(order: number): void { if (this.mesh) this.mesh.renderOrder = order }
+  /** SetScale：MoveDecorations 的 scale 改发射区域
+   *  shape.scale（emit 时按 scale/100 × tileSize 计算），装饰 transform 不缩放。 */
+  public setShapeScale(sx: number | undefined, sy: number | undefined): void {
+    if (sx !== undefined) this.cfg.scale[0] = sx * 100
+    if (sy !== undefined) this.cfg.scale[1] = sy * 100
+  }
   public setCamScaleMultiplier(value: number): void { this.cfg.camScaleMultiplier = value }
 
   public update(dt: number, parentPos: { x: number; y: number }, parentRot: number, parentScale: number): void {
@@ -254,7 +262,7 @@ export class ParticleDecorationSystem {
       const arc = Math.max(0, Math.min(360, this.cfg.arc || 360)) * Math.PI / 180
       let angle = this.rng.range(0, arc)
       if (this.cfg.arcMode.toLowerCase() === 'loop' && arc > 0) angle = this.simulationTime % arc
-      // 官方 shape.scale 会把 Circle 当椭圆缩放（shape.scale = scale/100*tileSize）
+      // shape.scale 会把 Circle 当椭圆缩放（shape.scale = scale/100*tileSize）
       const radius = Math.sqrt(this.rng.next()) * this.cfg.shapeRadius * this.cfg.tileSize
       p.x = Math.cos(angle) * radius * sx
       p.y = Math.sin(angle) * radius * sy

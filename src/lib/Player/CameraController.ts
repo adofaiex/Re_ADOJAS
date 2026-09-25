@@ -35,7 +35,7 @@ function clamp01(v: number): number {
 }
 
 /**
- * One independent DOTween track. The original game has four:
+ * One independent tween track. There are four:
  * moveX, moveY, rotation (vfx.camAngle), zoom (cam.zoomSize).
  */
 interface TweenState {
@@ -73,7 +73,7 @@ export interface CameraUpdateParams {
     bpm: number;
     /** Song pitch (settings.pitch / 100). */
     pitch: number;
-    /** Current planet / pivot world position (scrCamera.UpdateFollowCam topos). */
+    /** Current planet / pivot world position (UpdateFollowCam topos). */
     planetWorldPos: { x: number; y: number };
     /** Current tile index (tile-change detection). */
     currentTileIndex: number;
@@ -83,12 +83,12 @@ export interface CameraUpdateParams {
 
 /**
  * Faithful port of ADOFAI's two-layer camera:
- *   camParent (rig, absolute world position)  ← MoveCamera DOTween
+ *   camParent (rig, absolute world position)  ← MoveCamera tween
  *   camera.localPosition (follow layer)       ← Lerp(frompos, topos, timer/camspeed)
  *
- * Reference: scrCamera.cs (Update / UpdateFollowCam / SetToFreeMode)
- *            ffxCameraPlus.cs (Decode / StartEffect)
- *            ffxPlusBase.cs (crotchet / ScrubToTime)
+ * Camera update: Update / UpdateFollowCam / SetToFreeMode
+ * MoveCamera effect: Decode / StartEffect
+ * Effect base: crotchet / ScrubToTime
  */
 export class CameraController {
     // ── Rig (camParent) — absolute world position ──────────────────────────
@@ -109,7 +109,7 @@ export class CameraController {
     private offset = { x: 0, y: 0 };
     private holdOffset = { x: 0, y: 0 };
 
-    // ── Bookkeeping (matches scrCamera fields) ─────────────────────────────
+    // ── Bookkeeping (camera state fields) ─────────────────────────────────
     private lastEventRelativePosition = { x: 0, y: 0 };
     private lastUsedMovementType: CamMovementType = 'Player';
     private lastTileCamFloor = -1;
@@ -240,8 +240,8 @@ export class CameraController {
 
         this.lastCameraTimelineIndex = -1;
 
-        // The original game injects a synthetic ffxCameraPlus on floor 0 that
-        // applies the level camera settings (scnGame.cs:1084-1093).
+        // A synthetic MoveCamera is injected on floor 0 that
+        // applies the level camera settings.
         const rt = parseMovementType(s.relativeTo) ?? 'Player';
         const synthetic = {
             eventType: 'MoveCamera',
@@ -323,7 +323,7 @@ export class CameraController {
         this.lastFollowTile = currentTileIndex;
     }
 
-    // ── Per-frame update (scrCamera.Update) ────────────────────────────────
+    // ── Per-frame update (Update) ──────────────────────────────────────────
 
     public update(params: CameraUpdateParams): void {
         const { nowSeconds, deltaSeconds, bpm, pitch, planetWorldPos, currentTileIndex } = params;
@@ -336,7 +336,7 @@ export class CameraController {
             }
         }
 
-        // Process all triggered camera events (ffxCameraPlus.StartEffect).
+        // Process all triggered camera events (StartEffect).
         let idx = this.lastCameraTimelineIndex;
         while (idx + 1 < this.cameraTimeline.length && this.cameraTimeline[idx + 1].time <= nowSeconds) {
             idx++;
@@ -356,7 +356,7 @@ export class CameraController {
         this.lastCameraTimelineIndex = idx;
 
 
-        // UpdateFollowCam: called on tile change only (scrCamera.UpdateFollowCam).
+        // UpdateFollowCam: called on tile change only.
         if (currentTileIndex !== this.lastFollowTile) {
             this.lastFollowTile = currentTileIndex;
             this.updateFollowCam(planetWorldPos);
@@ -391,7 +391,7 @@ export class CameraController {
         }
     }
 
-    // ── Core event processing (ffxCameraPlus.StartEffect) ──────────────────
+    // ── Core event processing (StartEffect) ───────────────────────────────
 
     private startEffect(
         event: any,
@@ -481,7 +481,7 @@ export class CameraController {
             switch (camMovementType) {
                 case 'Player': {
                     if (!this.followMode) {
-                        // C#: camParent.position = cam.transform.position - planet;
+                        // camParent.position = cam.transform.position - planet;
                         //     cam.transform.MoveXY(camParent.position_before);
                         //     followMode = true; UpdateFollowCam(force: true)
                         const position = { x: this.camParent.x, y: this.camParent.y };
@@ -498,7 +498,7 @@ export class CameraController {
                 }
                 case 'Tile': {
                     if (this.followMode) {
-                        // C#: camParent.position = cam.transform.position; SetToFreeMode()
+                        // camParent.position = cam.transform.position; SetToFreeMode()
                         const camWorld = this.cameraWorldPos();
                         this.camParent.x = camWorld.x;
                         this.camParent.y = camWorld.y;
@@ -620,7 +620,7 @@ export class CameraController {
 
     private updateFollowCam(planetWorldPos: { x: number; y: number }): void {
         if (this.followMode) {
-            // C#: frompos = camera.localPosition - shake; topos = planet.world; timer = 0
+            // frompos = camera.localPosition - shake; topos = planet.world; timer = 0
             this.frompos = { x: this.pos.x, y: this.pos.y };
             this.topos = { x: planetWorldPos.x, y: planetWorldPos.y };
             this.timer = 0;

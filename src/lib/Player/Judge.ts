@@ -1,6 +1,6 @@
 /**
  * ADOFAI 判定数学（纯函数，无 Three.js 依赖）。
- * 规则来源：官方源码 scrMisc.GetHitMargin / GetAdjustedAngleBoundaryInDeg。
+ * 规则：GetHitMargin / GetAdjustedAngleBoundaryInDeg。
  *
  * 核心换算：角速度 = 3 × bpm × speed × pitch °/s（1拍 = 180°）
  *   error_deg = error_ms/1000 × 3 × bpm × speed × pitch
@@ -48,7 +48,7 @@ export interface MarginBounds {
   pureDeg: number;
 }
 
-// 时间基数（秒）。官方：Lenient 0.091 / Normal 0.065 / Strict 0.04
+// 时间基数（秒）：Lenient 0.091 / Normal 0.065 / Strict 0.04
 const BASE_TIMES: Record<Difficulty, number> = {
   Lenient: 0.091,
   Normal: 0.065,
@@ -89,7 +89,7 @@ export function getBoundariesInDeg(
 
 /**
  * 由角度误差（度，正=晚负=早）得到判定等级。
- * 官方是递增条件覆盖，这里用无分支的区间判断（几个比较即可）。
+ * 用无分支的区间判断代替递增条件覆盖（几个比较即可）。
  */
 export function getHitMarginFromErrorDeg(errorDeg: number, bounds: MarginBounds): HitMargin {
   if (errorDeg > bounds.countedDeg) return HitMargin.TooLate;

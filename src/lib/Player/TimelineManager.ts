@@ -1,12 +1,25 @@
 import { Vector2, Vector3, Euler, Mesh, ShaderMaterial } from 'three';
 import { getEasingFunction } from './WasmEasing';
 import { isEventActive, isFieldEnabled } from './EventUtils';
+import { debugLog } from './DebugLog';
 
 export interface Keyframe {
     time: number;
     value: number;
     ease: string | null;
 }
+
+/**
+ * RepeatEvents 的 "soloTypes"：这些事件重复展开时只应用第一次就 break
+ * （原版 scnGame.ApplyEventsToFloors 内的 EditorConstants.soloTypes）。
+ * MoveCamera / MoveTrack / MoveDecorations 等**不在**其中 —— 它们的每一次重复都要应用。
+ */
+const REPEAT_SOLO_TYPES = new Set<string>([
+    'Twirl', 'Multitap', 'Checkpoint', 'SetHitsound', 'ChangeTrack', 'ColorTrack',
+    'AnimateTrack', 'SetPlanetRotation', 'KillPlayer', 'Hold', 'SetHoldSound',
+    'SetConditionalEvents', 'MultiPlanet', 'FreeRoam', 'Pause', 'AutoPlayTiles',
+    'Hide', 'ScaleMargin', 'ScaleRadius', 'TileDimensions', 'Bookmark',
+]);
 
 export class TimelineManager {
     private timelines: Map<string, Map<string, Keyframe[]>> = new Map();
@@ -18,6 +31,14 @@ export class TimelineManager {
     private _tileRanges: { tileIdx: number; start: number; end: number }[] = [];
     private _tileRangePrefixMaxEnd: number[] = [];
     private _tileRangesSorted: boolean = false;
+
+    /**
+     * 末端宽限（秒）：动画最后一帧之后再多保留一小段活跃窗口。
+     * duration=0 的事件、以及动画末值都是"瞬时落地并保持"，
+     * 时间轴上只有一个点；若不宽限，getActiveTileIndicesAt 在 time === end
+     * 时已判定为非活跃，那一帧永远不会被应用到（"该动的砖没动"）。
+     */
+    private static readonly RANGE_GRACE = 0.1;
     private tileStartTimes: number[];
     private tileBPM: number[];
     private totalTiles: number;
@@ -56,9 +77,12 @@ export class TimelineManager {
             time: number; duration: number; event: any; floor: number
         }[]> = new Map();
 
+        // crotchet = 60/(bpm*pitch*speed)：时长要含 song pitch。
+        const pitch = this.getSongPitch(settings);
+
         const triggerEntries: { time: number; event: any }[] = [];
 
-        // Collect MoveTrack events per floor, then sort by id to match C# order
+        // Collect MoveTrack events per floor, then sort by id to match apply order
         const perFloorMoveTrack: Map<number, any[]> = new Map();
         for (const action of actions) {
             if (!isEventActive(action)) continue;
@@ -103,11 +127,21 @@ export class TimelineManager {
             // ── Expand repeated events ────────────────────────────
             const eventsToProcess: { event: any; floor: number; angleOffset: number }[] = [];
 
-            const eventTag = action.eventTag ?? '';
-            const hasRepeat = eventTag && repeatTable.has(action.floor) && repeatTable.get(action.floor)!.has(eventTag);
+            // eventTag 是**空格分隔的多个 tag**：原版把事件的 eventTag 拆开后逐个在
+            // RepeatEvents 表里查，命中第一个就 break（不是拿整串去比较）。
+            // 整串比较会导致 `eventTag: "cam1 move"` 这类事件永远匹配不到重复表。
+            let repeatInfo: { repetitions: number; interval: number; executeOnCurrentFloor: boolean; gapLength: number } | undefined;
+            const repeatSub = repeatTable.get(action.floor);
+            if (repeatSub) {
+                const tagList = (action.eventTag ?? '').split(' ').filter((t: string) => t);
+                for (const tg of tagList) {
+                    const found = repeatSub.get(tg);
+                    if (found) { repeatInfo = found; break; }
+                }
+            }
 
-            if (hasRepeat) {
-                const info = repeatTable.get(action.floor)!.get(eventTag)!;
+            if (repeatInfo) {
+                const info = repeatInfo;
                 const baseFloor = action.floor;
                 const isBeatMode = info.interval > 0;
 
@@ -144,6 +178,8 @@ export class TimelineManager {
                         floor: epFloor,
                         angleOffset: (action.angleOffset || 0) + repAngleOffset,
                     });
+                    // soloTypes 只应用第一次就 break（原版行为）：Twirl/Pause/Hide/…
+                    if (REPEAT_SOLO_TYPES.has(action.eventType)) break;
                 }
             } else {
                 eventsToProcess.push({
@@ -162,7 +198,7 @@ export class TimelineManager {
                 let timeOffset = (angleOffset / 180) * secPerBeat;
 
                 // tileStartTimes 即 songposition 时间线（timeInLevel 0 = countdown 开始），
-                // floor 0 事件天然在 countdown 开始触发（官方 songposition 0）。
+                // floor 0 事件天然在 countdown 开始触发（songposition 0）。
                 const eventTime = startTime + timeOffset;
 
             if (action.eventType === 'MoveTrack') {
@@ -171,16 +207,30 @@ export class TimelineManager {
                 const start = Math.min(startTile, endTile);
                 const end = Math.max(startTile, endTile);
                 const gapLength = action.gapLength || 0;
-                const rawDuration = (action.duration ?? 1) * secPerBeat;
-                const duration = rawDuration || 1;
+                // crotchet = 60/(bpm*pitch*speed)；tileBPM 只含 speed，故再 /pitch。
+                // 不再用 `|| 1` 兜底：duration=0 走零时长（瞬时），
+                // 兜成 1 会把它变成 1 秒 tween。
+                const duration = ((action.duration ?? 1) * secPerBeat) / pitch;
 
                 for (let i = start; i <= end; i += 1 + gapLength) {
-                    if (i < 0) continue;
+                    if (i < 0 || i >= this.totalTiles) continue;
                     if (!perTileMoveTrack.has(i)) perTileMoveTrack.set(i, []);
                     perTileMoveTrack.get(i)!.push({
                         time: eventTime, duration, event: action, floor,
                     });
                 }
+                // 诊断：MoveTrack 事件的宿主 floor / 触发时间 / 覆盖范围（对照关卡实际意图）
+                debugLog('[MoveTrack] id=' + (action.id ?? '?') + ' host=' + floor
+                    + ' rawFloor=' + (action.floor ?? 0)
+                    + ' t=' + eventTime.toFixed(3)
+                    + ' (' + (this.tileStartTimes[floor] ?? 0).toFixed(3) + '+off)'
+                    + ' range=[' + start + '..' + end + '] gap=' + gapLength
+                    + ' dur=' + duration.toFixed(3) + ' ease=' + (action.ease || 'Linear')
+                    + ' ao=' + (ep.angleOffset ?? 0)
+                    + ' tStart=' + (this.tileStartTimes[start] ?? 0).toFixed(3)
+                    + ' tEnd=' + (this.tileStartTimes[end] ?? 0).toFixed(3)
+                    + ' startTile=' + JSON.stringify(action.startTile)
+                    + ' endTile=' + JSON.stringify(action.endTile));
             } else if (action.eventType === 'MoveCamera') {
                 this._cameraEvents.push({ time: eventTime, event: action, floor: ep.floor, angleOffset: ep.angleOffset });
             } else if (action.eventType !== 'SetHitsound' &&
@@ -205,8 +255,8 @@ export class TimelineManager {
         });
 
         // Build MoveTrack keyframes FIRST, then AnimateTrack (appear/disappear)
-        // SECOND so AnimateTrack wins on conflicts (matching C# priority).
-        // 应用顺序（C# ApplyEventsToFloors）：floor 升序，同 floor 按 id 升序。
+        // SECOND so AnimateTrack wins on conflicts (matching apply priority).
+        // 应用顺序（ApplyEventsToFloors）：floor 升序，同 floor 按 id 升序。
         // 后处理的事件覆盖先处理的（RemoveKeyframes 删冲突区间）。
         for (const [tileIdx, events] of perTileMoveTrack) {
             events.sort((a, b) => {
@@ -217,7 +267,7 @@ export class TimelineManager {
         }
 
         // Build Appear/Disappear keyframes AFTER MoveTrack so AnimateTrack wins on conflicts.
-        this.buildAnimateTrackKeyframes(actions, basePositions, baseRotations, baseScales, baseOpacities, settings);
+        this.buildAnimateTrackKeyframes(actions, basePositions, baseRotations, baseScales, baseOpacities, settings, pitch);
 
         this._animatedTileIndices = this.computeAnimatedTileIndices();
         this.buildTileRanges();
@@ -230,8 +280,10 @@ export class TimelineManager {
             const tileIdx = parseInt(entity.slice(5), 10);
             if (isNaN(tileIdx)) continue;
             for (const kfs of props.values()) {
-                const last = kfs[kfs.length - 1];
-                if (last && last.time > 1e-9) {
+                // >1 关键帧 = 该属性真的有关键帧变化（buildTileMoveTrack 写下的 time-0
+                // base 初值只有 1 帧）。不能用 last.time > 0 判定：只发生在 countdown
+                // （负时间）里的 MoveTrack/Appear 会被漏掉，导致"该动的砖没动"。
+                if (kfs.length > 1) {
                     indices.add(tileIdx);
                     break;
                 }
@@ -252,19 +304,24 @@ export class TimelineManager {
             if (!props) continue;
             let start = Infinity, end = -Infinity;
             for (const kfs of props.values()) {
-                if (kfs.length > 0) {
-                    // time 0 的 base 关键帧只是初值（buildTileMoveTrack 写入），
-                    // 不能当作动画窗口起点——否则全局 appear 动画会让每块
-                    // "还没到的砖"在 [0, entry] 内一直算作 active（O(n) 每帧）。
-                    let s = kfs[0].time;
-                    if (s <= 0 && kfs.length > 1 && kfs[1].time > 0) s = kfs[1].time;
-                    if (s < start) start = s;
-                    if (kfs[kfs.length - 1].time > end) end = kfs[kfs.length - 1].time;
-                }
+                const n = kfs.length;
+                if (n === 0) continue;
+                // 动画起点：ease != null 的首帧是 tween 起点（含从 time 0 起的 tween）；
+                // 否则跳过 time-0 的 base 初值，用其后第一帧。只有初值（n === 1）的属性
+                // 没有动画，不参与窗口——否则全局 appear 动画会让每块"还没到的砖"
+                // 在 [0, entry] 内一直算作 active（O(n) 每帧）。
+                const firstAnim = kfs[0].ease != null
+                    ? kfs[0].time
+                    : (n > 1 ? kfs[1].time : Infinity);
+                if (firstAnim === Infinity) continue;
+                if (firstAnim < start) start = firstAnim;
+                const last = kfs[n - 1].time;
+                if (last > end) end = last;
             }
-            if (end >= start) {
-                this._tileRanges.push({ tileIdx, start, end });
-            }
+            if (end === -Infinity) continue;
+            // 末端 +RANGE_GRACE：保证最后一帧之后至少再采样到一次（duration=0 瞬时事件 /
+            // 动画末值落地），随后由 MoveTrackManager.pendingFinalApply 收官。
+            this._tileRanges.push({ tileIdx, start, end: end + TimelineManager.RANGE_GRACE });
         }
         // Sort by START so "currently active" (start <= time < end) can be found
         // by binary-searching the started prefix, then scanning backwards.
@@ -340,8 +397,8 @@ export class TimelineManager {
         const baseSY = tileIdx >= 0 && tileIdx < baseScales.length ? baseScales[tileIdx].y : 1;
         const baseOp = tileIdx >= 0 && tileIdx < baseOpacities.length ? baseOpacities[tileIdx] : 1;
 
-        // base keyframes 在 time 0（songposition 0 = countdown 开始，官方位置）。
-        // 负时间（countdown 期间）事件会 removeAfter 删除它们，startVal 归零渐现——官方行为。
+        // base keyframes 在 time 0（songposition 0 = countdown 开始）。
+        // 负时间（countdown 期间）事件会 removeAfter 删除它们，startVal 归零渐现。
         this.addKeyframe(`tile:${tileIdx}`, 'positionX', 0, baseX, null);
         this.addKeyframe(`tile:${tileIdx}`, 'positionY', 0, baseY, null);
         this.addKeyframe(`tile:${tileIdx}`, 'rotation', 0, baseRot, null);
@@ -355,7 +412,7 @@ export class TimelineManager {
             const { event, time: eventTime, duration: eventDuration, floor } = entry;
 
             // 不 clamp 到 0：负时间（countdown 期间）动画正常触发，
-            // 与官方 songposition 时间线（timeInLevel - cd）一致。
+            // 与 songposition 时间线（timeInLevel - cd）一致。
             const clampedTime = eventTime;
 
             const positionUsed = event.positionOffset !== undefined && isFieldEnabled(event, 'positionOffset');
@@ -372,11 +429,13 @@ export class TimelineManager {
             if (rotationUsed) rotationOffset = (event.rotationOffset || 0) * Math.PI / 180;
 
             let scaleX: number | null = null, scaleY: number | null = null;
-            if (scaleUsed && event.scale) {
+            if (scaleUsed && event.scale != null) {
                 if (Array.isArray(event.scale)) {
                     scaleX = event.scale[0] != null ? event.scale[0] / 100 : null;
                     scaleY = event.scale[1] != null ? event.scale[1] / 100 : null;
                 } else {
+                    // targetScaleV2 = scale / 100f（含 0）：`if (event.scale)` 会把
+                    // scale=0（缩到不可见）当假值跳过，导致"该动的砖没动"。
                     scaleX = scaleY = event.scale / 100;
                 }
             }
@@ -385,36 +444,36 @@ export class TimelineManager {
 
             const targetX = offsetX != null ? baseX + offsetX : accX;
             const targetY = offsetY != null ? baseY + offsetY : accY;
-            const targetRot = rotationOffset != null ? baseRot + rotationOffset : accRot;
+            // MoveFloor: 目标 = target.startRot + rotationOffset，而
+            // startRot 只在建地板时取过一次（identity → 0），PositionTrack 的
+            // SetRotation 不会刷新它 ⇒ MoveTrack 的旋转是【绝对 rotationOffset】，
+            // 会覆盖砖块自身旋转。（写成 baseRot + rotationOffset 会多转一份。）
+            const targetRot = rotationOffset != null ? rotationOffset : accRot;
             const targetSX = scaleX != null ? scaleX : accSX;
             const targetSY = scaleY != null ? scaleY : accSY;
             const targetOp = opacity != null ? opacity : accOp;
 
-            if (eventDuration <= 0) {
-                if (offsetX != null) this.instantKeyframe(`tile:${tileIdx}`, 'positionX', clampedTime, targetX);
-                if (offsetY != null) this.instantKeyframe(`tile:${tileIdx}`, 'positionY', clampedTime, targetY);
-                if (rotationOffset != null) this.instantKeyframe(`tile:${tileIdx}`, 'rotation', clampedTime, targetRot);
-                if (scaleX != null) this.instantKeyframe(`tile:${tileIdx}`, 'scaleX', clampedTime, targetSX);
-                if (scaleY != null) this.instantKeyframe(`tile:${tileIdx}`, 'scaleY', clampedTime, targetSY);
-                if (opacity != null) this.instantKeyframe(`tile:${tileIdx}`, 'opacity', clampedTime, targetOp);
-            } else {
-                const endTime = clampedTime + eventDuration;
-                const props: [string, number][] = [];
-                if (offsetX != null) props.push(['positionX', targetX]);
-                if (offsetY != null) props.push(['positionY', targetY]);
-                if (rotationOffset != null) props.push(['rotation', targetRot]);
-                if (scaleX != null) props.push(['scaleX', targetSX]);
-                if (scaleY != null) props.push(['scaleY', targetSY]);
-                if (opacity != null) props.push(['opacity', targetOp]);
+            const props: [string, number][] = [];
+            if (offsetX != null) props.push(['positionX', targetX]);
+            if (offsetY != null) props.push(['positionY', targetY]);
+            if (rotationOffset != null) props.push(['rotation', targetRot]);
+            if (scaleX != null) props.push(['scaleX', targetSX]);
+            if (scaleY != null) props.push(['scaleY', targetSY]);
+            if (opacity != null) props.push(['opacity', targetOp]);
 
-                for (const [prop, target] of props) {
-                    // Official ffxMoveFloorPlus: floors share one moveTweens dict, and a
+            for (const [prop, target] of props) {
+                const kfs0 = this.timelines.get(`tile:${tileIdx}`)!.get(prop)!;
+                const fallback = kfs0.length > 0 ? kfs0[0].value : 0;
+                if (eventDuration <= 0) {
+                    // duration=0：先 Kill(complete:true)（旧 tween 立即跳到它自己的
+                    // 终点），再以零时长 tween 瞬间置新值。
+                    this.addTweenKillComplete(`tile:${tileIdx}`, prop, clampedTime, clampedTime, fallback, target, ease);
+                } else {
+                    // MoveFloor: floors share one moveTweens dict, and a
                     // new event Kill(complete:true)s the previous tween of the same
                     // property — the old tween instantly jumps to ITS end value at
                     // clampedTime and the new tween eases from there.
-                    const kfs0 = this.timelines.get(`tile:${tileIdx}`)!.get(prop)!;
-                    const fallback = kfs0.length > 0 ? kfs0[0].value : 0;
-                    this.addTweenKillComplete(`tile:${tileIdx}`, prop, clampedTime, endTime, fallback, target, ease);
+                    this.addTweenKillComplete(`tile:${tileIdx}`, prop, clampedTime, clampedTime + eventDuration, fallback, target, ease);
                 }
             }
 
@@ -446,7 +505,7 @@ export class TimelineManager {
         // thing on a property still registers.
         const kfs = this.ensureTimeline(entity, property);
 
-        // Official Kill(complete:true) semantics: a zero-duration event discards
+        // Kill(complete:true) semantics: a zero-duration event discards
         // any in-flight tween of the same property. Without this, a superseded
         // tween's end keyframe (after `time`) survives and "resurrects" later.
         this.removeAfter(kfs, time + 1e-9);
@@ -565,7 +624,7 @@ export class TimelineManager {
 
     private interpolateTimelinePair(left: Keyframe, right: Keyframe, time: number): number {
         // 右端点优先判定：同一时刻存在被切断的旧曲线尾与 snap 新起点两个 key 时
-        // （kill-complete 语义），必须取右（新）值——官方在事件时刻立即跳变。
+        // （kill-complete 语义），必须取右（新）值——在事件时刻立即跳变。
         if (time >= right.time) return right.value;
         if (time <= left.time) return left.value;
 
@@ -573,7 +632,7 @@ export class TimelineManager {
         if (range <= 1e-12) return right.value;
 
         // ease=null marks an instant (zero-duration) keyframe: the value snaps at
-        // left.time and holds until the next event. Official MoveDecorations/MoveCamera
+        // left.time and holds until the next event. MoveDecorations/MoveCamera
         // with duration 0 set the target immediately, so never interpolate from one.
         if (left.ease == null) return left.value;
 
@@ -642,6 +701,19 @@ export class TimelineManager {
         this.lastTriggerIndex = -1;
     }
 
+    /**
+     * 诊断用：列出某实体的全部关键帧（连续 + 离散轨）。
+     * 用于排查"某装饰该消失/该换图却一直不变"这类问题。
+     */
+    public debugKeyframes(entity: string): string {
+        const parts: string[] = [];
+        const cont = this.timelines.get(entity);
+        if (cont) for (const [p, kfs] of cont) parts.push(p + ':' + kfs.map(k => k.time.toFixed(2) + '@' + k.value).join('|'));
+        const disc = this.discreteTimelines.get(entity);
+        if (disc) for (const [p, kfs] of disc) parts.push(p + ':' + kfs.map(k => k.time.toFixed(2) + '@' + String(k.value)).join('|'));
+        return parts.join(' ');
+    }
+
     public getAllTileIndices(): Set<number> {
         const indices = new Set<number>();
         for (const entity of this.timelines.keys()) {
@@ -698,7 +770,7 @@ export class TimelineManager {
     }
 
     /**
-     * Instant event landing on a float timeline (official DOTween semantics for
+     * Instant event landing on a float timeline (zero-duration semantics for
      * zero-duration MoveDecorations fields): the previous ACTIVE tween of this
      * property is killed with complete:true (its end value is applied), then the
      * new value is set immediately and holds. Everything after `time` is wiped,
@@ -709,7 +781,7 @@ export class TimelineManager {
     }
 
     /**
-     * Tween entry with official ffxMoveDecorationsPlus DOTween semantics:
+     * Tween entry with MoveDecorations tweening semantics:
      * before creating the new tween, the previous tween of the same property is
      * killed with complete:true — it INSTANTLY jumps to its own end value at
      * `startTime`, and the new tween eases FROM that value (a visible mid-flight
@@ -806,18 +878,36 @@ export class TimelineManager {
     /* ── 工具 ────────────────────────────────────────────────────── */
 
     private parseTileReference(ref: any, currentFloor: number): number {
+        // IDFromTile：把结果 Clamp 到 [0, floors.Count - 1]。
+        // 不 clamp 时 `(n, End)` / 越界偏移会把 MoveTrack 应用到不存在的砖上，
+        // 表现为"动的范围不对"。
+        let result: number;
         if (Array.isArray(ref) && ref.length >= 2) {
             const offset = Number(ref[0]) || 0;
             const relativeTo = ref[1];
-            if (relativeTo === 'ThisTile' || relativeTo === 0) {
-                return currentFloor + offset;
-            } else if (relativeTo === 'Start' || relativeTo === 1) {
-                return offset;
+            if (relativeTo === 'Start' || relativeTo === 1) {
+                result = offset;
             } else if (relativeTo === 'End' || relativeTo === 2) {
-                    return (this.totalTiles - 1) + offset;
+                result = (this.totalTiles - 1) + offset;
+            } else {
+                result = currentFloor + offset;
             }
+        } else {
+            result = Number(ref) || currentFloor;
         }
-        return Number(ref) || currentFloor;
+        if (!Number.isFinite(result)) result = currentFloor;
+        return Math.max(0, Math.min(result, this.totalTiles - 1));
+    }
+
+    /**
+     * 关卡歌曲 pitch（settings.pitch 是百分比，默认 1）。
+     * 时长 = beats * 60 / (bpm * pitch * floor.speed)
+     * （crotchet），而触发时刻 SetStartTime 不含 pitch。
+     * 复刻的 tileBPM 只含 speed，所以时长要额外 /pitch。
+     */
+    private getSongPitch(settings: any): number {
+        const p = settings?.pitch;
+        return p != null && Number.isFinite(p) ? Math.max(0.1, p / 100) : 1;
     }
 
     /* ── 批量应用到 mesh ─────────────────────────────────────────── */
@@ -870,7 +960,8 @@ export class TimelineManager {
         baseRotations: number[],
         baseScales: Vector2[],
         baseOpacities: number[],
-        settings?: any,
+        settings: any,
+        pitch: number,
     ): void {
         const animateTrackEvents: { floor: number; event: any; id: number }[] = [];
         for (const action of actions) {
@@ -893,7 +984,7 @@ export class TimelineManager {
         let beatsAhead: number = settings?.beatsAhead ?? 3;
         let beatsBehind: number = settings?.beatsBehind ?? 4;
 
-        // C# ApplyEventsToFloors speed ratio tracking (num5/num6)
+        // ApplyEventsToFloors speed ratio tracking (num5/num6)
         // num5 = tileBPM at the AT event before the most recent
         // num6 = tileBPM at the most recent AT event
         // flag2 = whether the most recent AT event had trackAnimation enabled
@@ -921,7 +1012,7 @@ export class TimelineManager {
                     if (evt.beatsBehind != null) beatsBehind = evt.beatsBehind;
                 }
 
-                // Update flag2 from this AT event (always, per C#)
+                // Update flag2 from this AT event (always)
                 floorFlag2 = hasTrackAnim;
                 hadAnimateTrack = true;
                 eventIdx++;
@@ -941,11 +1032,11 @@ export class TimelineManager {
             const scaledBeatsBehind = beatsBehind * speedRatio;
 
             if (appearType !== 'None' && scaledBeatsAhead > 0) {
-                this.buildAppearKeyframes(floor, appearType, scaledBeatsAhead, basePositions, baseRotations, baseScales, baseOpacities);
+                this.buildAppearKeyframes(floor, appearType, scaledBeatsAhead, basePositions, baseRotations, baseScales, baseOpacities, pitch);
             }
             if (disappearType !== 'None' && scaledBeatsBehind > 0 && floor < this.totalTiles - 1) {
                 const nextEntryTime = this.tileStartTimes[floor + 1] ?? 0;
-                this.buildDisappearKeyframes(floor, disappearType, scaledBeatsBehind, nextEntryTime, basePositions, baseRotations, baseScales, baseOpacities);
+                this.buildDisappearKeyframes(floor, disappearType, scaledBeatsBehind, nextEntryTime, basePositions, baseRotations, baseScales, baseOpacities, pitch);
             }
         }
     }
@@ -958,6 +1049,7 @@ export class TimelineManager {
         baseRotations: number[],
         baseScales: Vector2[],
         baseOpacities: number[],
+        pitch: number,
     ): void {
         const entryTime = this.tileStartTimes[floor] || 0;
         const bpm = this.tileBPM[floor] || 100;
@@ -965,11 +1057,14 @@ export class TimelineManager {
 
         const isDropOrRise = animType === 'Drop' || animType === 'Rise';
         const tiles = isDropOrRise ? beatsAhead * 2 : beatsAhead;
+        // SetStartTime：startTime 用不含 pitch 的 crotchet，
+        // duration = num / pitch * ...（Drop/Rise = num/pitch*tilesAhead，
+        // 其它 = min(num/pitch*0.5, 0.5)）。
         const appearStartTime = Math.max(entryTime - tiles * secPerBeat, 0);
 
         const appearDuration = isDropOrRise
-            ? secPerBeat * beatsAhead
-            : Math.min(secPerBeat * 0.5, 0.5);
+            ? (secPerBeat * beatsAhead) / pitch
+            : Math.min((secPerBeat * 0.5) / pitch, 0.5);
         const appearEndTime = appearStartTime + appearDuration;
 
         const baseX = basePositions[floor]?.x ?? 0;
@@ -1088,11 +1183,13 @@ export class TimelineManager {
         baseRotations: number[],
         baseScales: Vector2[],
         baseOpacities: number[],
+        pitch: number,
     ): void {
         const bpm = this.tileBPM[floor] || 100;
         const secPerBeat = 60 / bpm;
         const disappearStartTime = nextEntryTime + beatsBehind * secPerBeat;
-        const disappearDuration = Math.min(secPerBeat * 0.5, 0.5);
+        // SetStartTime：duration = min(num/pitch*0.5, 0.5)
+        const disappearDuration = Math.min((secPerBeat * 0.5) / pitch, 0.5);
         const disappearEndTime = disappearStartTime + disappearDuration;
 
         const baseX = basePositions[floor]?.x ?? 0;

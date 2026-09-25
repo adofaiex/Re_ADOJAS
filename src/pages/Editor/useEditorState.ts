@@ -119,7 +119,7 @@ export function useEditorState() {
   // 死亡后建议的音频延迟弹窗（null = 不显示）
   const [suggestedAudioDelayMs, setSuggestedAudioDelayMs] = useState<number | null>(null)
 
-  // otto：每次成功判定/矫正 → 左右看一拍时长（官方 OttoBlink）
+  // otto：每次成功判定/矫正 → 左右看一拍时长（OttoBlink）
   const handleManualHit = useCallback((): void => {
     setAutoFailed(false)
     ottoBlinkFlip.current = !ottoBlinkFlip.current
@@ -298,7 +298,7 @@ export function useEditorState() {
   const handleToggleManualPlay = useCallback((): void => {
     setManualMode(prev => {
       const next = !prev
-      // 官方 ToggleAuto：切换即清除 autoFailed（otto 恢复常态）
+      // ToggleAuto：切换即清除 autoFailed（otto 恢复常态）
       setAutoFailed(false)
       setOttoBlinkIdx(0)
       if (ottoBlinkTimer.current) clearTimeout(ottoBlinkTimer.current)
@@ -332,7 +332,7 @@ export function useEditorState() {
     savePlaybackSettings({ manualMode, noFail, judgeDifficulty: d })
   }, [manualMode, noFail])
 
-  // 循环切换判定难度（官方：单个按钮点击循环 Lenient→Normal→Strict）
+  // 循环切换判定难度（单个按钮点击循环 Lenient→Normal→Strict）
   const handleCycleJudgeDifficulty = useCallback((): void => {
     const order: Difficulty[] = ["Lenient", "Normal", "Strict"]
     const idx = order.indexOf(judgeDifficulty)

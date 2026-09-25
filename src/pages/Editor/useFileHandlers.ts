@@ -552,7 +552,7 @@ export function useFileHandlers({
           bgImages.add(bgImage)
         }
 
-        // 自定义背景：官方事件是 CustomBackground（字段 bgImage）；兼容旧的 SetCustomBG/image
+        // 自定义背景：事件是 CustomBackground（字段 bgImage）；兼容旧的 SetCustomBG/image
         const actions = loadedLevel.actions || []
         actions.forEach((action: any) => {
           if (action.eventType === 'CustomBackground' || action.eventType === 'SetCustomBG') {

@@ -174,7 +174,7 @@ export default function EditorPage() {
 
   const { isFullscreen, toggleFullscreen } = useFullscreen()
 
-  // ── otto 自动播放按钮（官方彩蛋逻辑）──
+  // ── otto 自动播放按钮（彩蛋逻辑）──
   const auto = !manualMode
   const highBPM = (previewerRef.current?.getHighestBPM?.() ?? 0) >= 300
 
@@ -509,7 +509,7 @@ export default function EditorPage() {
 
       {/* Full-screen Canvas Area */}
       <div ref={containerRef} className="absolute inset-0">
-        {/* 右下角：判定选择 / 不死模式 / 自动播放（otto）——官方编辑器布局 */}
+        {/* 右下角：判定选择 / 不死模式 / 自动播放（otto）——编辑器布局 */}
         <div className="absolute bottom-4 right-4 flex items-end gap-3 select-none">
           {/* 判定选择：单按钮循环切换（宽→标→严） */}
           <button

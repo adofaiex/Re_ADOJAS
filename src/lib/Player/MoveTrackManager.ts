@@ -20,6 +20,8 @@ export class MoveTrackManager {
     private currentTime: number = 0;
     private activeTileIndices: Set<number> = new Set();
     private pendingFinalApply: Set<number> = new Set();
+    /** 诊断：已记录过"首次激活"的砖（排查 MoveTrack 生效时机/范围；上限 200 条）。 */
+    private _loggedActive: Set<number> = new Set();
 
     private static playCounter: number = 0;
     private debugPlayId: number = 0;
@@ -93,6 +95,12 @@ export class MoveTrackManager {
             newActiveIndices.add(tileIdx);
 
             const dirty = this.timelineManager.applyToTileMesh(tileIdx, mesh, time);
+            if (!this._loggedActive.has(tileIdx) && this._loggedActive.size < 200) {
+                this._loggedActive.add(tileIdx);
+                debugLog('[MoveTrackApply] tile=' + tileIdx + ' t=' + time.toFixed(3)
+                    + ' pos=' + mesh.position.x.toFixed(4) + ',' + mesh.position.y.toFixed(4)
+                    + ' rot=' + mesh.rotation.z.toFixed(4));
+            }
             if (dirty && this.tileTransformChanged) {
                 this.tileTransformChanged(
                     tileIdx,
@@ -183,10 +191,37 @@ export class MoveTrackManager {
         return this.activeTileIndices;
     }
 
+    /**
+     * 按时间轴在 `time` 的取值刷新单块砖（缺省用当前播放时间）。
+     *
+     * 用途：砖块网格被 `cleanupTileCache` 裁掉后重回视野时会被重新创建，
+     * `registerTileInitial` 只写基值；如果该砖的 MoveTrack/动画窗口已经过去，
+     * `getActiveTileIndicesAt` 不再命中，它就会一直停在原位（"该动的砖没动"）。
+     * 重建时补一次时间轴采样即可恢复正确状态。
+     */
+    public refreshTile(tileIndex: number, time?: number): void {
+        if (!this.tiles) return;
+        const mesh = this.tiles.get(tileIndex.toString());
+        if (!mesh) return;
+
+        const t = time !== undefined ? time : this.currentTime;
+        const dirty = this.timelineManager.applyToTileMesh(tileIndex, mesh, t);
+        if (dirty && this.tileTransformChanged) {
+            this.tileTransformChanged(
+                tileIndex,
+                mesh.position,
+                mesh.rotation as Euler,
+                mesh.scale,
+                mesh.userData.opacity ?? 1
+            );
+        }
+    }
+
     public reset(): void {
         this.debugPlayId = ++MoveTrackManager.playCounter;
         this.activeTileIndices.clear();
         this.pendingFinalApply.clear();
+        this._loggedActive.clear();
         const playLabel = `[MoveTrackManager][Play#${this.debugPlayId}]`;
 
         if (this.tiles) {

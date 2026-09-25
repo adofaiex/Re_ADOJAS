@@ -1,6 +1,6 @@
 /**
  * Bloom Post-Processing Effect for Three.js
- * Based on Unity's VideoBloom shader
+ * Full-screen bloom post-processing (threshold, gaussian blur, combine).
  * 
  * Bloom workflow:
  * 1. Threshold pass - extract bright areas (no color tinting here)
@@ -21,9 +21,17 @@ import combineFrag from '../shaders/combine.frag'
  * Bloom Effect class
  */
 export class BloomEffect {
+    /**
+     * 把 bloom 缓冲固定到 **198px 高**：
+     *   `float num = 198f / source.height;` 然后所有 RT 都按这个比例建立。
+     * 这个大幅降采样是关键 —— 细亮线/高光会被平均掉，叠加后不会整屏发白；
+     * 我们原来在全分辨率做阈值提取、只把模糊降到半分辨率，峰值几乎等于原图 → 过曝。
+     */
+    private static readonly BLOOM_HEIGHT = 198;
+
     private enabled: boolean = false;
     private threshold: number = 0.5;
-    private intensity: number = 0.7;  // Reduced to 70% of original strength
+    private intensity: number = 0.7;  // 70% 强度（避免过曝）
     private bloomColor: Color = new Color(1, 1, 1);
     private quality: number = 1;
 
@@ -83,6 +91,9 @@ export class BloomEffect {
                 direction: { value: new Vector2(1, 0) },
                 resolution: { value: new Vector2(1, 1) },
                 quality: { value: 1 },
+                // 模糊半径很小（≈1.3 个 bloom 缓冲像素）；我们原来用满
+                // ±4 texel 导致峰值被摊薄、"绽放感"变弱。这里收到 ~0.4 倍。
+                spread: { value: 0.4 },
             },
             vertexShader: blurVert,
             fragmentShader: blurFrag,
@@ -99,7 +110,7 @@ export class BloomEffect {
             fragmentShader: combineFrag,
         });
 
-        // Initialize intensity uniform to 0.7 (70% of original strength)
+        // Initialize intensity uniform to 0.7
         this.combineMaterial.uniforms.intensity.value = 0.7;
 
         this.scene = new Scene();
@@ -131,15 +142,7 @@ export class BloomEffect {
     setQuality(quality: number): void {
         this.quality = quality === 0 ? 0 : 1;
         this.blurMaterial.uniforms.quality.value = this.quality;
-
-        // Adjust render target size based on quality
-        // Low quality: quarter-res blur targets; High quality: half-res
-        const w = Math.floor(this.resolution.x / (this.quality > 0 ? 2 : 4));
-        const h = Math.floor(this.resolution.y / (this.quality > 0 ? 2 : 4));
-
-        this.rtBlurH.setSize(w, h);
-        this.rtBlurV.setSize(w, h);
-        this.blurMaterial.uniforms.resolution.value.set(w, h);
+        this.resizeTargets(this.resolution.x, this.resolution.y);
     }
 
     setColor(colorHex: string): void {
@@ -160,7 +163,7 @@ export class BloomEffect {
             parseInt(hex.slice(2, 4), 16) / 255,
             parseInt(hex.slice(4, 6), 16) / 255
         );
-        // Apply color in combine shader (like Unity's _Param1)
+        // Apply color tint in combine shader
         this.combineMaterial.uniforms.bloomColor.value.copy(this.bloomColor);
 
         // Debug log
@@ -173,18 +176,33 @@ export class BloomEffect {
 
     setSize(width: number, height: number): void {
         this.resolution.set(width, height);
+        this.resizeTargets(width, height);
+    }
 
-        // Pass 1 (Brightness) should be high-res to capture thin lines
-        this.rtBrightness.setSize(width, height);
+    /**
+     * 重建 bloom 缓冲：高度固定为 198px 等比缩放（源比 198 矮时按比例放大，
+     * 与 `198f / source.height` 一致）。亮度阈值提取与模糊都在这个低分辨率缓冲上做。
+     */
+    private resizeTargets(width: number, height: number): void {
+        const s = height > 0 ? BloomEffect.BLOOM_HEIGHT / height : 1;
+        const bw = Math.max(1, Math.round(width * s));
+        const bh = Math.max(1, Math.round(height * s));
 
-        // Blur passes can be half-res (high quality) or quarter-res (low quality)
-        const div = this.quality > 0 ? 2 : 4;
-        const w = Math.floor(width / div);
-        const h = Math.floor(height / div);
+        // 先 blit 到 2× 缓冲、再在 198px 缓冲上做阈值提取。
+        // 这里用"阈值提取缓冲 = 2×198px"等价这一步：细亮线保留更多、绽放更明显，
+        // 但仍是低分辨率 → 不会像全分辨率那样过曝。
+        this.rtBrightness.setSize(
+            Math.max(1, Math.round(bw * 2)),
+            Math.max(1, Math.round(bh * 2)),
+        );
+
+        // 模糊：High 用 198px；Low 再减半
+        const div = this.quality > 0 ? 1 : 2;
+        const w = Math.max(1, Math.floor(bw / div));
+        const h = Math.max(1, Math.floor(bh / div));
 
         this.rtBlurH.setSize(w, h);
         this.rtBlurV.setSize(w, h);
-
         this.blurMaterial.uniforms.resolution.value.set(w, h);
     }
 

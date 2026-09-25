@@ -6,6 +6,8 @@ import speedMinusUrl from '@/assets/events/Speed-.json';
 import doubleSnailUrl from '@/assets/events/DoubleSnail.json';
 import twirlB1Url from '@/assets/events/TwirlB1.json';
 import twirlR1Url from '@/assets/events/TwirlR1.json';
+import planetRedUrl from '@/assets/planets/planet_red.json';
+import planetBlueUrl from '@/assets/planets/planet_blue.json';
 
 export type IconType = 'End' | 'Speed+' | 'Speed-' | 'DoubleSnail' | 'TwirlB1' | 'TwirlB-1' | 'TwirlR1' | 'TwirlR-1';
 
@@ -167,4 +169,55 @@ export function createIconSprite(tex: Texture, opacity = 1, size = 0.22): Sprite
     sprite.scale.set(size, size, 1);
     sprite.center.set(0.5, 0.5);
     return sprite;
+}
+
+// ── Object(Planet) 装饰/行星本体贴图（planetColorType 预设） ──
+// DefaultRed/DefaultBlue 用对应贴图且不染色；其余类型（含 Custom）
+// 用红色贴图 × planetColor 染色。见 createPlanetVisual / planetTexturePathForObject。
+const _planetRed = () => loadLegacy('planet_red', planetRedUrl);
+const _planetBlue = () => loadLegacy('planet_blue', planetBlueUrl);
+
+/** 取行星本体贴图：DefaultBlue → blue.png，其它（含 Custom/undefined）→ red.png。 */
+export function getPlanetTexture(planetColorType: string | undefined): Texture {
+    return planetColorType === 'DefaultBlue' ? _planetBlue() : _planetRed();
+}
+
+/** 行星贴图是横向 sprite sheet：`frameCount = 11` / `fps = 12`。 */
+export const PLANET_FRAME_COUNT = 11;
+export const PLANET_FPS = 12;
+
+/** 把行星贴图配成"单帧采样"（贴图是 11 帧横排，必须 repeat 1/11 + offset 选帧，
+ *  否则整条 11 个球会被压成一个方块）。 */
+export function configurePlanetTexture(tex: Texture): Texture {
+    tex.repeat.set(1 / PLANET_FRAME_COUNT, 1);
+    tex.offset.set(0, 0);
+    tex.needsUpdate = true;
+    return tex;
+}
+
+/** 当前帧索引：`_Frame = unscaledTime * 12 % 11`（取整帧）。 */
+export function planetFrameIndex(timeSec: number): number {
+    const f = Math.floor(timeSec * PLANET_FPS) % PLANET_FRAME_COUNT;
+    return f < 0 ? f + PLANET_FRAME_COUNT : f;
+}
+
+/** 按帧索引设置行星贴图的 UV offset。 */
+export function applyPlanetFrame(tex: Texture, timeSec: number): void {
+    tex.offset.x = planetFrameIndex(timeSec) / PLANET_FRAME_COUNT;
+}
+
+/**
+ * planetColorType 预设颜色（SetPlanetColorType 用到的预设表）。
+ * Custom / 未设置返回 null，表示"用事件自身的 planetColor"。
+ * 数值：DefaultRed 0xff0000 / DefaultBlue 0x0000ff /
+ * Gold 0xffdb5a / Overseer 0x002633。
+ */
+export function planetPresetColor(planetColorType: string | undefined): string | null {
+    switch (planetColorType) {
+        case 'DefaultRed': return '#ff0000';
+        case 'DefaultBlue': return '#0000ff';
+        case 'Gold': return '#ffdb5a';
+        case 'Overseer': return '#002633';
+        default: return null; // Custom / undefined
+    }
 }

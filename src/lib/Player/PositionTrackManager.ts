@@ -162,7 +162,7 @@ export class PositionTrackManager {
 
                 // ============================================================
                 // Position offset block
-                // Gated by !disabled["positionOffset"] (official ADOFAI behavior)
+                // Gated by !disabled["positionOffset"]
                 // Contains positionOffset ADDITION + relativeTo + vector update
                 // ============================================================
                 if (!this.isDisabled(event, 'positionOffset')) {
@@ -174,7 +174,7 @@ export class PositionTrackManager {
                         targetTileId = this.IDFromTile(event.relativeTo, floor);
                     }
 
-                    // positionOffset * tileSize (official ADOFAI: constant tileSize, not affected by ScaleRadius)
+                    // positionOffset * tileSize (constant tileSize, not affected by ScaleRadius)
                     if (event.positionOffset) {
                         const pos = this.normalizeVec2(event.positionOffset);
                         changeX += pos[0] * TILE_SIZE;
@@ -207,7 +207,7 @@ export class PositionTrackManager {
                 }
 
                 // ============================================================
-                // Scale — gated by !disabled["scale"] (official: TryGetAndSet with onlyIfEnabled)
+                // Scale — gated by !disabled["scale"] (TryGetAndSet with onlyIfEnabled)
                 // ADOFAI: output3 /= 100f; if (!justThisTile) num10 = output3
                 // ============================================================
                 if (event.scale !== undefined && event.scale !== null && !this.isDisabled(event, 'scale')) {

@@ -84,7 +84,7 @@ export class ShakeScreen {
                 const t = EasingFunctions[easeName] ? EasingFunctions[easeName](progress) : progress;
                 envelope = 1 - t;
             } else {
-                // 0 → 1 (matching C# multiplier tween from 0→1 for In/Back/etc.)
+                // 0 → 1 (multiplier tween from 0→1 for In/Back/etc.)
                 const t = EasingFunctions[easeName] ? EasingFunctions[easeName](progress) : progress;
                 envelope = t;
             }

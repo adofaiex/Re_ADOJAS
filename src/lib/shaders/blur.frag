@@ -2,11 +2,12 @@ uniform sampler2D tDiffuse;
 uniform vec2 direction;
 uniform vec2 resolution;
 uniform int quality;
+uniform float spread;
 varying vec2 vUv;
 
 void main() {
     vec4 color = vec4(0.0);
-    vec2 texelSize = direction / resolution;
+    vec2 texelSize = (direction / resolution) * spread;
 
     float weights[5];
     weights[0] = 0.227027;

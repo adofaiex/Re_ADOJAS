@@ -5,6 +5,7 @@ import { Planet } from './Planet';
 import { HitsoundManager, HitsoundType, TimestampGroup } from './HitsoundManager';
 import { BloomEffect } from './BloomEffect';
 import { FlashEffect } from './FlashEffect';
+import { BlitPass } from './BackdropBlend';
 import createTrackMesh from '../Geo/mesh_reserve';
 import { EasingFunctions } from './Easing';
 import { HTMLAudioMusic, getSharedAudioContext } from './HTMLAudioMusic';
@@ -29,10 +30,13 @@ import {
 } from './Judge';
 import { JudgmentDisplay } from './JudgmentDisplay';
 import { HitErrorMeter } from './HitErrorMeter';
-import { getIconTypeIndex, getTwirlTexture, getSetSpeedTexture, IconType, buildIconAtlas, ICON_ATLAS_SIZE } from './IconLoader';
+import { getIconTypeIndex, getTwirlTexture, getSetSpeedTexture, IconType, buildIconAtlas, ICON_ATLAS_SIZE, getPlanetTexture } from './IconLoader';
 import Stats from 'three/examples/jsm/libs/stats.module.js';
 import type { Bloom, Flash, RecolorTrack } from 'adofai/event';
 import { Level } from 'adofai';
+
+/** 全屏背景（图/视频）相对视口的外扩余量，避免边缘接缝。 */
+const BG_OVERSCAN = 1.02;
 
 export class Player implements IPlayer {
   private container: HTMLElement | null = null;
@@ -212,20 +216,10 @@ export class Player implements IPlayer {
   // 每个砖块的有效 hitsound（SetHitsound 从事件 floor 起继承到所有后续砖块，可被下一个覆盖）
   private tileHitsounds: Array<{ type: HitsoundType; volume: number } | null> = [];
 
-  // Tile position history cache for trail rendering (circular buffer)
-  // Stores actual mesh positions per frame so trails can look up historical positions
-  // without replaying MoveTrack events (which is slow and error-prone)
-  // Only records tiles in a window around currentTileIndex to avoid O(totalTiles) per frame
-  private static readonly TRAIL_CACHE_WINDOW = 500;
-  private trailPositionCache: Float64Array[] = [];
-  private trailTimeCache: number[] = [];
-  private trailWindowStart: number[] = [];
-  private trailWindowEnd: number[] = [];
-  private trailCacheWriteIdx: number = 0;
-  private static readonly TRAIL_CACHE_SIZE = 30; // ~0.5s at 60fps
-  private trailCacheReady: boolean = false;
+  // 拖尾完全由时间轴 seek 计算（对窗口内每个采样时刻求球坐标再连线），
+  // 不缓存砖块逐帧位置、也不做头部对齐。下面这份逐帧球位置仅作极端兜底。
 
-  // 拖尾实际位置历史（环形缓冲）：每帧记录两球真实坐标，拖尾=球实际走过的路径
+  // 逐帧球位置历史（环形缓冲）
   private static readonly TRAIL_HIST_MAX = 256;
   private _trailHistRed: Float64Array = new Float64Array(Player.TRAIL_HIST_MAX * 2);
   private _trailHistBlue: Float64Array = new Float64Array(Player.TRAIL_HIST_MAX * 2);
@@ -267,6 +261,8 @@ export class Player implements IPlayer {
   
   // Custom Background (SetCustomBG event)
   private customBGMesh: Mesh | null = null;
+  /** 上次按相机 zoom 重算视频背景尺寸时的 zoom（避免每帧重算）。 */
+  private lastVideoSizeZoom: number = -1;
   private customBGTexture: Texture | null = null;
   private customBGImages: Map<string, string> = new Map(); // filename -> URL
   /** 最近一次 CustomBackground 事件（图片后到/手动载入时重放用） */
@@ -284,6 +280,10 @@ export class Player implements IPlayer {
 
   // Render target for post-processing
   private renderTarget: WebGLRenderTarget | null = null;
+  /** Overlay/SoftLight 装饰的 backdrop pass：主场景先渲染到这里，再单独叠这些装饰。 */
+  private backdropRT: WebGLRenderTarget | null = null;
+  private blitPass: BlitPass | null = null;
+  private blitCamera: OrthographicCamera | null = null;
 
   // Renderer state
   private isRestoringContext: boolean = false;
@@ -315,7 +315,7 @@ export class Player implements IPlayer {
     // This is needed because we skipped ADOFAI-JS's calculateTilePosition()
     this.calculateBasicTilePositions();
 
-    // 解析 ScaleMargin 事件：判定窗口倍率（官方 floor.marginScale = scale/100，从事件 floor 起继承）
+    // 解析 ScaleMargin 事件：判定窗口倍率（floor.marginScale = scale/100，从事件 floor 起继承）
     this.buildTileMarginScales();
 
     // Initialize position track manager
@@ -476,6 +476,22 @@ export class Player implements IPlayer {
       this.tileStartTimes,
       this.tileBPM
     );
+    // Object(Floor) 装饰的颜色类型/脉冲复用主 TileColorManager 的颜色模型
+    this.decorationManager.tileColorManager = this.tileColorManager;
+    // Object(Floor) 的旋转图标（Swirl/Twirl）朝向复用普通砖的图标逻辑
+    this.decorationManager.tileTwirlIconInfoProvider = (floor: number) => this.getTileTwirlIconInfo(floor);
+    // Overlay/SoftLight 需要采样背景，走独立的 backdrop pass（仅 WebGL 路径支持）
+    this.decorationManager.backdropBlendEnabled = (this.rendererType === 'webgl');
+
+    // 装饰检查（我们版 UnityExplorer，控制台可用）：
+    //   __adojasDeco()                     → 当前可见装饰的状态快照
+    //   __adojasDeco({visibleOnly:false})  → 全部装饰
+    //   __adojasDecoFind('tag 名')         → 按任意字段过滤（tag/图片名/id…），全部装饰里找
+    (window as any).__adojasDeco = (opts?: any) =>
+        this.decorationManager?.debugSnapshot(opts) ?? [];
+    (window as any).__adojasDecoFind = (needle: string) =>
+        (this.decorationManager?.debugSnapshot({ visibleOnly: false, limit: 100000 }) ?? [])
+            .filter(x => JSON.stringify(x).includes(needle));
     if (opts?.deferDecorations) {
       // 装饰物分帧/异步创建（加载界面显示进度）——见 buildDecorationsAsync()
       this.decorationManager.collectDecoSources();
@@ -485,6 +501,8 @@ export class Player implements IPlayer {
       // Build decoration keyframes into TimelineManager for unified seeking
       this.decorationManager.buildTimelineKeyframes(this.timelineManager);
       (this.decorationManager as any)._timelineManager = this.timelineManager;
+      // 预算「哪些装饰有动画」，让每帧更新只遍历这一小撮
+      this.decorationManager.refreshAnimatedDecos();
       this._decorationsBuilt = true;
     }
 
@@ -716,7 +734,7 @@ export class Player implements IPlayer {
   }
 
   /**
-   * 官方 XAcc 公式（scrMarginTracker.CalculatePercentAcc）：
+   * XAcc 公式（CalculatePercentAcc）：
    * (1.0×Perfect/Auto + 0.75×(EP+LP) + 0.4×(VE+VL) + 0.2×(TE+TL) + 0.2×dead) / (总判定 + dead)
    */
   public getXAcc(): number {
@@ -795,7 +813,7 @@ export class Player implements IPlayer {
   }
 
   /**
-   * SetPlanetRotation：解析每块砖的星球旋转缓速参数（官方 scrFloor.planetEase*，逐砖继承）。
+   * SetPlanetRotation：解析每块砖的星球旋转缓速参数（planetEase*，逐砖继承）。
    * - ease：缓动曲线（Linear = 不缓速）
    * - easeParts：把该砖的旋转切成几段分别缓动
    * - easePartBehavior：Mirror（奇段反向）/ Repeat（每段同向）
@@ -841,7 +859,7 @@ export class Player implements IPlayer {
   }
 
   /**
-   * 官方 scrMisc.EasedAngle 的“进度”等价形式：
+   * EasedAngle 的“进度”等价形式：
    * 把线性进度 p(0..1) 映射为按 ease/easeParts/easePartBehavior 缓动后的进度。
    */
   private easedAngleProgress(p: number, easeName: string, parts: number, behavior: string): number {
@@ -857,16 +875,17 @@ export class Player implements IPlayer {
   }
 
   /**
-   * Pause 事件的“角度校准”（官方 scrPlanet.HandlePause，等价 WebADOFAI pauseTween）：
+   * Pause 事件的“角度校准”（HandlePause 的暂停角度缓动）：
    * 逐砖算出 pause 后需要回正的修饰角偏移 `-num7` 与回正时长（一个 crotchet），
    * 播放时在砖块起始按 OutSine 把该偏移回零——这就是隐性的星球“缓速/校准”。
    *
-   * 官方量（scrPlanet.HandlePause）在 ADOJAS 角坐标系下的对应：
-   *   dir   = isCW ? 1 : -1
-   *   de    = (|baseAngle|≈0 或 ≈2π) ? 0 : (π - |baseAngle|) * dir
-   *   exit  = nextEntryAngle - π*dir
-   *   snap  = exit - π*(extraBeats+1)*dir + de
-   *   num7  = angleCorrectionType * (mod(entry) - mod(snap)) * dir * sign(mod(snap) < mod(entry))
+   * HandlePause 的量在 ADOJAS 角坐标系下的对应：
+   *   dir  = isCW ? 1 : -1
+   *   base = totalAngle + dir*extraBeats*π         // 还原成 floor.angleLength（基础弧）
+   *   de   = (|base|≈0 或 ≈2π) ? 0 : (π - |base|) * dir
+   *   exit = entry + base                          // 出口方向（num4）
+   *   snap = exit - π*(extraBeats+1)*dir + de      // num5
+   *   num7 = angleCorrectionType * (mod(entry) - mod(snap)) * dir * sign(mod(snap) < mod(entry))
    */
   private buildPauseTweens(): void {
     const n = this.levelData.tiles?.length ?? 0;
@@ -902,11 +921,12 @@ export class Player implements IPlayer {
       const totalAngle = this.tileTotalAngle[i] ?? 0;
       const B = this.tileIsCW[i] ? 1 : -1;
       const entry = this.tileStartAngle[i] ?? 0;
-      const nextEntry = entry + totalAngle;              // 该砖出口＝下一砖入口角
-      const baseAngle = totalAngle - B * eb * Math.PI;   // 去掉 extraBeats 的基础旋转
+      // totalAngle 含 pause 的额外旋转（CW 时 −extraBeats·π），先还原出基础弧
+      // （对应原版 floor.angleLength，不含 extraBeats）。
+      const baseAngle = totalAngle + B * eb * Math.PI;
       const aLen = Math.abs(baseAngle);
       const de = (aLen < 0.002 || Math.abs(aLen - TWO_PI) < 0.002) ? 0 : (Math.PI - aLen) * B;
-      const targetExit = nextEntry - Math.PI * B;
+      const targetExit = entry + baseAngle;              // 该砖出口方向（原版 num4）
       const snap = targetExit - Math.PI * (eb + 1) * B + de;
       const m2 = mod2pi(entry);
       const m6 = mod2pi(snap);
@@ -947,7 +967,7 @@ export class Player implements IPlayer {
     const events = this.asyncInput.drain();
     if (events.length === 0) return;
 
-    // 死亡后按任意键 → 从开头重开（官方死亡后按键重试）
+    // 死亡后按任意键 → 从开头重开
     if (this._manualDead) {
       this.retryManual();
       return;
@@ -972,7 +992,7 @@ export class Player implements IPlayer {
 
   /**
    * 玩家死亡：停止推进、显示 FAIL、停音乐。
-   * 官方行为：TooEarly/TooLate/OverPress/慢速到界 → Die → 非不死即真死。
+   * 死亡条件：TooEarly/TooLate/OverPress/慢速到界 → Die → 非不死即真死。
    */
   private manualDie(margin: HitMargin): void {
     this._manualDead = true;
@@ -995,9 +1015,9 @@ export class Player implements IPlayer {
   /**
    * 游戏时间线起点（秒）：elapsedTime 到 timeInLevel（tile 时间线）的偏移。
    * tile1（判定/打拍音）= timeOrigin + tileStartTimes[1]。
-   * - separate：tile1 对齐"官方判定线墙钟"（= 音乐开始 musicStartDelay + offset，
+   * - separate：tile1 对齐判定线墙钟（= 音乐开始 musicStartDelay + offset，
    *   即音乐开始后 4 拍，mpe），→ timeOrigin = musicStartDelay + offset - tileStartTimes[1]
-   * - 非 separate：timeOrigin = offsetSec（tile1 = offset + floor1.entryTime = 官方判定时刻）
+   * - 非 separate：timeOrigin = offsetSec（tile1 = offset + floor1.entryTime = 判定时刻）
    */
   private getTimeOrigin(): number {
     const s = this.levelData.settings;
@@ -1033,7 +1053,9 @@ export class Player implements IPlayer {
       if (extraRot > 0) {
         const totalAngle = this.tileTotalAngle[tileIndex];
         if (totalAngle !== 0) {
-          const normalAngle = totalAngle - extraRot * 2 * Math.PI;
+          // totalAngle 含 pause 额外旋转（CW 时为 −），基础弧 = totalAngle + B·extraRot·2π
+          const B = this.tileIsCW[tileIndex] ? 1 : -1;
+          const normalAngle = totalAngle + B * extraRot * 2 * Math.PI;
           const normalThreshold = Math.abs(normalAngle) / Math.abs(totalAngle);
           const startTime = this.tileStartTimes[tileIndex] || 0;
           const duration = this.tileDurations[tileIndex] || 0;
@@ -1058,7 +1080,7 @@ export class Player implements IPlayer {
       tileIndex = tileIndex + 1;
     }
 
-    // midspin（direction===999，angleData '!'）：官方 midspinInfiniteMargin——任意时刻按键都命中，
+    // midspin（direction===999，angleData '!'）：midspinInfiniteMargin——任意时刻按键都命中，
     // 判定显示 Perfect（无限 margin），同时判定 midspin 与其后一个砖块（后者自动完美 Auto，无需再按）。
     const isMidspin = (this.levelData.tiles[tileIndex]?.direction === 999);
     if (isMidspin || nextIsMidspin) {
@@ -1153,7 +1175,7 @@ export class Player implements IPlayer {
       const pitch = this.songPitch;
       const marginScale = this.getTileMarginScale(tileIndex);
       const bounds = getBoundariesInDeg(bpmTimesSpeed, pitch, marginScale, this.judgeConfig());
-      // 官方：默认宽容 max(π, 2×Counted) 后才死；不死模式只过 Counted 即矫正
+      // 默认宽容 max(π, 2×Counted) 后才死；不死模式只过 Counted 即矫正
       const tooLateThreshold = this.noFail ? bounds.countedDeg : Math.max(Math.PI / 3 * 57.29578, bounds.countedDeg * 2);
       const errDeg = (musicPos - perfectTime) * 3 * bpmTimesSpeed * pitch;
       if (errDeg <= tooLateThreshold) return;
@@ -1198,8 +1220,8 @@ export class Player implements IPlayer {
   }
 
   /**
-   * 倒计时 HUD + sndHat tick（对齐官方 scrCountdown/scrConductor）。
-   * tick0（"3"）在 elapsedTime = offsetSec（官方 GetCountdownTime(0) = dspTimeSong + addoffset）。
+   * 倒计时 HUD + sndHat tick。
+   * tick0（"3"）在 elapsedTime = offsetSec（GetCountdownTime(0) = dspTimeSong + addoffset）。
    * - separate：tick0 = songposition -countdownDuration（球在倒计时期间绕 tile0 旋转），
    *   倒计时结束（elapsedTime = offsetSec + cd）后球才开始走 tile0 弧。
    * - 非 separate：tick0 = songposition 0（= tile0 弧起点，球已在走弧）。
@@ -1212,7 +1234,7 @@ export class Player implements IPlayer {
     const ct = settings.countdownTicks || 4;
     const cd = ct * spb0;
     const offsetSec = (settings.offset || 0) / 1000;
-    // 倒计时 tick0 在 elapsedTime = offsetSec（官方 GetCountdownTime(0) = dspTimeSong + addoffset）
+    // 倒计时 tick0 在 elapsedTime = offsetSec（GetCountdownTime(0) = dspTimeSong + addoffset）
     const t = this.elapsedTime / 1000 - offsetSec;
 
     if (t >= cd) {
@@ -1325,7 +1347,7 @@ export class Player implements IPlayer {
 
   /**
    * 构建每个砖块的有效 hitsound：SetHitsound 事件从 floor 起作用于所有后续砖块，
-   * 可被下一个 SetHitsound 覆盖（官方语义）。
+   * 可被下一个 SetHitsound 覆盖。
    */
   private buildTileHitsounds(): void {
     const n = this.levelData.tiles?.length ?? 0;
@@ -1391,6 +1413,41 @@ export class Player implements IPlayer {
     const dirRad = (this.getResolvedTileDirection(index) * Math.PI) / 180;
     const isCW = this.tileIsCW[index];
     return isCW ? dirRad - Math.PI / 3 : dirRad + Math.PI + Math.PI / 6;
+  }
+
+  /**
+   * CustomFloorIcon → 本项目的 IconType。
+   * 我们只有 End / Speed+ / Speed- / DoubleSnail / TwirlB1 / TwirlB-1 / TwirlR1 /
+   * TwirlR-1 这几个素材；没有的（Checkpoint / HoldArrow* / HoldRelease* /
+   * MultiPlanet* / Portal）退化成"不显示图标"。
+   */
+  private customFloorIconToType(icon: any, index: number): IconType | null {
+      switch (icon) {
+          case 'Snail': return 'Speed-';
+          case 'DoubleSnail': return 'DoubleSnail';
+          case 'Rabbit': return 'Speed+';
+          case 'DoubleRabbit': return 'Speed+'; // 无 double-rabbit 素材 → 退化为单兔
+          case 'Swirl': {
+              const tileAngle = this.levelData.tiles?.[index]?.angle ?? 180;
+              const dir = this.tileIsCW[index] ? 1 : -1;
+              return getTwirlTexture(tileAngle, dir);
+          }
+          default: return null; // None / Checkpoint / HoldArrow* / MultiPlanet* / Portal
+      }
+  }
+
+  /**
+   * Object(Floor) 装饰的旋转图标（Swirl/Twirl）：贴图变体 + 角度。
+   * 与普通砖 getOrCreateTileMesh 的图标逻辑完全同源（getTwirlTexture +
+   * getFloorIconAngle），这样对象装饰上的旋转图标朝向和普通轨道一致。
+   */
+  public getTileTwirlIconInfo(index: number): { texture: IconType; angle: number } {
+    const tileAngle = this.levelData.tiles?.[index]?.angle ?? 180;
+    const dir = this.tileIsCW[index] ? 1 : -1;
+    return {
+      texture: getTwirlTexture(tileAngle, dir),
+      angle: this.getFloorIconAngle(index, true),
+    };
   }
 
   /**
@@ -1727,10 +1784,10 @@ export class Player implements IPlayer {
             startAngle = Math.atan2(prev.position[1] - pivot.position[1], prev.position[0] - pivot.position[0]);
         }
 
-        // tile0：官方 floor0.angleLength = (countdownTicks-1)×π + GetAngleMoved(270°, exitangle, cw)
+        // tile0：floor0.angleLength = (countdownTicks-1)×π + GetAngleMoved(270°, exitangle, cw)
         // exitangle = (90 - angle)°，GetAngleMoved = (180 + angle) mod 360（mpe: angle=180 → 0°）。
         // 倒计时自转 (countdownTicks-1)×180° 并入：progress<0 球反向转，[0,1] 走完自转+弧到 tile1。
-        // midspin（direction===999）：官方 angleLength = 0（即时砖块，无弧）。
+        // midspin（direction===999）：angleLength = 0（即时砖块，无弧）。
         const isMidspinTile = pivot.direction === 999;
         let totalAngle: number;
         if (i === 0) {
@@ -1778,7 +1835,7 @@ export class Player implements IPlayer {
     }
     
     // 不 shift：tileStartTimes[0] = 0（tile0 弧起点 = timeInLevel 0），
-    // tileStartTimes[1] = floor1.entryTime（倒计时结束后的弧拍数）——与官方 songposition 时间线一致。
+    // tileStartTimes[1] = floor1.entryTime（倒计时结束后的弧拍数）——与 songposition 时间线一致。
     
     // Handle the last tile
     if (n > 0) {
@@ -1877,6 +1934,9 @@ export class Player implements IPlayer {
           antialias: true,
           powerPreference: 'high-performance',
           failIfMajorPerformanceCaveat: false,
+          // 装饰遮罩（MaskingType Mask/VisibleInside/VisibleOutsideMask）用 stencil 实现。
+          // three r163+ 默认 stencil:false，不显式打开的话所有遮罩都失效（装饰会一直可见）。
+          stencil: true,
         });
         this.rendererInitialized = true;
       } catch (e) {
@@ -1886,6 +1946,7 @@ export class Player implements IPlayer {
           this.renderer = new WebGLRenderer({ 
             alpha: false, 
             antialias: false,
+            stencil: true,
           });
           this.rendererInitialized = true;
         } catch (e2) {
@@ -1900,10 +1961,22 @@ export class Player implements IPlayer {
     // Initialize ShakeScreen
     this.shakeScreen = new ShakeScreen();
 
+    // 到这一步 rendererType 才最终确定（WebGPU 不支持时会回落 webgl）
+    if (this.decorationManager) {
+      this.decorationManager.backdropBlendEnabled = (this.rendererType === 'webgl');
+    }
+
     // Initialize Bloom Effect (WebGL only)
     if (this.rendererType === 'webgl') {
       this.bloomEffect = new BloomEffect();
+      // 重建（含 WebGL 上下文恢复）时清掉旧实例，避免它的背景闪光平面留在主场景里
+      if (this.flashEffect) {
+        this.flashEffect.dispose();
+        this.flashEffect = null;
+      }
       this.flashEffect = new FlashEffect();
+      // Background 闪光属于主场景（砖块下面一层）；Foreground 闪光仍是上层叠层。
+      this.flashEffect.attachToScene(this.scene);
     }
     
     // Handle WebGL context loss (only add once)
@@ -2071,6 +2144,7 @@ export class Player implements IPlayer {
     dm.buildTimelineKeyframes(this.timelineManager);
     const tKf = performance.now();
     (dm as any)._timelineManager = this.timelineManager;
+    dm.refreshAnimatedDecos();
     this._decorationsBuilt = true;
     dm.setRootVisible(true);
     onProgress?.(1, 'decorations');
@@ -2631,7 +2705,7 @@ export class Player implements IPlayer {
     // --- One-time audio sync ---
     // After music starts, verify the actual audio position matches expected.
     // 音乐物理位置 = elapsedTime/1000 - musicStartDelay（从 clip 0 播，开始于 musicStartDelay）
-    // = timeInLevel + offset（官方 songposition = song.time - offset），两种表述一致。
+    // = timeInLevel + offset（songposition = song.time - offset），两种表述一致。
     if (this.music.hasAudio && this.music.isPlaying && this.music.audio &&
         !this.audioDriftSynced &&
         typeof this.music.audio.currentTime === 'number' && !isNaN(this.music.audio.currentTime) &&
@@ -2776,10 +2850,18 @@ export class Player implements IPlayer {
         viewportWidth: this.renderer.domElement.clientWidth || this.renderer.domElement.width,
         viewportHeight: this.renderer.domElement.clientHeight || this.renderer.domElement.height,
         editorWheelZoom: this.zoomMultiplier,
+        paused: this.isPaused || !this.isPlaying,
+        tileLayerZ: this._tileLayerZ ?? undefined,
         planetPositions: {
           [DecPlacementType.RedPlanet]: this.planetRed ? new Vector2(this.planetRed.position.x, this.planetRed.position.y) : undefined,
           [DecPlacementType.BluePlanet]: this.planetBlue ? new Vector2(this.planetBlue.position.x, this.planetBlue.position.y) : undefined,
         },
+        // relativeTo: Player = 玩家正在控制的球。pivot 是偶数砖时红球当轴，
+        // 那么正在运动（被控制）的是蓝球，反之亦然。
+        playerPosition: (() => {
+          const moving = (this.currentTileIndex % 2 === 0) ? this.planetBlue : this.planetRed;
+          return moving ? new Vector2(moving.position.x, moving.position.y) : undefined;
+        })(),
       }
     );
   }
@@ -2797,125 +2879,6 @@ export class Player implements IPlayer {
     for (const idx of this.moveTrackManager.getAnimatedTileIndices()) {
       this.dirtyTiles.add(idx);
     }
-  }
-
-  private initTrailCache(): void {
-    // Window covers up to (2*W+1) tiles, 2 floats per tile.
-    // Must be big enough for the FULL window: (2*W+1)*2 floats.
-    const windowSize = (Player.TRAIL_CACHE_WINDOW * 2 + 1) * 2;
-    this.trailPositionCache = [];
-    this.trailTimeCache = [];
-    this.trailWindowStart = [];
-    this.trailWindowEnd = [];
-    for (let i = 0; i < Player.TRAIL_CACHE_SIZE; i++) {
-      this.trailPositionCache.push(new Float64Array(windowSize));
-      this.trailTimeCache.push(-999);
-      this.trailWindowStart.push(0);
-      this.trailWindowEnd.push(0);
-    }
-    this.trailCacheWriteIdx = 0;
-    this.trailCacheReady = false;
-  }
-
-  private recordTrailCache(timeInLevel: number): void {
-    if (this.trailPositionCache.length === 0) this.initTrailCache();
-
-    const entry = this.trailPositionCache[this.trailCacheWriteIdx];
-    const tiles = this.levelData.tiles;
-    const n = tiles.length;
-
-    const W = Player.TRAIL_CACHE_WINDOW;
-    const start = Math.max(0, this.currentTileIndex - W);
-    const end = Math.min(n, this.currentTileIndex + W + 1);
-
-    this.trailWindowStart[this.trailCacheWriteIdx] = start;
-    this.trailWindowEnd[this.trailCacheWriteIdx] = end;
-
-    for (let i = start; i < end; i++) {
-      const localIdx = (i - start) * 2;
-      if (this.tileStickToFloors[i] !== false) {
-        const mesh = this.tiles.get(i.toString());
-        if (mesh) {
-          entry[localIdx] = mesh.position.x;
-          entry[localIdx + 1] = mesh.position.y;
-        } else {
-          entry[localIdx] = tiles[i].position[0];
-          entry[localIdx + 1] = tiles[i].position[1];
-        }
-      } else {
-        entry[localIdx] = tiles[i].position[0];
-        entry[localIdx + 1] = tiles[i].position[1];
-      }
-    }
-
-    this.trailTimeCache[this.trailCacheWriteIdx] = timeInLevel;
-    this.trailCacheWriteIdx = (this.trailCacheWriteIdx + 1) % Player.TRAIL_CACHE_SIZE;
-    if (!this.trailCacheReady && this.trailCacheWriteIdx === 0) {
-      this.trailCacheReady = true;
-    }
-  }
-
-  /**
-   * Look up a tile's cached position at the given timeInLevel using linear interpolation.
-   * Returns null if time is outside cached range or tile is outside cached window.
-   */
-  private getCachedTilePos(tileIndex: number, queryTime: number): { x: number; y: number } | null {
-    if (!this.trailCacheReady || this.trailTimeCache.length === 0) return null;
-
-    let prevIdx = -1;
-    let nextIdx = -1;
-    let prevTime = -Infinity;
-    let nextTime = Infinity;
-
-    for (let i = 0; i < Player.TRAIL_CACHE_SIZE; i++) {
-      const t = this.trailTimeCache[i];
-      if (t < -900) continue;
-      if (tileIndex < this.trailWindowStart[i] || tileIndex >= this.trailWindowEnd[i]) continue;
-      if (t <= queryTime && t > prevTime) {
-        prevTime = t;
-        prevIdx = i;
-      }
-      if (t >= queryTime && t < nextTime) {
-        nextTime = t;
-        nextIdx = i;
-      }
-    }
-
-    if (prevIdx < 0 && nextIdx < 0) return null;
-
-    // Guard: if the tile falls outside the frame's actual stored window bounds,
-    // bail out so the caller falls back to the base tile position instead of (0,0).
-    const readEntry = (idx: number, ti: number): { x: number; y: number } | null => {
-      const entry = this.trailPositionCache[idx];
-      const localIdx = (ti - this.trailWindowStart[idx]) * 2;
-      if (localIdx < 0 || localIdx + 1 >= entry.length) return null;
-      return { x: entry[localIdx], y: entry[localIdx + 1] };
-    };
-
-    if (prevIdx < 0) {
-      if (nextTime - queryTime > 0.02) return null;
-      return readEntry(nextIdx, tileIndex);
-    }
-    if (nextIdx < 0) {
-      if (queryTime - prevTime > 0.02) return null;
-      return readEntry(prevIdx, tileIndex);
-    }
-
-    const range = nextTime - prevTime;
-    if (range < 0.000001) {
-      return readEntry(prevIdx, tileIndex);
-    }
-
-    const t = (queryTime - prevTime) / range;
-    const frac = Math.max(0, Math.min(1, t));
-
-    const prevPos = readEntry(prevIdx, tileIndex);
-    const nextPos = readEntry(nextIdx, tileIndex);
-    if (!prevPos || !nextPos) return null;
-    return {
-      x: prevPos.x + (nextPos.x - prevPos.x) * frac,
-      y: prevPos.y + (nextPos.y - prevPos.y) * frac,
-    };
   }
 
   private updateAnimatedTiles(): void {
@@ -2941,7 +2904,7 @@ export class Player implements IPlayer {
             const config = this.tileColorManager.getTileRecolorConfig(index);
             if (!config) continue;
 
-            // 渐变补间优先（官方 TweenColor）：逐帧混合当前→目标色
+            // 渐变补间优先（TweenColor）：逐帧混合当前→目标色
             const fade = this.tileColorManager.getColorFade(index);
             if (fade) {
                 const eased = getEasingFunction(fade.ease || 'Linear');
@@ -3059,19 +3022,39 @@ export class Player implements IPlayer {
           return;
         }
         
+        // 背景图/视频要跟随【最终】相机变换（含震屏）——放在渲染前更新，
+        // 否则会和相机差一帧，大幅运镜/旋转/震屏时露出边缘接缝或转不动。
+        this.updateBackgroundTransform();
+
+        // Background 闪光属于主场景（砖块下面），渲染前更新其视口变换/颜色
+        if (this.flashEffect) {
+          this.flashEffect.updateBG(this.camera, this.elapsedTime / 1000);
+        }
+
+        // Overlay/SoftLight 装饰需要采样背景：主场景先渲染进 RT，之后再单独叠这些装饰。
+        const backdropActive = !isWebGPU && !!this.decorationManager
+          && this.decorationManager.hasActiveBackdropBlend();
+        if (backdropActive) this.ensureBackdropTarget();
+        const backdropReady = backdropActive && !!this.backdropRT && !!this.blitPass;
+
         if (this.bloomEnabled && !isWebGPU && this.bloomEffect && this.bloomEffect.getEnabled()) {
           if (!this.renderTarget) {
             this.renderTarget = new WebGLRenderTarget(
               this.container?.clientWidth || window.innerWidth,
-              this.container?.clientHeight || window.innerHeight
+              this.container?.clientHeight || window.innerHeight,
+              { stencilBuffer: true }, // 遮罩 (stencil) 需要；否则 bloom 开启时遮罩全部失效
             );
           }
           
           this.renderer.setRenderTarget(this.renderTarget);
           this.renderer.render(this.scene, this.camera);
-          this.renderer.setRenderTarget(null);
+          this.renderer.setRenderTarget(backdropReady ? this.backdropRT : null);
           
           this.bloomEffect.render(this.renderer as WebGLRenderer, this.renderTarget.texture);
+        } else if (backdropReady) {
+          this.renderer.setRenderTarget(this.backdropRT);
+          this.renderer.render(this.scene, this.camera);
+          this.renderer.setRenderTarget(null);
         } else {
           if (this.renderMethod === 'async' || isWebGPU) {
             (this.renderer as any).renderAsync(this.scene, this.camera).catch((e: Error) => {
@@ -3081,10 +3064,22 @@ export class Player implements IPlayer {
             this.renderer.render(this.scene, this.camera);
           }
         }
+
+        if (backdropReady) {
+          // 主场景结果 → 屏幕
+          this.blitPass!.render(this.renderer as WebGLRenderer, this.backdropRT!.texture, this.blitCamera!);
+          // 背景混合装饰单独一遍：着色器按屏幕坐标采样上面那张 RT 作为 backdrop
+          this.decorationManager!.updateBackdropUniforms(
+            this.backdropRT!.texture, this.backdropRT!.width, this.backdropRT!.height);
+          const oldAutoClear = this.renderer.autoClear;
+          this.renderer.autoClear = false;
+          this.renderer.render(this.decorationManager!.getBackdropScene(), this.camera);
+          this.renderer.autoClear = oldAutoClear;
+        }
         
-        // Render Flash effect (overlay on top of scene)
-        if (this.flashEffect && this.flashEffect.isActive()) {
-          this.flashEffect.renderFlash(this.renderer as WebGLRenderer, this.elapsedTime / 1000);
+        // Foreground 闪光叠在最上层（Background 已随主场景画在砖块下面）
+        if (this.flashEffect && this.flashEffect.isFGActive()) {
+          this.flashEffect.renderFG(this.renderer as WebGLRenderer, this.elapsedTime / 1000);
         }
       } catch (e) {
         console.warn('Render error:', e);
@@ -3237,9 +3232,9 @@ export class Player implements IPlayer {
     const offset = this.music.hasAudio ? (settings.offset || 0) : 0;
     const timeOrigin = this.getTimeOrigin();
 
-    // 音乐启动（官方行为，scrConductor.StartMusicCo）：
+    // 音乐启动（StartMusicCo）：
     // - separateCountdownTime=Enabled：音乐在启动后 countdownDuration 开始，从 clip 0 播
-    //   （官方 num = dspTimeSong + countdownDuration）。
+    //   （num = dspTimeSong + countdownDuration）。
     // - 否则：音乐从启动时刻（dspTimeSong）开始，从 clip 0 播。
     // 两种模式下音乐物理位置 = timeInLevel + offset（songposition = song.time - offset）。
     const separateCountdown = isEnabled(settings.separateCountdownTime);
@@ -3279,7 +3274,7 @@ export class Player implements IPlayer {
     // Start pre-synthesized hitsound track
     const synthesized = this.hitsoundManager.isSynthesized();
     console.log('[Player] startPlay - hitsound synthesized:', synthesized, 'hitsoundStartDelay:', hitsoundStartDelay);
-    // 打拍音按时间线独立播放，与手动/自动模式无关（官方死亡也不停打拍音）
+    // 打拍音按时间线独立播放，与手动/自动模式无关（死亡也不停打拍音）
     if (synthesized && startAtMs <= 0) {
         this.hitsoundManager.start(hitsoundStartDelay);
     }
@@ -3337,7 +3332,7 @@ export class Player implements IPlayer {
       }
       
       // Update custom background image
-      // 官方字段：bgImage / bgImageColor / bgDisplayMode / loopBG / lockRot / scalingRatio / parallax
+      // 字段：bgImage / bgImageColor / bgDisplayMode / loopBG / lockRot / scalingRatio / parallax
       // 兼容旧写法 image / imageColor / fitScreen / looping
       const imagePath = event.bgImage ?? event.image;
       
@@ -3429,7 +3424,7 @@ export class Player implements IPlayer {
           });
           
           this.customBGMesh = new Mesh(geometry, material);
-          this.customBGMesh.renderOrder = -1000; // Render before everything
+          this.customBGMesh.renderOrder = -1000000; // 最先画（背景闪光要压在它上面）
           this.scene.add(this.customBGMesh);
           
           // Store parallax for update
@@ -3451,7 +3446,7 @@ export class Player implements IPlayer {
       const data = (this.customBGMesh as any).parallaxData;
       if (!data) return;
       
-      // 官方 scrParallax.SetTrans: pos = (cameraPos - posCamAtStart) * parallax + startPosition
+      // SetTrans: pos = (cameraPos - posCamAtStart) * parallax + startPosition
       // 起点为 0 → pos = cameraPos * parallax。
       //   100% → 跟随相机（屏幕固定）；0% → 固定世界原点。
       const parallax = data.parallax || [100, 100];
@@ -3460,7 +3455,7 @@ export class Player implements IPlayer {
       this.customBGMesh.position.x = this.camera.position.x * px;
       this.customBGMesh.position.y = this.camera.position.y * py;
 
-      // 官方 lockRot：直接取相机旋转（不加负号）
+      // lockRot：直接取相机旋转（不加负号）
       if (data.lockRot) {
           this.customBGMesh.rotation.z = this.camera.rotation.z;
       } else {
@@ -3472,8 +3467,53 @@ export class Player implements IPlayer {
           const z = this.camera.zoom || 1;
           const frustumW = (this.camera.right - this.camera.left) / z;
           const frustumH = (this.camera.top - this.camera.bottom) / z;
-          this.customBGMesh.scale.set(frustumW / data.baseW, frustumH / data.baseH, 1);
+          // 留 2% 余量：全屏背景和视口等大时，任何亚像素误差/一帧偏差都会露出边。
+          this.customBGMesh.scale.set(frustumW / data.baseW * BG_OVERSCAN, frustumH / data.baseH * BG_OVERSCAN, 1);
       }
+  }
+
+  /**
+   * 让背景图 / 视频背景跟随【最终】相机变换（位置、旋转、缩放，含震屏）。
+   * 必须在相机同步完成、震屏偏移已加到相机之后调用（即渲染前），
+   * 否则背景会比相机慢一帧，大幅运镜/旋转/震屏时露出边缘接缝或转不齐。
+   */
+  private updateBackgroundTransform(): void {
+      this.updateCustomBGParallax();
+
+      if (this.videoMesh) {
+          this.videoMesh.position.x = this.camera.position.x;
+          this.videoMesh.position.y = this.camera.position.y;
+          this.videoMesh.rotation.z = this.camera.rotation.z;
+          if (Math.abs(this.camera.zoom - this.lastVideoSizeZoom) > 0.001) {
+              this.lastVideoSizeZoom = this.camera.zoom;
+              this.updateVideoSize();
+          }
+      }
+  }
+
+  /**
+   * 准备 Overlay/SoftLight 的 backdrop 渲染目标（尺寸 = drawing buffer，带 stencil，
+   * 颜色空间与渲染器输出一致，这样贴回屏幕时不需要额外转换）。
+   */
+  private ensureBackdropTarget(): void {
+    if (this.rendererType !== 'webgl' || !this.renderer) return;
+    const dpr = (this.renderer as WebGLRenderer).getPixelRatio?.() || window.devicePixelRatio || 1;
+    const w = Math.max(1, Math.floor((this.container?.clientWidth || window.innerWidth) * dpr));
+    const h = Math.max(1, Math.floor((this.container?.clientHeight || window.innerHeight) * dpr));
+
+    if (!this.backdropRT) {
+      this.backdropRT = new WebGLRenderTarget(w, h, { stencilBuffer: true });
+    } else if (this.backdropRT.width !== w || this.backdropRT.height !== h) {
+      this.backdropRT.setSize(w, h);
+    }
+    const outCS = (this.renderer as WebGLRenderer).outputColorSpace;
+    if (outCS && (this.backdropRT.texture as any).colorSpace !== outCS) {
+      (this.backdropRT.texture as any).colorSpace = outCS;
+    }
+    if (!this.blitPass) {
+      this.blitPass = new BlitPass();
+      this.blitCamera = new OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    }
   }
 
   public stopPlay(): void {
@@ -3856,7 +3896,7 @@ export class Player implements IPlayer {
     const minIdx = Math.max(0, Math.min(startIdx, endIdx));
     const maxIdx = Math.min(this.tileColorManager.getTotalTiles() - 1, Math.max(startIdx, endIdx));
     
-    // Official ffxRecolorFloorPlus: event `duration`+`ease` drive a TweenColor
+    // RecolorFloor: event `duration`+`ease` drive a TweenColor
     // fade (Single/Stripes) from each tile's CURRENT color to the target;
     // Glow/Blink/etc. set instantly and keep animating via their pulse phase.
     const evDurBeats = event.duration || 0;
@@ -3898,7 +3938,7 @@ export class Player implements IPlayer {
             }
         }
 
-        // Official ffxRecolorFloorPlus: Single/Stripes ease from the CURRENT color
+        // RecolorFloor: Single/Stripes ease from the CURRENT color
         // to the target over the event duration (TweenColor); start AFTER applying.
         if (fadeDur > 0 && (config.trackColorType === 'Single' || config.trackColorType === 'Stripes')) {
             const cur = this.tileColorManager.getTileColor(i);
@@ -3998,9 +4038,10 @@ export class Player implements IPlayer {
     if (!this.flashEffect) return;
     
     const bpm = this.tileBPM[event.floor] || 100;
-    const secPerBeat = 60 / bpm;
+    // 一拍秒数 = 60 / (bpm * pitch)（tileBPM 已含砖块速度倍率）
+    const secPerBeat = 60 / (bpm * this.songPitch);
     
-    // Apply duration in beats → seconds (same as C#: duration *= crotchet)
+    // 时长为拍数 → 秒（duration *= crotchet）
     if (event.duration !== undefined) {
         event = { ...event, duration: event.duration * secPerBeat };
     }
@@ -4088,19 +4129,20 @@ export class Player implements IPlayer {
     const frustumWidth = (this.camera.right - this.camera.left) / this.camera.zoom;
     const frustumAspect = frustumWidth / frustumHeight;
     
+    // 覆盖视口并留 2% 余量（同背景图），避免运镜时露边
     let scale = 1;
     if (frustumAspect > videoAspect) {
-        scale = frustumWidth / 1.0;
+        scale = frustumWidth / 1.0 * BG_OVERSCAN;
         this.videoMesh.scale.set(scale, scale / videoAspect, 1);
     } else {
-        scale = frustumHeight / 1.0;
+        scale = frustumHeight / 1.0 * BG_OVERSCAN;
         this.videoMesh.scale.set(scale * videoAspect, scale, 1);
     }
   }
 
   private createPlanets(): void {
-    this.planetRed = new Planet(0xff0000, undefined, this.showTrail);
-    this.planetBlue = new Planet(0x0000ff, undefined, this.showTrail);
+    this.planetRed = new Planet(0xff0000, undefined, this.showTrail, getPlanetTexture('DefaultRed'));
+    this.planetBlue = new Planet(0x0000ff, undefined, this.showTrail, getPlanetTexture('DefaultBlue'));
 
     this.planetRed.render(this.scene);
     this.planetBlue.render(this.scene);
@@ -4116,126 +4158,108 @@ export class Player implements IPlayer {
   }
 
   /**
-   * Compute planet positions for BOTH planets at a given timeInLevel.
-   * Used by the trail system to generate trail points on-the-fly.
-   * Writes [x, y] pairs into redOut/blueOut starting at the given offset.
-   * Returns the number of positions written.
+   * 求某一时刻两球的坐标（纯时间函数）。
+   * 砖块位置取【时间轴在 t 时刻的取值】——与 seek 球位置用的是同一份数据，
+   * 所以 t = 当前时刻的结果与实况球完全一致，历史采样点也不会被之后的移动改写。
+   * Writes [x, y] pairs into redOut/blueOut at the given offset.
    */
   private computePositionsAtTime(timeInLevel: number, idx: number,
-    redOut: Float64Array, blueOut: Float64Array, offset: number, roleBase?: number): void {
+    redOut: Float64Array, blueOut: Float64Array, offset: number): void {
     const tiles = this.levelData.tiles;
     const n = tiles.length;
 
     let tileIndex = idx;
-    // Clamp tileIndex to valid range
     if (tileIndex < 0) tileIndex = 0;
     if (tileIndex >= n) tileIndex = n - 1;
 
     let px: number, py: number, mx: number, my: number;
 
-    // Helper: get stick-aware position at a specific time (for trail history)
-    // Uses frame cache (accurate, from real mesh positions), falls back to
-    // MoveTrack event replay for times outside cache range.
-    const getStickPos = (ti: number, t: number): { x: number; y: number } | null => {
-      if (this.tileStickToFloors[ti] === false) return null;
-      // Try cache first (fast + accurate)
-      const cached = this.getCachedTilePos(ti, t);
-      if (cached) return cached;
-      // Fallback: event replay (for times before cache was ready)
+    // 砖块在 t 时刻的位置：有时间轴（MoveTrack/动画）按时间轴取值，否则用基准位置。
+    const tilePosAt = (ti: number, t: number): { x: number; y: number } => {
       if (this.moveTrackManager) {
-        return this.moveTrackManager.getTilePositionAtTime(ti, t);
+        const p = this.moveTrackManager.getTilePositionAtTime(ti, t);
+        if (p) return p;
       }
-      return null;
+      return { x: tiles[ti].position[0], y: tiles[ti].position[1] };
     };
 
     if (tileIndex >= n - 1) {
-      // Last tile: pivot planet stays at tile center, moving planet orbits freely
-      const lastP = tiles[n - 1];
-      const stickPos = getStickPos(tileIndex, timeInLevel);
+      // 末尾砖：与实况一致 —— pivot 停在基准砖心，移动球自由自转
+      const lastIndex = n - 1;
+      const lastP = tiles[lastIndex];
+      px = lastP.position[0]; py = lastP.position[1];
 
-      if (stickPos) {
-        px = stickPos.x; py = stickPos.y;
-      } else {
-        px = lastP.position[0]; py = lastP.position[1];
-      }
-
-      if (n - 1 > 0) {
-        const prevStickPos = getStickPos(n - 2, timeInLevel);
-        let prevPx: number, prevPy: number;
-        if (prevStickPos) {
-          prevPx = prevStickPos.x; prevPy = prevStickPos.y;
-        } else {
-          const prev = tiles[n - 2];
-          prevPx = prev.position[0]; prevPy = prev.position[1];
-        }
-
-        const startAngle = Math.atan2(prevPy - py, prevPx - px);
-        const extraTime = timeInLevel - (this.tileStartTimes[n - 1] || 0);
-        const bpm = this.tileBPM[n - 1] || 100;
+      if (lastIndex > 0) {
+        const prev = tiles[lastIndex - 1];
+        const startAngle = Math.atan2(prev.position[1] - py, prev.position[0] - px);
+        const extraTime = timeInLevel - (this.tileStartTimes[lastIndex] || 0);
+        const bpm = this.tileBPM[lastIndex] || 100;
         const totalAngle = extraTime * (bpm / 60) * Math.PI;
-        const isCW = this.tileIsCW[n - 1];
+        const isCW = this.tileIsCW[lastIndex];
         const ca = isCW ? startAngle - totalAngle : startAngle + totalAngle;
         mx = px + Math.cos(ca); my = py + Math.sin(ca);
       } else {
         mx = px + 1; my = py;
       }
     } else {
-      const stickPos = getStickPos(tileIndex, timeInLevel);
-      const useStick = !!stickPos;
-      if (stickPos) {
-        px = stickPos.x; py = stickPos.y;
+      // 与实况 updatePlanetsPosition 完全同一套公式（stickToFloors / 邻居位置 /
+      // SetPlanetRotation 缓动 / Pause 角度校准），只是砖块位置按 t 时刻取样。
+      const useStick = this.tileStickToFloors[tileIndex] !== false;
+      if (useStick) {
+        const p = tilePosAt(tileIndex, timeInLevel);
+        px = p.x; py = p.y;
       } else {
-        const tp = tiles[tileIndex];
-        px = tp.position[0]; py = tp.position[1];
+        px = tiles[tileIndex].position[0];
+        py = tiles[tileIndex].position[1];
       }
 
       const st = this.tileStartTimes[tileIndex];
       const dur = this.tileDurations[tileIndex];
-      const rawProgress = dur > 0.0001 ? (timeInLevel - st) / dur : 1;
-      const clampedProgress = Math.max(0, Math.min(1, rawProgress));
+      const progress = dur > 0.0001 ? (timeInLevel - st) / dur : 1;
+      const clampedProgress = Math.max(0, Math.min(1, progress));
 
-      // When stickToFloors is on, use cached neighbor positions so the trail
-      // matches the main planet's live-trajectory behavior.
-      let ca: number;
-      let sd: number;
-      let cd: number;
+      let startAngle: number;
+      let startDist: number;
+      let endDist: number;
 
       if (useStick) {
-        const prevStick = tileIndex > 0 ? getStickPos(tileIndex - 1, timeInLevel) : null;
-        const nextStick = tileIndex + 1 < n ? getStickPos(tileIndex + 1, timeInLevel) : null;
-
-        if (prevStick && tileIndex > 0) {
-          const pdx = prevStick.x - px;
-          const pdy = prevStick.y - py;
-          ca = Math.atan2(pdy, pdx);
-          sd = Math.sqrt(pdx * pdx + pdy * pdy);
+        const prev = tileIndex > 0 ? tilePosAt(tileIndex - 1, timeInLevel) : null;
+        if (prev) {
+          startAngle = Math.atan2(prev.y - py, prev.x - px);
+          startDist = Math.hypot(prev.x - px, prev.y - py);
         } else {
-          ca = this.tileStartAngle[tileIndex];
-          sd = this.tileStartDist[tileIndex];
+          startAngle = this.tileStartAngle[tileIndex];
+          startDist = this.tileStartDist[tileIndex];
         }
-
-        if (nextStick) {
-          const ndx = nextStick.x - px;
-          const ndy = nextStick.y - py;
-          cd = sd + (Math.sqrt(ndx * ndx + ndy * ndy) - sd) * clampedProgress;
-        } else {
-          cd = sd + (this.tileEndDist[tileIndex] - sd) * clampedProgress;
-        }
-        ca += this.tileTotalAngle[tileIndex] * rawProgress;
+        const next = tileIndex + 1 < n ? tilePosAt(tileIndex + 1, timeInLevel) : null;
+        endDist = next ? Math.hypot(next.x - px, next.y - py) : this.tileEndDist[tileIndex];
       } else {
-        ca = this.tileStartAngle[tileIndex] + this.tileTotalAngle[tileIndex] * rawProgress;
-        sd = this.tileStartDist[tileIndex];
-        cd = sd + (this.tileEndDist[tileIndex] - sd) * clampedProgress;
+        startAngle = this.tileStartAngle[tileIndex];
+        startDist = this.tileStartDist[tileIndex];
+        endDist = this.tileEndDist[tileIndex];
       }
 
+      const planetEase = this.tilePlanetEase[tileIndex];
+      const easedProgress = (progress >= 0 && planetEase && planetEase !== 'Linear')
+        ? this.easedAngleProgress(progress, planetEase, this.tilePlanetEaseParts[tileIndex], this.tilePlanetEaseBehavior[tileIndex])
+        : progress;
+
+      let pauseOffset = 0;
+      const pOff = this.tilePauseOffset[tileIndex];
+      if (pOff !== 0) {
+        const pd = this.tilePauseTweenDuration[tileIndex];
+        const k = pd > 0 ? Math.min(1, Math.max(0, (timeInLevel - st) / pd)) : 1;
+        pauseOffset = pOff * (1 - EasingFunctions.OutSine(k));
+      }
+
+      const ca = startAngle + this.tileTotalAngle[tileIndex] * easedProgress + pauseOffset;
+      const cd = startDist + (endDist - startDist) * clampedProgress;
       mx = px + Math.cos(ca) * cd;
       my = py + Math.sin(ca) * cd;
     }
 
-    // 红蓝角色分配：默认按采样 tile 奇偶；手动模式传 roleBase=currentTileIndex，
-    // 因为球的实际角色（pivot/moving）由 currentTileIndex 决定，矫正/回溯后可能与采样 tile 奇偶不一致。
-    const roleIdx = roleBase !== undefined ? roleBase : tileIndex;
-    if (roleIdx % 2 === 0) {
+    // 红蓝角色：tileIndex 偶 → 红球是 pivot（与实况一致）
+    if (tileIndex % 2 === 0) {
       redOut[offset * 2] = px;     redOut[offset * 2 + 1] = py;
       blueOut[offset * 2] = mx;    blueOut[offset * 2 + 1] = my;
     } else {
@@ -4248,8 +4272,6 @@ export class Player implements IPlayer {
   private _trailRedArr: Float64Array | null = null;
   private _trailBlueArr: Float64Array | null = null;
   private _trailMaxSteps: number = 0;
-  private _trailRefRed: Float64Array = new Float64Array(2);
-  private _trailRefBlue: Float64Array = new Float64Array(2);
 
   // Binary search tile index for a given timeInLevel (seconds). Avoids O(n) linear scans.
   private getTileIndexAtLevelTime(timeInLevel: number): number {
@@ -4270,21 +4292,66 @@ export class Player implements IPlayer {
   }
 
   /**
-   * Compute trail positions for both planets for the time window [timeInLevel - 0.4, timeInLevel].
-   * Feeds results to planet trails.
+   * 拖尾 = 对时间窗口 [now - 寿命, now] 内的每个采样时刻 seek 出两球坐标，然后连线。
+   *
+   * 球坐标是时间的纯函数（砖块位置取自时间轴），所以：
+   *   - 与帧率无关，低帧率也平滑；
+   *   - 历史采样点不会因为之后砖块移动而改变 → 不会抽搐；
+   *   - 末端正好是当前时刻的球坐标 → 天然贴合球，无需头部对齐。
    */
   private computePlanetTrails(timeInLevel: number): void {
     if (!this.showTrail || !this.planetRed?.trail || !this.planetBlue?.trail) return;
     if (this.tileStartTimes.length < 2) return;
 
-    // 记录本帧两球实际位置（球位置已由 updatePlanetsPosition 更新完毕）
+    // 兜底用：记录本帧两球真实坐标（正常情况下拖尾由下面的 seek 采样生成）
     this.recordTrailHistory(timeInLevel);
 
-    const TRAIL_DURATION = 0.4;
+    const TRAIL_DURATION = 0.74;   // 拖尾寿命 yf = 74e4 µs
+    const INV_INTERVAL = 100;      // 10ms 一个采样点
+    const startTime = timeInLevel - TRAIL_DURATION;
+    const maxSteps = Math.ceil(TRAIL_DURATION * INV_INTERVAL) + 3;
+
+    if (!this._trailRedArr || this._trailMaxSteps < maxSteps) {
+      this._trailMaxSteps = maxSteps;
+      this._trailRedArr = new Float64Array(maxSteps * 2);
+      this._trailBlueArr = new Float64Array(maxSteps * 2);
+    }
+    const redArr = this._trailRedArr!;
+    const blueArr = this._trailBlueArr!;
+
+    let tileIndex = this.getTileIndexAtLevelTime(startTime);
+    let written = 0;
+    for (let s = 0; s < maxSteps - 1; s++) {
+      const t = startTime + s / INV_INTERVAL;
+      if (t >= timeInLevel) break;
+      while (tileIndex + 1 < this.tileStartTimes.length && t >= this.tileStartTimes[tileIndex + 1]) tileIndex++;
+      this.computePositionsAtTime(t, tileIndex, redArr, blueArr, written);
+      written++;
+    }
+    // 末端精确取当前时刻：头部正好落在球上
+    if (written > 0) {
+      this.computePositionsAtTime(timeInLevel, this.getTileIndexAtLevelTime(timeInLevel), redArr, blueArr, written);
+      written++;
+    }
+
+    if (written < 2) {
+      this.buildTrailFromHistory(timeInLevel);
+      return;
+    }
+
+    this.planetRed.setTrailPoints(new Float64Array(redArr.buffer, 0, written * 2));
+    this.planetBlue.setTrailPoints(new Float64Array(blueArr.buffer, 0, written * 2));
+    // 点是世界坐标，网格本身不做偏移
+    this.planetRed.trail.mesh.position.set(0, 0, 0);
+    this.planetBlue.trail.mesh.position.set(0, 0, 0);
+  }
+
+  /** 兜底：直接用逐帧记录的两球真实位置拼拖尾（含 MoveTrack）。 */
+  private buildTrailFromHistory(timeInLevel: number): void {
+    if (!this.planetRed?.trail || !this.planetBlue?.trail) return;
+    const TRAIL_DURATION = 0.74;
     const minT = timeInLevel - TRAIL_DURATION;
     const maxPts = 120;
-
-    // 从最新点往前收集（最新点 = head-1）
     const lastIdx = (this._trailHistHead - 1 + Player.TRAIL_HIST_MAX) % Player.TRAIL_HIST_MAX;
     let n = 0;
     for (let i = 0; i < this._trailHistCount && n < maxPts; i++) {
@@ -4297,8 +4364,6 @@ export class Player implements IPlayer {
       this.planetBlue.trail.clear();
       return;
     }
-
-    // 组装成从旧到新的世界坐标点
     const redArr = new Float64Array(n * 2);
     const blueArr = new Float64Array(n * 2);
     for (let i = 0; i < n; i++) {
@@ -4309,7 +4374,6 @@ export class Player implements IPlayer {
       blueArr[k] = this._trailHistBlue[idx * 2];
       blueArr[k + 1] = this._trailHistBlue[idx * 2 + 1];
     }
-
     this.planetRed.setTrailPoints(redArr);
     this.planetBlue.setTrailPoints(blueArr);
     // 点是世界坐标，无需偏移
@@ -4361,6 +4425,8 @@ export class Player implements IPlayer {
   private lastVisibleCheckZoom = -1;
   // Sorted ids of the last assigned visible set (avoids re-layering when unchanged)
   private _lastSortedVisible: number[] = [];
+  /** 每块砖当前的层级 z（updateVisibleTiles 写入），供 syncFloorDepth 装饰继承。 */
+  private _tileLayerZ: Float32Array | null = null;
 
   private updateVisibleTiles(): void {
     if (!this.scene || !this.levelData.tiles || !this.camera) return;
@@ -4466,7 +4532,7 @@ export class Player implements IPlayer {
       }
     }
 
-    // Real-time per-id layering for VISIBLE tiles only (official Floor sorting:
+    // Real-time per-id layering for VISIBLE tiles only (Floor sorting:
     // tile[x].layer > tile[x+1].layer → lower id renders on top). Rank-by-id is
     // encoded as a small z offset; the depth buffer resolves overlapping tiles
     // across all instanced shape batches per instance. O(v log v), v = on-screen
@@ -4478,8 +4544,14 @@ export class Player implements IPlayer {
       // (bg decos ≤ -0.01, fg decos ≥ 0.1). Step ≥ ~6e-5 stays resolvable by the
       // depth buffer; shrink adaptively for extremely dense screens.
       const step = Math.min(2e-4, 0.098 / n);
+      const tileCount = this.levelData.tiles.length;
+      if (!this._tileLayerZ || this._tileLayerZ.length < tileCount) {
+        this._tileLayerZ = new Float32Array(tileCount);
+      }
       for (let r = 0; r < n; r++) {
-        this.instancedMeshManager.setTileLayer(sortedVisible[r], 0.09 - r * step);
+        const layerZ = 0.09 - r * step;
+        this.instancedMeshManager.setTileLayer(sortedVisible[r], layerZ);
+        if (sortedVisible[r] < this._tileLayerZ.length) this._tileLayerZ[sortedVisible[r]] = layerZ;
       }
     }
 
@@ -4661,9 +4733,21 @@ export class Player implements IPlayer {
     }
 
     // Determine floor icon type (for UV-based rendering)
+    // ApplyEventsToFloors：该砖自己的 SetFloorIcon 事件优先，并抑制
+    // 自动图标（SetSpeed / Twirl / End）—— 即 usedCustomFloorIcon。
     let iconTypeIdx = 0;
+    let iconIsSwirl = false;
+    let customIconAngleDeg: number | null = null;
     const tileCount = this.levelData.tiles?.length ?? 0;
-    if (index === tileCount - 1) {
+    const customIconEvent = this.tileEvents.get(index)?.find(e => isEventActive(e) && e.eventType === 'SetFloorIcon');
+    if (customIconEvent) {
+        const mapped = this.customFloorIconToType(customIconEvent.icon, index);
+        iconTypeIdx = mapped ? getIconTypeIndex(mapped) : 0;
+        iconIsSwirl = customIconEvent.icon === 'Swirl';
+        if (customIconEvent.trackIconAngle !== undefined && customIconEvent.trackIconAngle !== null) {
+            customIconAngleDeg = Number(customIconEvent.trackIconAngle);
+        }
+    } else if (index === tileCount - 1) {
         iconTypeIdx = getIconTypeIndex('End');
     } else if (hasTwirl) {
         const tileAngle = this.levelData.tiles?.[index]?.angle ?? 180;
@@ -4680,7 +4764,11 @@ export class Player implements IPlayer {
     tileMesh.userData.floorIconType = iconTypeIdx;
 
     // Compute floor icon angle for shader
-    const floorIconAngle = this.getFloorIconAngle(index, hasTwirl);
+    // SetIconAngle(-angle)；我们的 shader 内部对 vFloorIconAngle 取负，
+    // 所以这里对 SetFloorIcon 的 trackIconAngle 直接传 +angle（弧度）。
+    const floorIconAngle = customIconAngleDeg !== null
+        ? customIconAngleDeg * Math.PI / 180
+        : this.getFloorIconAngle(index, customIconEvent ? iconIsSwirl : hasTwirl);
     tileMesh.userData.floorIconAngle = floorIconAngle;
 
     // Update instanced mesh with icon type and direction angle
@@ -4707,6 +4795,12 @@ export class Player implements IPlayer {
     // Register tile initial state with MoveTrack manager
     if (this.moveTrackManager) {
       this.moveTrackManager.registerTileInitial(index, tileMesh);
+      // 播放中重建的砖（裁剪后重回视野）：补一次时间轴采样，恢复 MoveTrack/动画状态。
+      // 加载/编辑器预览阶段（未播放）保持基值，避免 appear 初始态把砖藏起来。
+      if (this.isPlaying && !this.isEditorMode) {
+        const t = this.elapsedTime / 1000 - this.getTimeOrigin();
+        this.moveTrackManager.refreshTile(index, t);
+      }
     }
 
     return tileMesh;
@@ -4746,13 +4840,13 @@ export class Player implements IPlayer {
                 this.currentTileIndex++;
             }
         }
-        // 自动播放：球落到的新砖块展示"完美！"判定（官方 autoplay 显示 Perfect）
+        // 自动播放：球落到的新砖块展示"完美！"判定（autoplay 显示 Perfect）
         if (this.currentTileIndex !== this._lastAutoJudgedTile && this.currentTileIndex > 0) {
             this._lastAutoJudgedTile = this.currentTileIndex;
             this.recordMargin(HitMargin.Auto);
             const landedTile = this.tiles.get(String(this.currentTileIndex)) ?? null;
             this.judgmentDisplay?.show(landedTile, HitMargin.Auto);
-            // 准度条：autoplay 0 误差（官方 auto → AddHit(0)）
+            // 准度条：autoplay 0 误差（auto → AddHit(0)）
             const ti = this.currentTileIndex - 1;
             this.hitErrorMeter?.addHit(0, this.tileBPM[ti] || 100, this.songPitch, this.getTileMarginScale(ti), this.judgeConfig());
         }
@@ -4880,7 +4974,7 @@ export class Player implements IPlayer {
         const totalAngle = this.tileTotalAngle[tileIndex];
         // 倒计时期间（timeInLevel < tileStartTimes[0] 为负）progress 为负，
         // 球反向绕 tile0 旋转——这正是倒计时动画（c34c790 及更早版本的行为，无问题）。
-        // SetPlanetRotation：非 Linear 时把线性进度换成缓动进度（官方 scrMisc.EasedAngle）。
+        // SetPlanetRotation：非 Linear 时把线性进度换成缓动进度（EasedAngle）。
         const planetEase = this.tilePlanetEase[tileIndex];
         const easedProgress = (progress >= 0 && planetEase && planetEase !== 'Linear')
             ? this.easedAngleProgress(progress, planetEase, this.tilePlanetEaseParts[tileIndex], this.tilePlanetEaseBehavior[tileIndex])
@@ -4917,7 +5011,7 @@ export class Player implements IPlayer {
       const timeInLevel = this.elapsedTime / 1000 - this.getTimeOrigin();
       const currentBPM = (this.tileBPM && this.tileBPM[this.currentTileIndex]) || 100;
 
-      // Two-layer camera update: rig (camParent) DOTween + local follow Lerp.
+      // Two-layer camera update: rig (camParent) tween + local follow Lerp.
       this.cameraController.update({
           nowSeconds: timeInLevel,
           deltaSeconds: delta,
@@ -4926,9 +5020,6 @@ export class Player implements IPlayer {
           planetWorldPos: { x: this.currentPivotPosition.x, y: this.currentPivotPosition.y },
           currentTileIndex: this.currentTileIndex,
       });
-
-      // Update custom background parallax
-      this.updateCustomBGParallax();
 
       this.syncCameraFromController();
 
@@ -4945,17 +5036,6 @@ export class Player implements IPlayer {
           } else if (this._textureAutoDisabled) {
               this._textureAutoDisabled = false;
               this.instancedMeshManager.setTileTextureEnabled(true);
-          }
-      }
-
-      // Sync Video Background
-      if (this.videoMesh) {
-          this.videoMesh.position.x = this.camera.position.x;
-          this.videoMesh.position.y = this.camera.position.y;
-          this.videoMesh.rotation.z = this.camera.rotation.z;
-
-          if (Math.abs(this.camera.zoom - this.lastVisibleCheckZoom) > 0.001) {
-              this.updateVideoSize();
           }
       }
 
@@ -5070,7 +5150,7 @@ export class Player implements IPlayer {
     });
     this.videoMesh = new Mesh(geometry, material);
     this.videoMesh.position.set(0, 0, -500);
-    this.videoMesh.renderOrder = -999;
+    this.videoMesh.renderOrder = -1000000; // 背景层：背景闪光要压在它上面
     this.scene.add(this.videoMesh);
 
     video.onloadedmetadata = () => {
@@ -5170,7 +5250,7 @@ export class Player implements IPlayer {
 
   /**
    * AutoPlayTiles: 手动模式下，到达 auto 砖块的完美时刻时自动推进，无需玩家按键。
-   * 官方行为：nextfloor.auto 时 OttoHoldHit 自动判定（infinite margin → HitMargin.Auto）。
+   * nextfloor.auto 时自动判定（infinite margin → HitMargin.Auto）。
    */
   private autoAdvanceAutoTiles(timeInLevel: number): void {
     if (!this.manualMode || this._manualDead) return;
@@ -5356,6 +5436,15 @@ export class Player implements IPlayer {
     if (this.renderTarget) {
       this.renderTarget.dispose();
       this.renderTarget = null;
+    }
+    if (this.backdropRT) {
+      this.backdropRT.dispose();
+      this.backdropRT = null;
+    }
+    if (this.blitPass) {
+      this.blitPass.dispose();
+      this.blitPass = null;
+      this.blitCamera = null;
     }
     if (this.bloomEffect) {
       this.bloomEffect.dispose();

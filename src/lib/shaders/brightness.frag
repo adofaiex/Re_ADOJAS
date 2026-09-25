@@ -15,7 +15,7 @@ void main() {
     vec4 color = texture2D(tDiffuse, vUv);
     float brightness = max(max(color.r, color.g), color.b);
 
-    // Unity VideoBloom prefilter (pass 2): only the amount above the threshold
+    // Bloom prefilter (pass 2): only the amount above the threshold
     // blooms, with a quadratic soft knee — so near-threshold pixels contribute
     // little instead of their full color (which caused the over-exposure).
     float soft = clamp(brightness - threshold, 0.0, 1.0);

@@ -73,7 +73,7 @@ function blendKey(blending: Blending): string {
 /**
  * GPU-instanced renderer for Image/Text decorations.
  * Batch key = texture + blendMode + renderOrder
- * so layering matches per-sprite renderOrder from the original path.
+ * so layering matches per-sprite renderOrder of the non-instanced path.
  */
 export class DecorationInstancedRenderer {
   private parent: Group;

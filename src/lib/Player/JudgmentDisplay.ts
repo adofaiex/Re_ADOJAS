@@ -1,7 +1,7 @@
 /**
  * 判定文本展示。
  *
- * 官方行为：判定显示在被打到的砖块上，固定面向上（不随砖块/摄像机旋转改变）。
+ * 判定显示在被打到的砖块上，固定面向上（不随砖块/摄像机旋转改变）。
  * 实现：用 THREE.Sprite（恒面向相机），父级挂到目标砖块 mesh 上 → 跟随砖块位置，
  * 但文本始终垂直于屏幕（面向上）。
  *
@@ -25,7 +25,7 @@ const TEXT: Record<number, string> = {
   [HitMargin.OverPress]: '提前',
 };
 
-// 官方配色：绿系判定 + 红系失误 + 紫判
+// 配色：绿系判定 + 红系失误 + 紫判
 const COLOR: Record<number, string> = {
   [HitMargin.TooEarly]: '#cf3030',   // 太快！！ 深红
   [HitMargin.VeryEarly]: '#ff4545',  // 太快！ 浅一点的红
@@ -51,7 +51,7 @@ interface ActiveSprite {
 const CANVAS_W = 256;
 const CANVAS_H = 96;
 const LIFETIME = 0.7; // 秒
-// 判定文字相对砖块的偏移：上方约 0.5 个 tile 单位（官方 camy.up，取半）
+// 判定文字相对砖块的偏移：上方约 0.5 个 tile 单位（取半个单位）
 const OFFSET_Y = 0.5;
 // 文字大小倍率（相对基准尺寸的 1.6 倍）
 const SCALE = 1.6;
@@ -86,7 +86,7 @@ export class JudgmentDisplay {
   public show(tileMesh: Mesh | null, margin: HitMargin): void {
     if (!tileMesh || !this.scene) return;
 
-    // 从空闲列表取，没有则新建（官方每判定预实例化 100 个 → 多个砖块可同时展示）
+    // 从空闲列表取，没有则新建（预实例化 100 个 → 多个砖块可同时展示）
     let entry = this.freeList.pop();
     if (!entry) {
       const material = new SpriteMaterial({ transparent: true, depthTest: false });

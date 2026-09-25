@@ -17,7 +17,7 @@ export interface CameraMode {
 }
 
 /**
- * Per-property transition state (matching Unity's per-property DOTween tweens)
+ * Per-property transition state (matching per-property tween tracks)
  */
 export interface PropertyTransition<T> {
     active: boolean;
@@ -38,14 +38,14 @@ export interface CameraTimelineEntry {
 
 /**
  * Controller for camera movements and transitions
- * Rewritten to match Unity ffxCameraPlus.cs per-property tween architecture
+ * Rewritten to use per-property tween architecture
  */
 export class CameraController {
     private cameraMode: CameraMode;
     private cameraTimeline: CameraTimelineEntry[] = [];
     private lastCameraTimelineIndex: number = -1;
 
-    // Per-property transitions (matching Unity's moveXTween, moveYTween, rotationTween, zoomTween)
+    // Per-property transitions (matching moveXTween, moveYTween, rotationTween, zoomTween)
     private posTransition: PropertyTransition<{ x: number; y: number }>;
     private rotTransition: PropertyTransition<number>;
     private zoomTransition: PropertyTransition<number>;
@@ -217,7 +217,7 @@ export class CameraController {
                 return this.getTilePosition(idx);
             }
             case 'Global': {
-                // Unity Global mode uses world origin (or first tile as origin)
+                // Global mode uses world origin (or first tile as origin)
                 const tile0 = this.levelData.tiles[0];
                 return (tile0 && tile0.position) ? { x: tile0.position[0], y: tile0.position[1] } : { x: 0, y: 0 };
             }
@@ -227,7 +227,7 @@ export class CameraController {
     }
 
     /**
-     * Process a camera event following Unity ffxCameraPlus.cs StartEffect() architecture
+     * Process a camera event using per-property tween architecture
      */
     public processCameraEvent(
         event: any,
@@ -276,7 +276,7 @@ export class CameraController {
 
         const isLastPosition = movementType === 'LastPosition' || movementType === 'LastPositionNoRotation';
 
-        // ==== Unity line 74-77: skip movementTypeUsed when NaN position matches last type ====
+        // ==== line 74-77: skip movementTypeUsed when NaN position matches last type ====
         if (movementTypeUsed &&
             movementType !== 'Global' &&
             movementType !== 'LastPosition' &&
@@ -290,7 +290,7 @@ export class CameraController {
             }
         }
 
-        // ==== Kill per-property transitions (Unity lines 78-112) ====
+        // ==== Kill per-property transitions (lines 78-112) ====
         // Kill position transition when positionUsed OR movementTypeUsed
         if (positionUsed || movementTypeUsed) {
             if (!isNaN(targetPos.x) || movementTypeUsed) {
@@ -309,7 +309,7 @@ export class CameraController {
             this.zoomTransition.active = false;
         }
 
-        // ==== Determine effective mode (Unity line 127) ====
+        // ==== Determine effective mode (line 127) ====
         const effectiveMode: string = movementTypeUsed && movementType !== undefined
             ? movementType
             : this.cameraMode.lastUsedMovementType;
@@ -329,7 +329,7 @@ export class CameraController {
         // ==== Compute target logical position ====
         // When position IS used: target logical = event position (absolute in new/current mode)
         // When position NOT used: target logical = keep current world pos in new mode's reference frame
-        // When position NOT used AND mode NOT changed: target logical = Unity vector2 formula
+        // When position NOT used AND mode NOT changed: target logical = the vector2 formula
 
         let targetLogical: { x: number; y: number };
         let positionNeedsTransition = false;
@@ -355,7 +355,7 @@ export class CameraController {
             positionNeedsTransition = true;
         } else {
             // Position NOT specified, mode NOT changed
-            // Unity: vector2 = lastEventRelativePosition - camParent.position
+            // vector2 = lastEventRelativePosition - camParent.position
             // finalPos depends on mode (creates a small movement toward "default" position)
             // For TS: stay at current position (no position transition)
             const ref = this.getModeReference(effectiveMode, pivot, this.cameraMode.anchorTileIndex);
@@ -367,19 +367,19 @@ export class CameraController {
             positionNeedsTransition = false;
         }
 
-        // ==== Handle mode-specific camera state changes (Unity lines 145-196) ====
+        // ==== Handle mode-specific camera state changes (lines 145-196) ====
         // Switch on the MOVEMENT TYPE (if specified) or current mode
         const switchMode: string = movementTypeUsed && movementType !== undefined
             ? movementType
             : this.cameraMode.relativeTo;
 
         if (switchMode === 'Player') {
-            // Unity lines 146-156
+            // lines 146-156
             if (!this.cameraMode.followMode) {
                 this.cameraMode.followMode = true;
             }
         } else if (switchMode === 'Tile') {
-            // Unity lines 157-169
+            // lines 157-169
             if (this.cameraMode.followMode) {
                 this.cameraMode.followMode = false;
             }
@@ -388,16 +388,16 @@ export class CameraController {
             this.cameraMode.lastEventRelativePosition = { ...floorPos };
             this.cameraMode.lastTileCamFloor = floorIndex;
         } else if (switchMode === 'Global') {
-            // Unity lines 170-178
+            // lines 170-178
             if (this.cameraMode.followMode) {
                 this.cameraMode.followMode = false;
             }
             this.cameraMode.lastEventRelativePosition = { x: 0, y: 0 };
         } else if (switchMode === 'LastPosition' || switchMode === 'LastPositionNoRotation') {
-            // Unity lines 179-196 — handled by logical position accumulation
+            // lines 179-196 — handled by logical position accumulation
         }
 
-        // ==== Update lastUsedMovementType (Unity line 199-202) ====
+        // ==== Update lastUsedMovementType (line 199-202) ====
         if (movementTypeUsed && movementType !== undefined) {
             this.cameraMode.lastUsedMovementType = movementType;
         }
@@ -439,7 +439,7 @@ export class CameraController {
             // If mode also not changed: don't modify position
         }
 
-        // Update rotation (Unity: rotation is absolute + rotationOffset for LastPosition)
+        // Update rotation (rotation is absolute + rotationOffset for LastPosition)
         let rotationOffset = 0;
         if (switchMode === 'LastPosition') {
             rotationOffset = this.cameraMode.rotation;
@@ -458,7 +458,7 @@ export class CameraController {
             this.cameraMode.angleOffset = event.angleOffset;
         }
 
-        // ==== Setup per-property transitions (Unity lines 203-233) ====
+        // ==== Setup per-property transitions (lines 203-233) ====
         const eventBPM = (this.tileBPM && this.tileBPM[floorIndex]) || 100;
 
         // High BPM shortcut
@@ -499,7 +499,7 @@ export class CameraController {
             }
         }
 
-        // Rotation transition (Unity lines 220-225)
+        // Rotation transition (lines 220-225)
         if (rotationUsed || (movementTypeUsed && isLastPosition)) {
             const rotTarget = rotationUsed ? targetRot + rotationOffset : this.cameraMode.rotation;
             if (durationSeconds > 0) {
@@ -516,7 +516,7 @@ export class CameraController {
             }
         }
 
-        // Zoom transition (Unity lines 227-233)
+        // Zoom transition (lines 227-233)
         if (zoomUsed) {
             if (durationSeconds > 0) {
                 this.zoomTransition = {
@@ -647,7 +647,7 @@ export class CameraController {
         let logicalZoom = this.cameraMode.zoom;
         let logicalRotation = this.cameraMode.rotation;
 
-        // Interpolate position transition independently (Unity: independent moveXTween/moveYTween)
+        // Interpolate position transition independently (independent moveXTween/moveYTween)
         if (this.posTransition.active) {
             let t = (elapsedTime / 1000) - this.posTransition.startTime;
             t = t / this.posTransition.duration;
