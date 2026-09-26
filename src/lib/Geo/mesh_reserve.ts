@@ -24,7 +24,22 @@ export const OFFICIAL_TO_ADOJAS_SCALE = 0.49 / 0.75;
  * 注意：这个常量**只影响装饰尺寸**，砖块几何用的是 TILE_WIDTH 那一组独立常量；
  * 若 baseFrustumSize 以后改成 10，这里应同步改成 1.0。
  */
-export const DECO_SIZE_SCALE = 8 / 10;
+/**
+ * 装饰尺寸换算（官方像素 → 我们的世界单位）。
+ *
+ * 官方的可视高度 = 2 × orthographicSize = 2 × 5 = **10**（官方单位，zoom=100）；
+ * 我们的可视高度 = Player.baseFrustumSize（见 Player.setSize）。
+ * 位置换算是 1:1（DECO_POSITION_SCALE），所以要让"装饰占屏比"与官方一致：
+ *     K / H = 1 / 10   →   K = H / 10
+ * 即这个常数必须与 baseFrustumSize 同步：
+ *     H = 10（与官方一致） → K = 1.0
+ *     H = 8（旧值）        → K = 0.8
+ * 旧值 0.49/0.75 ≈ 0.6533 与任一 H 都不匹配，会让装饰比官方小约 18%。
+ */
+export const DECO_SIZE_SCALE = 1.0;
+
+/** 官方可视高度（zoom=100，官方单位）：2 × camsizenormal(5)。 */
+export const OFFICIAL_VIEW_HEIGHT = 10;
 // 装饰物【位置/偏移】系数（position / positionOffset / parallaxOffset / pivotOffset，经由 tileSize）
 export const DECO_POSITION_SCALE = 1.0;
 

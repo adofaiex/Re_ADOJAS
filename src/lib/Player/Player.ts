@@ -4094,7 +4094,10 @@ export class Player implements IPlayer {
     const height = this.container.clientHeight;
     
     const aspect = width / height;
-    const baseFrustumSize = 8;
+    // 官方可视高度 = 2 × orthographicSize = 2 × 5 = 10（官方单位，zoom=100）。
+    // 位置换算是 1:1，所以视口高度也必须取 10，画面比例才与官方一致；
+    // 与 DECO_SIZE_SCALE 是一组（K = H/10），改这里要同步改那个常数。
+    const baseFrustumSize = 10;
     
     this.camera.left = -baseFrustumSize * aspect / 2;
     this.camera.right = baseFrustumSize * aspect / 2;
