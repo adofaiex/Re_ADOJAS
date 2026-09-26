@@ -13,7 +13,18 @@ export const OFFICIAL_TO_ADOJAS_SCALE = 0.49 / 0.75;
 // 装饰物【尺寸】系数（baseSizeX/Y）
 // 游戏世界比 ADOJAS 本地大 1/0.6533 倍：装饰图内部画的砖块是按游戏世界的砖块尺寸画的，
 // 要让它和 ADOJAS 的真砖块对齐，装饰图整体乘 0.6533。
-export const DECO_SIZE_SCALE = OFFICIAL_TO_ADOJAS_SCALE;
+/**
+ * 装饰尺寸换算（官方像素 → 我们的世界单位）。
+ *
+ * 官方的可视高度 = 2 × orthographicSize = 2 × 5 = **10**（官方单位，zoom=100）；
+ * 我们的可视高度 = Player 的 baseFrustumSize = **8**；位置换算是 1:1（DECO_POSITION_SCALE）。
+ * 要让"装饰占屏比"与官方一致，尺寸必须满足 K/H = 1/10 → **K = H/10 = 8/10 = 0.8**。
+ *
+ * 旧值 0.49/0.75 ≈ 0.6533 会让装饰比官方小约 18%（0.6533 × 10/8 = 0.8167）。
+ * 注意：这个常量**只影响装饰尺寸**，砖块几何用的是 TILE_WIDTH 那一组独立常量；
+ * 若 baseFrustumSize 以后改成 10，这里应同步改成 1.0。
+ */
+export const DECO_SIZE_SCALE = 8 / 10;
 // 装饰物【位置/偏移】系数（position / positionOffset / parallaxOffset / pivotOffset，经由 tileSize）
 export const DECO_POSITION_SCALE = 1.0;
 
