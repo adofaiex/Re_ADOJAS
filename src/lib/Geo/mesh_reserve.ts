@@ -36,10 +36,24 @@ export const OFFICIAL_TO_ADOJAS_SCALE = 0.49 / 0.75;
  *     H = 8（旧值）        → K = 0.8
  * 旧值 0.49/0.75 ≈ 0.6533 与任一 H 都不匹配，会让装饰比官方小约 18%。
  */
-export const DECO_SIZE_SCALE = 1.0;
+export const DECO_SIZE_SCALE = 0.547;
 
-/** 官方可视高度（zoom=100，官方单位）：2 × camsizenormal(5)。 */
+/**
+ * 官方可视高度（zoom=100，官方单位）：2 × camsizenormal(5) = 10。
+ *
+ * 但**官方 1 个世界单位 ≠ 我们 1 个世界单位**：官方砖块间距 = tileSize ≈ 1.71
+ * （= 2 × baseFloorDimensions.x，实测同 zoom 下官方视野里 5.85 块砖 → 10/5.85），
+ * 而我们的砖块间距固定 1.0（calculateBasicTilePositions 每步走 1.0）。
+ * 于是换算比 = 1.0 / 1.71 ≈ 0.585：
+ *   - 相机：可视高度 = 10（官方单位）× 0.585 ≈ 5.7（我们的单位），
+ *     这样同 zoom 下我们也能看到 5.85 块砖；
+ *   - 尺寸：装饰占屏比 = K·(texW/100)/H 要与官方 (texW/100)/10 一致 → K/H = 1/10 → K = 0.57。
+ * 若以后把砖块间距改成 tileSize（走官方单位），这两个值要一起改成 10 / 1.0。
+ */
 export const OFFICIAL_VIEW_HEIGHT = 10;
+export const OFFICIAL_TILE_SPACING = 1.71;
+/** 官方单位 → 我们的单位（我们的世界用 1.0 当砖距）。 */
+export const OFFICIAL_TO_OURS = 1.0 / OFFICIAL_TILE_SPACING;
 // 装饰物【位置/偏移】系数（position / positionOffset / parallaxOffset / pivotOffset，经由 tileSize）
 export const DECO_POSITION_SCALE = 1.0;
 

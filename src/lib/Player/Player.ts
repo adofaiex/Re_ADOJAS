@@ -4094,10 +4094,11 @@ export class Player implements IPlayer {
     const height = this.container.clientHeight;
     
     const aspect = width / height;
-    // 官方可视高度 = 2 × orthographicSize = 2 × 5 = 10（官方单位，zoom=100）。
-    // 位置换算是 1:1，所以视口高度也必须取 10，画面比例才与官方一致；
-    // 与 DECO_SIZE_SCALE 是一组（K = H/10），改这里要同步改那个常数。
-    const baseFrustumSize = 10;
+    // 官方可视高度 = 2 × orthographicSize = 10（官方单位），但官方砖块间距是
+    // tileSize ≈ 1.71 而我们是 1.0 → 换到我们的单位要乘 1/1.71 ≈ 0.585：
+    //   10 × 0.585 ≈ 5.7  → 同一 zoom 下视野内的砖块数与官方一致（实测 5.85 块）。
+    // 与 DECO_SIZE_SCALE 是一组（K = H/10 = 0.57），改这里要同步改那个常数。
+    const baseFrustumSize = 5.47;
     
     this.camera.left = -baseFrustumSize * aspect / 2;
     this.camera.right = baseFrustumSize * aspect / 2;
