@@ -537,6 +537,19 @@ export class Player implements IPlayer {
         }
         return _tileGlowEnabled;
     };
+    // 运行期开关/查询：__adojasBloom(false) 关泛光；__adojasBloom() 查询当前 bloom 参数。
+    (window as any).__adojasBloom = (on?: boolean) => {
+        if (on !== undefined) {
+            this.bloomEnabled = on;
+            this.bloomEffect?.setEnabled(on);
+        }
+        return {
+            enabled: this.bloomEnabled,
+            threshold: this.bloomThreshold,
+            intensity: this.bloomIntensity,
+            color: this.bloomColor,
+        };
+    };
     if (opts?.deferDecorations) {
       // 装饰物分帧/异步创建（加载界面显示进度）——见 buildDecorationsAsync()
       this.decorationManager.collectDecoSources();
