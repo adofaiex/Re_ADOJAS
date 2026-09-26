@@ -102,8 +102,13 @@ export class ParticleDecorationSystem {
     this.cols = Math.max(1, Math.round(cfg.randomTextureTiling[0]) || 1)
     this.rows = Math.max(1, Math.round(cfg.randomTextureTiling[1]) || 1)
     const image = texture.image as { width?: number; height?: number } | undefined
-    this.quadW = ((image?.width || 100) / this.cols) / 100
-    this.quadH = ((image?.height || 100) / this.rows) / 100
+    // 逻辑尺寸必须用**原图**像素：贴图会被 resize 到 2048 以内只为省显存（更糊），
+    // 直接拿 texture.image.width 会把粒子算小一个数量级。
+    const ud = texture.userData as { origWidth?: number; origHeight?: number } | undefined
+    const origW = ud?.origWidth || image?.width || 100
+    const origH = ud?.origHeight || image?.height || 100
+    this.quadW = ((origW / this.cols) / 100)
+    this.quadH = ((origH / this.rows) / 100)
     this.parseGradient()
     this.buildMesh(Math.min(256, Math.max(1, cfg.maxParticles)))
   }
