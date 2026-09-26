@@ -42,8 +42,9 @@ const BG_OVERSCAN = 1.02;
 /**
  * 砖块辉度（topGlow）总开关。关掉可隔离验证：排除辉光后 Neon 应是"黑填充 + 彩边框"。
  * 官方语义：玩家经过的砖会叠加一层柔光，alpha = min(floorOpacity*glow/100*0.8, colorAlpha)。
+ * 运行期切换：控制台 `__adojasTileGlow(false)`。
  */
-const TILE_GLOW_ENABLED = true;
+let _tileGlowEnabled = true;
 
 export class Player implements IPlayer {
   private container: HTMLElement | null = null;
@@ -513,6 +514,7 @@ export class Player implements IPlayer {
             litThroughFloorIndex: this._litThroughFloorIndex,
             lit: i <= this._litThroughFloorIndex,
             glow: this.computeTileGlow(i, i <= this._litThroughFloorIndex),
+            tileGlowEnabled: _tileGlowEnabled,
             recolorConfig: this.tileColorManager?.getTileRecolorConfig(i) ?? null,
             tileColor: this.tileColorManager?.getTileColor(i) ?? null,
             instanced: inst ? {
@@ -525,6 +527,15 @@ export class Player implements IPlayer {
                 visible: inst.visible,
             } : null,
         };
+    };
+    // 运行期开关：__adojasTileGlow(false) 关闭砖块辉度，隔离验证"灰填充"是否来自辉光。
+    (window as any).__adojasTileGlow = (on: boolean) => {
+        _tileGlowEnabled = on !== false;
+        const hi = Math.min(this._litThroughFloorIndex, (this.levelData.tiles?.length ?? 1) - 1);
+        for (let i = 0; i <= hi; i++) {
+            this.instancedMeshManager?.setTileGlow(i, this.computeTileGlow(i, true));
+        }
+        return _tileGlowEnabled;
     };
     if (opts?.deferDecorations) {
       // 装饰物分帧/异步创建（加载界面显示进度）——见 buildDecorationsAsync()
@@ -2887,7 +2898,7 @@ export class Player implements IPlayer {
    * 只在"该砖已被玩家经过"时非零。见 scrFloor.cs L1439 / L1643。
    */
   private computeTileGlow(index: number, lit: boolean): number {
-    if (!TILE_GLOW_ENABLED || !lit) return 0;
+    if (!_tileGlowEnabled || !lit) return 0;
     const mesh = this.tiles.get(index.toString());
     if (!mesh) return 0;
     const floorOpacity = mesh.userData.opacity !== undefined ? mesh.userData.opacity : 1;
