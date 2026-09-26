@@ -27,6 +27,15 @@ const USE_OBJECT_FLOOR_BATCH = true;
  * 需要那几毫秒时再开（开着的话要先把预测做成精确的）。
  */
 const USE_DYNAMIC_PRECULL = true;
+
+/**
+ * 贴图 alpha 裁剪的应用开关。
+ *
+ * 它会同时改「UV 采样范围」和「四边形尺寸/偏移」，四条渲染路径都必须精确补偿；
+ * 任何一处不对都会表现成装饰**变小/没填满/错位**。分析结果照常缓存
+ * （texture.userData.alphaCrop），等能在画面里逐张核对后再打开。
+ */
+const USE_ALPHA_CROP = false;
 import { PlanetTrail } from './PlanetTrail';
 import { backdropBlendModeOf, createBackdropBlendMaterial, BackdropBlendMode } from './BackdropBlend';
 import type { ShaderMaterial } from 'three';
@@ -649,7 +658,7 @@ class DecorationInstance {
             // baseSize 保持裁剪前的值给剔除用；drawSize 才是实际四边形尺寸。
             this.cropOffX = 0;
             this.cropOffY = 0;
-            const alphaCrop = (texture.userData as any)?.alphaCrop;
+            const alphaCrop = USE_ALPHA_CROP ? (texture.userData as any)?.alphaCrop : null;
             if (alphaCrop) {
                 // 偏移要用**裁剪前**的尺寸算
                 this.cropOffX = alphaCrop.offsetX * this.baseSizeX;
@@ -2414,11 +2423,12 @@ export class DecorationManager {
         // 标准材质（Mesh/Sprite 路径）会应用 texture.offset/repeat；
         // 实例化路径用批次 uniform（见 DecorationInstancedRenderer）。
         if (!needRepeat) {
-            // alpha 裁剪：标准材质路径（Mesh/Sprite）靠 texture.offset/repeat 收窄 UV；
-            // 实例化路径用自己的 uUvOffset/uUvRepeat uniform（自定义着色器忽略 texture.offset）。
+            // 只分析（结果缓存），应用由 USE_ALPHA_CROP 控制。
             this.analyzeAlphaCrop(tex);
             const crop = (tex.userData as any)?.alphaCrop;
-            if (crop) {
+            if (USE_ALPHA_CROP && crop) {
+                // 标准材质路径（Mesh/Sprite）靠 texture.offset/repeat 收窄 UV；
+                // 实例化路径用自己的 uUvOffset/uUvRepeat uniform（自定义着色器忽略 texture.offset）。
                 tex.offset.set(crop.uvOffsetX, crop.uvOffsetY);
                 tex.repeat.set(crop.uvRepeatX, crop.uvRepeatY);
             }
