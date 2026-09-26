@@ -1,7 +1,7 @@
 import {
   InstancedMesh, Object3D, PlaneGeometry, ShaderMaterial, DoubleSide,
   DynamicDrawUsage, InstancedBufferAttribute, Texture, Color, Blending,
-  AdditiveBlending, MultiplyBlending, CustomBlending, Matrix4, Group,
+  AdditiveBlending, MultiplyBlending, CustomBlending, Matrix4, Group, Vector2,
 } from 'three';
 
 const decoVert = /* glsl */`
@@ -23,12 +23,15 @@ void main() {
 
 const decoFrag = /* glsl */`
 uniform sampler2D uMap;
+uniform vec2 uUvOffset;
+uniform vec2 uUvRepeat;
 varying vec2 vUv;
 varying vec3 vColor;
 varying float vOpacity;
 
 void main() {
-  vec4 tex = texture2D(uMap, vUv);
+  // alpha 裁剪：只采样内容区（去掉透明边距），避免缩小时边缘渗色发脏
+  vec4 tex = texture2D(uMap, vUv * uUvRepeat + uUvOffset);
   float a = tex.a * vOpacity;
   if (a < 0.004) discard;
   gl_FragColor = vec4(tex.rgb * vColor, a);
@@ -88,8 +91,14 @@ export class DecorationInstancedRenderer {
   }
 
   private createBatch(key: string, tex: Texture, blending: Blending, renderOrder: number, capacity: number): Batch {
+    // alpha 裁剪（同一批次共用一个贴图 → 用批次级 uniform 就够）
+    const crop = (tex.userData as any)?.alphaCrop;
     const mat = new ShaderMaterial({
-      uniforms: { uMap: { value: tex } },
+      uniforms: {
+        uMap: { value: tex },
+        uUvOffset: { value: new Vector2(crop?.uvOffsetX ?? 0, crop?.uvOffsetY ?? 0) },
+        uUvRepeat: { value: new Vector2(crop?.uvRepeatX ?? 1, crop?.uvRepeatY ?? 1) },
+      },
       vertexShader: decoVert,
       fragmentShader: decoFrag,
       transparent: true,

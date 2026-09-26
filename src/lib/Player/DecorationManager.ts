@@ -432,6 +432,9 @@ class DecorationInstance {
     /** Base texture size in world units (texW/100, texH/100) for culling */
     public baseSizeX = 1;
     public baseSizeY = 1;
+    /** alpha 裁剪后的内容中心偏移（世界单位），加到 mesh / instance 位置上 */
+    public cropOffX = 0;
+    public cropOffY = 0;
     public instSlot: DecoInstanceSlot | null = null;
     public particles: ParticleDecorationSystem | null = null;
     public planetTrail: PlanetTrail | null = null;
@@ -636,6 +639,12 @@ class DecorationInstance {
             const texH = (texture.userData as any)?.origHeight || texture.image?.height || 100;
             this.baseSizeX = (texW / 100) * DECO_SIZE_SCALE;
             this.baseSizeY = (texH / 100) * DECO_SIZE_SCALE;
+
+            // alpha 裁剪的**分析结果已经算好**（texture.userData.alphaCrop，见
+            // analyzeAlphaCrop）；但启用它必须同时处理四条渲染路径（实例化的 pivot
+            // 单位还没确认），否则会出现"UV 裁了、四边形没缩"的拉伸。先备好不动。
+            this.cropOffX = 0;
+            this.cropOffY = 0;
 
             // Overlay / SoftLight：需要采样背景，单独一遍渲染（见 BackdropBlend）。
             // 用普通 Mesh + 自定义 ShaderMaterial；world 变换仍由 three 常规管线处理。
@@ -2379,6 +2388,64 @@ export class DecorationManager {
         tex.wrapS = needRepeat ? RepeatWrapping : ClampToEdgeWrapping;
         tex.wrapT = needRepeat ? RepeatWrapping : ClampToEdgeWrapping;
         tex.repeat.set(tx, ty);
+        // 平铺时不做 alpha 裁剪（原版同）；否则分析一次并让 UV 只落在内容区。
+        // 标准材质（Mesh/Sprite 路径）会应用 texture.offset/repeat；
+        // 实例化路径用批次 uniform（见 DecorationInstancedRenderer）。
+        if (!needRepeat) this.analyzeAlphaCrop(tex);
+        // 注意：暂不把 texture.offset/repeat 改成裁剪区域 —— 必须四条渲染路径
+        // 一起切换（否则有的裁有的没裁，反而更不一致）。分析结果先缓存备用。
+    }
+
+    /**
+     * 贴图 alpha 裁剪（对齐 WAD 的 analyzeDecorationTextureAlphaCrop）：
+     * 扫描 alpha 求非透明包围盒，把透明边距从采样中去掉，避免缩小时边缘渗色发脏。
+     * 只做一次（结果缓存在 texture.userData.alphaCrop）。
+     */
+    private analyzeAlphaCrop(tex: Texture): void {
+        const ud: any = tex.userData;
+        if (ud.alphaCrop !== undefined) return;
+        ud.alphaCrop = null;
+        const img: any = tex.image;
+        const n: number = img?.naturalWidth ?? img?.width;
+        const m: number = img?.naturalHeight ?? img?.height;
+        if (!n || !m || typeof document === 'undefined') return;
+        let data: Uint8ClampedArray | null = null;
+        try {
+            const canvas = document.createElement('canvas');
+            canvas.width = n;
+            canvas.height = m;
+            const ctx = canvas.getContext('2d', { willReadFrequently: true });
+            if (!ctx) return;
+            ctx.drawImage(img, 0, 0, n, m);
+            data = ctx.getImageData(0, 0, n, m).data;
+        } catch { return; }
+        if (!data) return;
+        let left = n, top = m, right = -1, bottom = -1;
+        for (let y = 0; y < m; y++) {
+            const row = y * n * 4;
+            for (let x = 0; x < n; x++) {
+                if ((data[row + x * 4 + 3] ?? 0) <= 0) continue;
+                if (x < left) left = x;
+                if (x > right) right = x;
+                if (y < top) top = y;
+                if (y > bottom) bottom = y;
+            }
+        }
+        if (right < left || bottom < top) return;
+        const w = right - left + 1;
+        const h = bottom - top + 1;
+        if (w >= n && h >= m) return;   // 没有透明边距
+        const sx = w / n, sy = h / m;
+        ud.alphaCrop = {
+            uvOffsetX: left / n,
+            uvOffsetY: (m - bottom - 1) / m,
+            uvRepeatX: sx,
+            uvRepeatY: sy,
+            scaleX: sx,
+            scaleY: sy,
+            offsetX: (left + w / 2) / n - 0.5,
+            offsetY: 0.5 - (top + h / 2) / m,
+        };
     }
 
     private loadDecoTexture(filename: string, deco: DecorationInstance): boolean {

@@ -242,54 +242,59 @@ const createGemsMesh = (
     const hexOutlineRadius = hexRadius + outline;
     const hexInnerRadius = hexRadius - outline;
 
-    // 步骤 1：生成外层六边形顶点（黑色描边）
+    // Gem 是 **8 边形**（八边形），顶点相位 +PI/8 → 上下左右都是平边（与官方一致）
+    const GEM_SIDES = 8;
+    const GEM_STEP = (Math.PI * 2) / GEM_SIDES;
+    const GEM_PHASE = Math.PI / GEM_SIDES;
+
+    // 步骤 1：生成外层八边形顶点（黑色描边）
     const outerHexStart = vertices.length / 3;
-    for (let i = 0; i < 6; i++) {
-        const angle = (Math.PI / 3) * i;
+    for (let i = 0; i < GEM_SIDES; i++) {
+        const angle = GEM_STEP * i + GEM_PHASE;
         const x = Math.cos(angle) * hexOutlineRadius;
         const y = Math.sin(angle) * hexOutlineRadius;
         vertices.push(x, y, 0);
         colors.push(blackColor.r, blackColor.g, blackColor.b);
     }
 
-    // 步骤 2：生成内层六边形顶点（黑色描边）
+    // 步骤 2：生成内层八边形顶点（黑色描边）
     const blackInnerStart = vertices.length / 3;
-    for (let i = 0; i < 6; i++) {
-        const angle = (Math.PI / 3) * i;
+    for (let i = 0; i < GEM_SIDES; i++) {
+        const angle = GEM_STEP * i + GEM_PHASE;
         const x = Math.cos(angle) * hexRadius;
         const y = Math.sin(angle) * hexRadius;
         vertices.push(x, y, 0);
         colors.push(blackColor.r, blackColor.g, blackColor.b);
     }
 
-    // 步骤 3：生成最内层六边形顶点（白色填充）
+    // 步骤 3：生成最内层八边形顶点（白色填充）
     const whiteInnerStart = vertices.length / 3;
-    for (let i = 0; i < 6; i++) {
-        const angle = (Math.PI / 3) * i;
+    for (let i = 0; i < GEM_SIDES; i++) {
+        const angle = GEM_STEP * i + GEM_PHASE;
         const x = Math.cos(angle) * hexInnerRadius;
         const y = Math.sin(angle) * hexInnerRadius;
         vertices.push(x, y, 0);
         colors.push(whiteColor.r, whiteColor.g, whiteColor.b);
     }
 
-    // 步骤 4：构建外层边框（外六边形 → 内黑六边形）
-    for (let i = 0; i < 6; i++) {
-        const next = (i + 1) % 6;
+    // 步骤 4：构建外层边框（外八边形 → 内黑八边形）
+    for (let i = 0; i < GEM_SIDES; i++) {
+        const next = (i + 1) % GEM_SIDES;
         // 两个三角形组成一个四边形面
         faces.push(outerHexStart + i, blackInnerStart + i, blackInnerStart + next);
         faces.push(outerHexStart + i, blackInnerStart + next, outerHexStart + next);
     }
 
-    // 步骤 5：构建内部边框（内黑六边形 → 内白六边形）
-    for (let i = 0; i < 6; i++) {
-        const next = (i + 1) % 6;
+    // 步骤 5：构建内部边框（内黑八边形 → 内白八边形）
+    for (let i = 0; i < GEM_SIDES; i++) {
+        const next = (i + 1) % GEM_SIDES;
         // 两个三角形组成一个四边形面
         faces.push(blackInnerStart + i, whiteInnerStart + i, whiteInnerStart + next);
         faces.push(blackInnerStart + i, whiteInnerStart + next, blackInnerStart + next);
     }
 
-    // 步骤 6：白色填充中心六边形
-    for (let i = 1; i < 5; i++) {
+    // 步骤 6：白色填充中心八边形（扇形三角化）
+    for (let i = 1; i < GEM_SIDES - 1; i++) {
         faces.push(whiteInnerStart, whiteInnerStart + i, whiteInnerStart + i + 1);
     }
 
@@ -322,12 +327,9 @@ const createGemsMesh = (
         colors.push(blackColor.r, blackColor.g, blackColor.b);
     }
     
-    // 起始端盖面
-    faces.push(capOuterStart, capOuterStart + 1, capOuterStart + 2);
-    faces.push(capOuterStart + 2, capOuterStart + 3, capOuterStart);
-    // 结束端盖面
-    faces.push(capOuterStart + 4, capOuterStart + 5, capOuterStart + 6);
-    faces.push(capOuterStart + 6, capOuterStart + 7, capOuterStart + 4);
+    // Gems 是**纯八边形**：不加端盖面。
+    // （端盖顶点仍生成但无人引用 → 不产生三角形 → 不会画出来。
+    //  官方 Gem 只有六边形，这里多了两组矩形面就会露出"普通轨道两侧"。）
 
     // 端盖内层（白色）
     const capInnerStart = vertices.length / 3;
@@ -354,12 +356,7 @@ const createGemsMesh = (
         colors.push(whiteColor.r, whiteColor.g, whiteColor.b);
     }
 
-    // 起始端盖面
-    faces.push(capInnerStart, capInnerStart + 1, capInnerStart + 2);
-    faces.push(capInnerStart + 2, capInnerStart + 3, capInnerStart);
-    // 结束端盖面
-    faces.push(capInnerStart + 4, capInnerStart + 5, capInnerStart + 6);
-    faces.push(capInnerStart + 6, capInnerStart + 7, capInnerStart + 4);
+    // 同上：内层端盖也不生成面（保持纯六边形）
 
     return { vertices, faces, colors };
 };
