@@ -1700,6 +1700,12 @@ export class DecorationManager {
             // 最终 alpha 时相乘（见 DecorationInstance.recomputeOpacity）。
             const baseCA = parseDecoColor(deco.config.color, 'ffffff')[1];
             const baseOp0 = deco.config.opacity / 100;
+            // Camera / CameraAspect 的位置/支点偏移用的是**另一套单位**：
+            // 创建路径是 `pivotOffset: raw * (isCam ? 1 : ts)`、computeStartPos 对
+            // cam 还会 /ts。关键帧必须用同一套系数，否则做位置/支点动画时会整体放大 ts 倍。
+            const isCamPlacement = deco.config.relativeTo === DecPlacementType.Camera
+                || deco.config.relativeTo === DecPlacementType.CameraAspect;
+            const offScale = isCamPlacement ? 1 : ts;
             const basePosX = deco.startPos.x;
             const basePosY = deco.startPos.y;
             // Events trigger chronologically at runtime: once a SetPlacementType
@@ -1817,12 +1823,12 @@ export class DecorationManager {
                     const startX = tm.sample(kv, 'positionX', eventTime) ?? basePosX;
                     const startY = tm.sample(kv, 'positionY', eventTime) ?? basePosY;
                     if (npos[0] !== null) {
-                        const endX = (isLastPos ? startX : curStartX) + npos[0] * ts;
+                        const endX = (isLastPos ? startX : curStartX) + npos[0] * offScale;
                         if (hasDur) tm.addTweenKillComplete(kv, 'positionX', eventTime, endTime, startX, endX, ease);
                         else tm.addInstantEvent(kv, 'positionX', eventTime, endX);
                     }
                     if (npos[1] !== null) {
-                        const endY = (isLastPos ? startY : curStartY) + npos[1] * ts;
+                        const endY = (isLastPos ? startY : curStartY) + npos[1] * offScale;
                         if (hasDur) tm.addTweenKillComplete(kv, 'positionY', eventTime, endTime, startY, endY, ease);
                         else tm.addInstantEvent(kv, 'positionY', eventTime, endY);
                     }
@@ -1904,12 +1910,12 @@ export class DecorationManager {
                     const startPVX = tm.sample(kv, 'pivotOffsetX', eventTime) ?? deco.config.pivotOffset[0];
                     const startPVY = tm.sample(kv, 'pivotOffsetY', eventTime) ?? deco.config.pivotOffset[1];
                     if (pv[0] !== null) {
-                        const endPVX = pv[0] * ts;
+                        const endPVX = pv[0] * offScale;
                         if (hasDur) tm.addTweenKillComplete(kv, 'pivotOffsetX', eventTime, endTime, startPVX, endPVX, ease);
                         else tm.addInstantEvent(kv, 'pivotOffsetX', eventTime, endPVX);
                     }
                     if (pv[1] !== null) {
-                        const endPVY = pv[1] * ts;
+                        const endPVY = pv[1] * offScale;
                         if (hasDur) tm.addTweenKillComplete(kv, 'pivotOffsetY', eventTime, endTime, startPVY, endPVY, ease);
                         else tm.addInstantEvent(kv, 'pivotOffsetY', eventTime, endPVY);
                     }
