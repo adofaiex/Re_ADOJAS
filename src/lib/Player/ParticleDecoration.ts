@@ -189,6 +189,45 @@ export class ParticleDecorationSystem {
   public stop(clear = true): void { this.started = false; if (clear) this.clearParticles() }
   private clearParticles(): void { this.pool.push(...this.particles); this.particles.length = 0; if (this.mesh) this.mesh.count = 0 }
   public setVisible(value: boolean): void { this.visible = value; if (this.mesh) this.mesh.visible = value }
+
+  /** EmitParticle：立刻补发 count 个粒子（下一帧 update 会消费掉）。 */
+  public burst(count: number): void {
+    const n = Number(count);
+    if (!Number.isFinite(n) || n <= 0) return;
+    this.emitAccum += n;
+  }
+
+  /**
+   * SetParticle：把事件的字段覆盖到当前粒子参数上（不重建网格；
+   * 容量只受创建时的 maxParticles 限制）。
+   */
+  public applySetParticle(event: any): void {
+    const c = this.cfg as any;
+    const num = (v: any): number | undefined =>
+      (v === undefined || v === null || v === '' ? undefined : Number(v));
+    const vec = (v: any, dst: [number, number] | undefined): void => {
+      if (!dst) return;
+      if (Array.isArray(v)) {
+        if (v[0] != null) dst[0] = Number(v[0]);
+        if (v[1] != null) dst[1] = Number(v[1]);
+      } else if (v != null && v !== '') { dst[0] = dst[1] = Number(v); }
+    };
+    const mp = num(event.maxParticles);
+    if (mp !== undefined) c.maxParticles = mp;
+    vec(event.particleLifetime, c.particleLifetime);
+    vec(event.particleSize, c.particleSize);
+    vec(event.sizeOverLifetime, c.sizeOverLifetime);
+    vec(event.rotationOverTime, c.rotationOverTime);
+    vec(event.startRotation, c.startRotation);
+    const er = num(event.emissionRate);
+    if (er !== undefined) { c.emissionRate[0] = er; c.emissionRate[1] = er; }
+    const ss = num(event.simulationSpeed);
+    if (ss !== undefined) c.simulationSpeed = ss;
+    if (event.colorOverLifetime !== undefined) {
+      c.colorOverLifetime = event.colorOverLifetime;
+      this.parseGradient();
+    }
+  }
   /** SetDepth：renderer.sortingOrder = -depth（映射为 renderOrder）。 */
   public setRenderOrder(order: number): void { if (this.mesh) this.mesh.renderOrder = order }
   /** SetScale：MoveDecorations 的 scale 改发射区域

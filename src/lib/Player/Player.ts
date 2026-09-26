@@ -2754,6 +2754,11 @@ export class Player implements IPlayer {
           case 'SetCustomBG':
           case 'CustomBackground': this.processCustomBGEvent(ev); break;
           case 'RecolorTrack': this.processRecolorEvent(ev); break;
+          // 粒子：AddParticle 在装饰创建时建系统；这两个是运行期驱动
+          case 'SetParticle':
+          case 'EmitParticle':
+            this.decorationManager?.applyParticleEvent(ev);
+            break;
         }
       }
       this.perfAdd('events', performance.now() - tP);

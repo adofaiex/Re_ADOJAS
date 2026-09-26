@@ -38,7 +38,7 @@ import type { TileColorConfig } from './TileColorManager';
 // ── Object 装饰物 Planet：与玩家 Planet 一致的球体 + 拖尾参数 ──
 /** 粒子装饰（AddParticle）临时禁用开关：置 true 恢复创建/更新。
  *  禁用时 AddParticle 事件完全跳过（不入 pending，避免反复重试）。 */
-const PARTICLES_ENABLED = false;
+const PARTICLES_ENABLED = true;
 /** 行星本体半径（拖尾宽度用），取值 0.22。 */
 const PLANET_BODY_RADIUS = 0.22;
 /** 行星本体贴图四边形尺寸 = 直径（半径 × 2）。 */
@@ -3104,6 +3104,24 @@ export class DecorationManager {
         if (deco.config.decorationType !== DecorationType.Image && deco.config.decorationType !== DecorationType.Text) return;
         const texture = this.textures.get(this.decoTextureKey(deco, deco.config.decorationImage));
         if (texture) { this.configureTextureRepeat(texture, deco); deco.setupVisual(texture); }
+    }
+
+    /**
+     * SetParticle / EmitParticle：按事件 tag 派发到对应的粒子装饰。
+     * EmitParticle → 立刻补发 count 个；SetParticle → 覆盖粒子参数。
+     */
+    public applyParticleEvent(ev: any): void {
+        const tags = String(ev?.tag ?? '').split(/\s+/).filter(Boolean);
+        if (tags.length === 0) return;
+        for (const tg of tags) {
+            const list = this.taggedDecorations.get(tg);
+            if (!list) continue;
+            for (const d of list) {
+                if (!d.particles) continue;
+                if (ev.eventType === 'EmitParticle') d.particles.burst(ev.count ?? 1);
+                else d.particles.applySetParticle(ev);
+            }
+        }
     }
 
     /** 时间轴采样驱动：SetText。 */
