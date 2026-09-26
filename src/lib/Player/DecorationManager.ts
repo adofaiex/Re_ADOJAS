@@ -181,11 +181,13 @@ function applyDecoBlendMode(mat: any, mode: DecorationBlendMode): void {
     }
 }
 
-function maskReference(value: string): number {
-    let hash = 17;
-    for (let index = 0; index < value.length; index++) hash = (hash * 31 + value.charCodeAt(index)) | 0;
-    return (Math.abs(hash) % 254) + 1;
-}
+/**
+ * 遮罩 stencil key：目标名（+ 深度范围）。
+ * 对齐 WAD 的 `resolveMaskStencilKeyForInstance`：
+ * `useMaskingDepth ? `${name}:${front}:${back}` : name` —— 同一目标名但不同深度范围
+ * 必须是**不同的**遮罩，用深度范围拼进 key 才能分开。
+ */
+const NO_TAG_MASK = 'NO TAG';
 
 export enum DecorationType {
     Image = 'Image',
@@ -695,8 +697,8 @@ class DecorationInstance {
                 // → 空目标等价于 "NO TAG"（即"没有 tag 的装饰"这一组），不是"没有遮罩"。
                 // 遮罩是否命中由 stencil（Mask 装饰写 ref、被遮罩的测 ref）决定：
                 // 若该组里没有 Mask 装饰，测试永远失败 → 整张被裁掉（空 alpha mask 同理）。
-                const target = this.config.maskingTarget || 'NO TAG';
-                const stencilRef = maskReference(target);
+                // stencil ref：按 key（目标名 + 深度范围）顺序分配（对齐 WAD）
+                const stencilRef = this.maskStencilRef();
                 if (this.config.maskingType === MaskingType.Mask) {
                     mat.colorWrite = false;
                     mat.depthWrite = false;
@@ -762,6 +764,35 @@ class DecorationInstance {
      *    fg:  z ∈ [0.1 - d*0.1 .. 0.18 - d*0.1]     (bottom edge 0.1 stays above tiles)
      *  The ±0.08 rank span inside each step (updateZRank) never crosses a neighbouring
      *  depth step (gap 0.02). */
+    /** 遮罩 stencil key（目标名 + 深度范围）。 */
+    private maskStencilKey(): string {
+        const name = (this.config.maskingTarget || NO_TAG_MASK).trim() || NO_TAG_MASK;
+        if (this.config.useMaskingDepth) {
+            const f = this.config.maskingFrontDepth ?? 0;
+            const b = this.config.maskingBackDepth ?? 0;
+            return `${name}:${Math.min(f, b)}:${Math.max(f, b)}`;
+        }
+        return name;
+    }
+
+    /** 该装饰的 stencil ref（0 = 不参与遮罩）。 */
+    private maskStencilRef(): number {
+        if (this.config.maskingType === MaskingType.None) return 0;
+        return this._manager?.stencilRefFor?.(this.maskStencilKey()) ?? 0;
+    }
+
+    /**
+     * 带遮罩分组的 renderOrder：
+     * 无遮罩 → 原样；有遮罩 → 叠加 `ref * 0.001`（把同一 ref 的遮罩/被遮罩装饰聚在一起，
+     * 对齐 WAD 的 `depth - 0.5 + ref*vx`），Mask 自身再低 0.0005 以保证先写入 stencil。
+     * 基础值仍用我们原有的层级（不整体换空间，避免动到已经对的层叠）。
+     */
+    private maskedRenderOrder(roBase: number): number {
+        const ref = this.maskStencilRef();
+        if (ref <= 0) return roBase;
+        return roBase + ref * 0.001 - (this.config.maskingType === MaskingType.Mask ? 0.0005 : 0);
+    }
+
     public depthZ(): [number, number] {
         // SetDepth：switch 只处理 Floor / Planet，
         // PlayerBubble 不做任何排序变更（保持默认层级/顺序）。
@@ -829,7 +860,8 @@ class DecorationInstance {
 
     public updateTransform(): void {
         this.container.rotation.z = this.currentRotation * Math.PI / 180;
-        const [z, ro] = this.depthZ();
+        const [z, roBase] = this.depthZ();
+        const ro = this.maskedRenderOrder(roBase);
         this.container.position.set(this.currentPosition.x, this.currentPosition.y, z + this._zRankOffset);
         if (this.instSlot) {
             this.syncInstance();
@@ -2511,6 +2543,21 @@ export class DecorationManager {
     /** 纯色装饰（无贴图但需要采样）用的 1x1 白纹理。 */
     public getPlaceholderTexture(): Texture { return this.textures.placeholder; }
 
+    /**
+     * stencil ref 分配（对齐 WAD 的 stencilRefForMaskingTarget）：
+     * 按 key 去重后**顺序**分配 1..254。原来的哈希实现会碰撞 —— 两个不同的遮罩
+     * 拿到同一个 ref 就会互相串（本该被遮掉的露出来 / 反之）。
+     */
+    private maskStencilRefs: Map<string, number> = new Map();
+    public stencilRefFor(key: string): number {
+        const k = (key || '').trim() || NO_TAG_MASK;
+        const hit = this.maskStencilRefs.get(k);
+        if (hit != null) return hit;
+        const ref = (this.maskStencilRefs.size % 254) + 1;
+        this.maskStencilRefs.set(k, ref);
+        return ref;
+    }
+
     /** 是否存在可见、需要背景混合的装饰。 */
     public hasActiveBackdropBlend(): boolean {
         for (const d of this.backdropDecos) {
@@ -3114,6 +3161,7 @@ export class DecorationManager {
         this.backdropDecos.length = 0;
         this.backdropGroup.clear();
         this._animatedDecos.length = 0;
+        this.maskStencilRefs.clear();
         this._objFloorDirty = true;
         this.objectFloorBatch?.dispose();
         this.decorations.clear();
