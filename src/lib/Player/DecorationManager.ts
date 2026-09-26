@@ -2300,7 +2300,14 @@ export class DecorationManager {
                     // 注意符号：普通砖的图标角度由 instanced.frag 里 `iconAngle = -vFloorIconAngle`
                     // 取负后再旋转；Sprite 的 material.rotation 是直接旋转，所以这里同样取负，
                     // 才能和普通轨道朝向一致（图标角度取负，等于 SetIconAngle(-angle) 的语义）。
-                    (sprite.material as SpriteMaterial).rotation = -iconAngle;
+                    //
+                    // 另外 Object(Floor) 的轨道网格是用**固定局部角**建的
+                    // （createTrackMesh(-180, 180 - trackAngle)），它的"前进方向"与普通砖
+                    // 的世界朝向约定差 90°；Sprite 又在屏幕空间，所以还要补一个 +90°（向左）,
+                    // 图标才和普通砖同向。
+                    // 彻底做法是让 Object(Floor) 的图标也走砖块那套图标渲染（见 ObjectFloorBatch），
+                    // 而不是用屏幕空间 Sprite —— 那是后续要补的。
+                    (sprite.material as SpriteMaterial).rotation = -iconAngle + Math.PI / 2;
                     // SetFloorIconFlipped
                     if (isEnabled(event.trackIconFlipped)) {
                         sprite.scale.x = -Math.abs(sprite.scale.x);
