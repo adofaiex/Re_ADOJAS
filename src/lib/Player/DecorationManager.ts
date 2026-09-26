@@ -592,6 +592,9 @@ class DecorationInstance {
 
     public setupVisual(texture: Texture | null): void {
         this.clearVisual();
+        // 重建时必须清掉上次的 alpha 裁剪偏移（无贴图分支不会重新计算它）
+        this.cropOffX = 0;
+        this.cropOffY = 0;
         if (this.config.decorationType === DecorationType.Object) return;
         const blend = getBlendMode(this.config.blendMode);
         this.visualGroup.position.set(this.config.pivotOffset[0], this.config.pivotOffset[1], 0);
@@ -610,6 +613,7 @@ class DecorationInstance {
             mat.uniforms.uOpacity.value = this.currentOpacity;
             const mesh = new Mesh(new PlaneGeometry(1, 1), mat);
             mesh.scale.set(this.baseSizeX, this.baseSizeY, 1);
+            mesh.position.set(this.cropOffX, this.cropOffY, 0);
             this.backdropMat = mat;
             this.mesh = mesh;
             this.visualGroup.add(mesh);
@@ -640,11 +644,20 @@ class DecorationInstance {
             this.baseSizeX = (texW / 100) * DECO_SIZE_SCALE;
             this.baseSizeY = (texH / 100) * DECO_SIZE_SCALE;
 
-            // alpha 裁剪的**分析结果已经算好**（texture.userData.alphaCrop，见
-            // analyzeAlphaCrop）；但启用它必须同时处理四条渲染路径（实例化的 pivot
-            // 单位还没确认），否则会出现"UV 裁了、四边形没缩"的拉伸。先备好不动。
+            // alpha 裁剪：UV 只采样内容区（texture.offset/repeat 或批次 uniform）→
+            // 四边形按裁剪比例缩小 + 按内容中心偏移，可见内容的**世界尺寸/位置保持不变**。
+            // baseSize 保持裁剪前的值给剔除用；drawSize 才是实际四边形尺寸。
             this.cropOffX = 0;
             this.cropOffY = 0;
+            const alphaCrop = (texture.userData as any)?.alphaCrop;
+            if (alphaCrop) {
+                // 偏移要用**裁剪前**的尺寸算
+                this.cropOffX = alphaCrop.offsetX * this.baseSizeX;
+                this.cropOffY = alphaCrop.offsetY * this.baseSizeY;
+                // 四边形 = 内容区尺寸（UV 同步缩到内容区 → 可见内容的世界尺寸不变）
+                this.baseSizeX *= alphaCrop.scaleX;
+                this.baseSizeY *= alphaCrop.scaleY;
+            }
 
             // Overlay / SoftLight：需要采样背景，单独一遍渲染（见 BackdropBlend）。
             // 用普通 Mesh + 自定义 ShaderMaterial；world 变换仍由 three 常规管线处理。
@@ -664,6 +677,7 @@ class DecorationInstance {
                 mat.uniforms.uOpacity.value = this.currentOpacity;
                 const mesh = new Mesh(new PlaneGeometry(1, 1), mat);
                 mesh.scale.set(this.baseSizeX, this.baseSizeY, 1);
+                mesh.position.set(this.cropOffX, this.cropOffY, 0);
                 this.backdropMat = mat;
                 this.mesh = mesh;
                 this.visualGroup.add(mesh);
@@ -688,7 +702,9 @@ class DecorationInstance {
                 this.instSlot = this.instRenderer!.alloc(
                     texture, blend as Blending, ro,
                     this.baseSizeX, this.baseSizeY,
-                    this.config.pivotOffset[0], this.config.pivotOffset[1],
+                    // alpha 裁剪的内容中心偏移直接加到 pivot（write() 里 pivot 与 baseW 同单位）
+                    this.config.pivotOffset[0] + this.cropOffX,
+                    this.config.pivotOffset[1] + this.cropOffY,
                 );
             } else {
                 // 用 **Mesh（world 空间四边形）**，不用 Sprite：Sprite 永远面向相机、
@@ -728,6 +744,7 @@ class DecorationInstance {
                 }
                 const mesh = new Mesh(new PlaneGeometry(1, 1), mat);
                 mesh.scale.set(this.baseSizeX, this.baseSizeY, 1);
+                mesh.position.set(this.cropOffX, this.cropOffY, 0);
                 this.mesh = mesh;
                 this.visualGroup.add(mesh);
             }
@@ -2391,9 +2408,16 @@ export class DecorationManager {
         // 平铺时不做 alpha 裁剪（原版同）；否则分析一次并让 UV 只落在内容区。
         // 标准材质（Mesh/Sprite 路径）会应用 texture.offset/repeat；
         // 实例化路径用批次 uniform（见 DecorationInstancedRenderer）。
-        if (!needRepeat) this.analyzeAlphaCrop(tex);
-        // 注意：暂不把 texture.offset/repeat 改成裁剪区域 —— 必须四条渲染路径
-        // 一起切换（否则有的裁有的没裁，反而更不一致）。分析结果先缓存备用。
+        if (!needRepeat) {
+            // alpha 裁剪：标准材质路径（Mesh/Sprite）靠 texture.offset/repeat 收窄 UV；
+            // 实例化路径用自己的 uUvOffset/uUvRepeat uniform（自定义着色器忽略 texture.offset）。
+            this.analyzeAlphaCrop(tex);
+            const crop = (tex.userData as any)?.alphaCrop;
+            if (crop) {
+                tex.offset.set(crop.uvOffsetX, crop.uvOffsetY);
+                tex.repeat.set(crop.uvRepeatX, crop.uvRepeatY);
+            }
+        }
     }
 
     /**
