@@ -790,15 +790,20 @@ class DecorationInstance {
      *    fg:  z ∈ [0.1 - d*0.1 .. 0.18 - d*0.1]     (bottom edge 0.1 stays above tiles)
      *  The ±0.08 rank span inside each step (updateZRank) never crosses a neighbouring
      *  depth step (gap 0.02). */
-    /** 遮罩 stencil key（目标名 + 深度范围）。 */
+    /**
+     * 遮罩 stencil key = 目标名。
+     *
+     * 注意**不能**把"深度范围"拼进来：`useMaskingDepth / maskingFrontDepth /
+     * maskingBackDepth` 是写在**遮罩(Mask)装饰**身上的，而被遮罩的装饰只有
+     * `maskingTarget` —— 拼进范围会让两边 key 不同 → ref 不同 → 遮罩直接对不上，
+     * 所有用 useMaskingDepth 的关卡整体失效。
+     *
+     * 原版的"按深度范围挑选生效的那个遮罩"需要一个 mask 注册表（按 target 收集
+     * 所有 Mask 及其范围，再按被遮罩装饰的 depth 选一个 ref）—— 那是独立一步，
+     * 先把配对修对。
+     */
     private maskStencilKey(): string {
-        const name = (this.config.maskingTarget || NO_TAG_MASK).trim() || NO_TAG_MASK;
-        if (this.config.useMaskingDepth) {
-            const f = this.config.maskingFrontDepth ?? 0;
-            const b = this.config.maskingBackDepth ?? 0;
-            return `${name}:${Math.min(f, b)}:${Math.max(f, b)}`;
-        }
-        return name;
+        return (this.config.maskingTarget || NO_TAG_MASK).trim() || NO_TAG_MASK;
     }
 
     /** 该装饰的 stencil ref（0 = 不参与遮罩）。 */
