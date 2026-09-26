@@ -10,6 +10,7 @@ import createTrackMesh from '../Geo/mesh_reserve';
 import { EasingFunctions } from './Easing';
 import { HTMLAudioMusic, getSharedAudioContext } from './HTMLAudioMusic';
 import tileTextureUrl from '@/assets/texture.json';
+import floorTopGlowUrl from '@/assets/tile/floor-top-glow.json';
 import { TileColorManager, TileColorConfig, parseHexAlpha } from './TileColorManager';
 import { isEnabled, isEventActive } from './EventUtils';
 import { loadCompressedTexture } from './TextureCompress';
@@ -37,6 +38,12 @@ import { Level } from 'adofai';
 
 /** 全屏背景（图/视频）相对视口的外扩余量，避免边缘接缝。 */
 const BG_OVERSCAN = 1.02;
+
+/**
+ * 砖块辉度（topGlow）总开关。关掉可隔离验证：排除辉光后 Neon 应是"黑填充 + 彩边框"。
+ * 官方语义：玩家经过的砖会叠加一层柔光，alpha = min(floorOpacity*glow/100*0.8, colorAlpha)。
+ */
+const TILE_GLOW_ENABLED = true;
 
 export class Player implements IPlayer {
   private container: HTMLElement | null = null;
@@ -114,6 +121,8 @@ export class Player implements IPlayer {
   private _musicScheduled: boolean = false;  // whether playScheduled has been issued (once per startPlay)
   
   private currentTileIndex: number = 0;
+  /** 砖块辉度（topGlow）：玩家已经过的最新砖块 index。仅播放中生效，-1 = 无。 */
+  private _litThroughFloorIndex: number = -1;
 
   // ── 手动游玩 / 判定 ──────────────────────────────────────────
   private manualMode: boolean = false;          // false = autoplay
@@ -492,6 +501,31 @@ export class Player implements IPlayer {
     (window as any).__adojasDecoFind = (needle: string) =>
         (this.decorationManager?.debugSnapshot({ visibleOnly: false, limit: 100000 }) ?? [])
             .filter(x => JSON.stringify(x).includes(needle));
+    // 砖块检查：__adojasTileInfo(index?) → 该砖当前时刻的样式/颜色/辉度（省略 index 取当前砖）
+    //   用来一锤定音确认"灰填充"到底是 NeonLight(halfColor) 还是 Neon(应黑) —— 或辉光造成。
+    (window as any).__adojasTileInfo = (index?: number) => {
+        const i = index ?? this.currentTileIndex;
+        const inst = this.instancedMeshManager?.getTileInstance(i) as any;
+        return {
+            index: i,
+            currentTileIndex: this.currentTileIndex,
+            isPlaying: this.isPlaying,
+            litThroughFloorIndex: this._litThroughFloorIndex,
+            lit: i <= this._litThroughFloorIndex,
+            glow: this.computeTileGlow(i, i <= this._litThroughFloorIndex),
+            recolorConfig: this.tileColorManager?.getTileRecolorConfig(i) ?? null,
+            tileColor: this.tileColorManager?.getTileColor(i) ?? null,
+            instanced: inst ? {
+                shapeKey: inst.shapeKey,
+                fill: '#' + inst.color.getHexString(),
+                border: '#' + inst.bgColor.getHexString(),
+                opacity: inst.opacity,
+                texSeed: inst.texSeed,
+                glow: inst.glow,
+                visible: inst.visible,
+            } : null,
+        };
+    };
     if (opts?.deferDecorations) {
       // 装饰物分帧/异步创建（加载界面显示进度）——见 buildDecorationsAsync()
       this.decorationManager.collectDecoSources();
@@ -647,6 +681,7 @@ export class Player implements IPlayer {
     this.resetTrailHistory();
     this.hitErrorSamples = [];
     this.currentTileIndex = 0;
+    this._litThroughFloorIndex = -1;
     this.isPaused = false;
     this.audioDriftSynced = false;
     this.useAudioContextTime = false;
@@ -1470,6 +1505,9 @@ export class Player implements IPlayer {
     geometry.setAttribute('position', new Float32BufferAttribute(meshData.vertices, 3));
     geometry.setAttribute('color', new Float32BufferAttribute(meshData.colors, 3));
     geometry.computeVertexNormals();
+    // 砖块辉度用：沿路径的完整长度（弯砖 AABB 不等于它）。
+    if (meshData.tileLength) geometry.userData.tileLength = meshData.tileLength;
+    if (meshData.tileWidth) geometry.userData.tileWidth = meshData.tileWidth;
     return geometry;
   }
   
@@ -2812,6 +2850,8 @@ export class Player implements IPlayer {
 
   private syncInstancedTiles(): void {
     if (!this.instancedMeshManager) return;
+    // 砖块辉度：先同步"已通过的砖"（topGlow 只在播放中生效）。
+    this.updateTileGlowState();
     if (this.dirtyTiles.size === 0) return;
 
     this.dirtyTiles.forEach(index => {
@@ -2832,8 +2872,48 @@ export class Player implements IPlayer {
         // Always sync floor icon type and direction angle
         this.instancedMeshManager!.setFloorIconType(index, mesh.userData.floorIconType ?? 0);
         this.instancedMeshManager!.setFloorIconAngle(index, mesh.userData.floorIconAngle ?? 0);
+        // 砖块辉度依赖砖自身 alpha，随 transform/透明度一并刷新。
+        this.instancedMeshManager!.setTileGlow(
+            index,
+            this.computeTileGlow(index, index <= this._litThroughFloorIndex)
+        );
     });
     this.dirtyTiles.clear();
+  }
+
+  /**
+   * 砖块辉度（topGlow）的层 alpha，复刻官方：
+   *   alpha = min(floorOpacity * (trackGlowIntensity/100) * 0.8, colorAlpha)
+   * 只在"该砖已被玩家经过"时非零。见 scrFloor.cs L1439 / L1643。
+   */
+  private computeTileGlow(index: number, lit: boolean): number {
+    if (!TILE_GLOW_ENABLED || !lit) return 0;
+    const mesh = this.tiles.get(index.toString());
+    if (!mesh) return 0;
+    const floorOpacity = mesh.userData.opacity !== undefined ? mesh.userData.opacity : 1;
+    const colorAlpha = mesh.userData.trackColorOpacity ?? 1;
+    const cfg = this.tileColorManager.getTileRecolorConfig(index);
+    const mult = (cfg?.trackGlowIntensity ?? 100) / 100;
+    if (!(mult > 0)) return 0;
+    return Math.min(floorOpacity * mult * 0.8, colorAlpha);
+  }
+
+  /** 播放推进时，把新经过的砖点亮（回退时熄灭），只处理变化的区间。 */
+  private updateTileGlowState(): void {
+    const target = this.isPlaying ? this.currentTileIndex : -1;
+    if (target === this._litThroughFloorIndex) return;
+    const prev = this._litThroughFloorIndex;
+    this._litThroughFloorIndex = target;
+    const total = this.levelData.tiles?.length ?? 0;
+    if (target > prev) {
+      for (let i = Math.max(0, prev + 1); i <= target && i < total; i++) {
+        this.instancedMeshManager!.setTileGlow(i, this.computeTileGlow(i, true));
+      }
+    } else {
+      for (let i = Math.max(0, target + 1); i <= prev && i < total; i++) {
+        this.instancedMeshManager!.setTileGlow(i, 0);
+      }
+    }
   }
   
   private updateDecorations(): void {
@@ -3894,6 +3974,9 @@ export class Player implements IPlayer {
         trackColorAnimDuration: event.trackColorAnimDuration || settings.trackColorAnimDuration || 2,
         trackPulseLength: event.trackPulseLength || settings.trackPulseLength || 10,
         trackOpacity: parseHexAlpha(event.trackColor || defaultColor),
+        trackGlowIntensity: event.trackGlowIntensity !== undefined
+            ? Number(event.trackGlowIntensity)
+            : (settings.trackGlowIntensity ?? 100),
         startFloor: event.floor,
         recolorTriggerTime: event.recolorTriggerTime
     };
@@ -3976,6 +4059,11 @@ export class Player implements IPlayer {
     }
     this.updateTileMeshColor(index);
     this.dirtyTiles.add(index);
+    // 砖块辉度依赖砖的 colorAlpha（trackColor 的 alpha），颜色变化后立即刷新辉光层。
+    this.instancedMeshManager?.setTileGlow(
+      index,
+      this.computeTileGlow(index, index <= this._litThroughFloorIndex)
+    );
   }
 
   private updateTileMeshColor(index: number): void {
@@ -4795,7 +4883,8 @@ export class Player implements IPlayer {
             true, // visible
             texSeed,
             iconTypeIdx,
-            floorIconAngle
+            floorIconAngle,
+            this.computeTileGlow(index, index <= this._litThroughFloorIndex)
         );
     }
 
@@ -5103,6 +5192,15 @@ export class Player implements IPlayer {
       // uv = worldPos × scale：scale 越小贴图显示越大，每块砖分到的纹路越少。
       // Standard 轨道默认纹路过密，取 0.3 让特征尺寸约为砖块长度的 3 倍。
       this.instancedMeshManager.setTileTexture(texture, 0.3);
+    }
+
+    // 砖块辉度贴图（floor-top-glow.png）：玩家经过该砖后叠加的柔光。
+    const glow = loader.load(floorTopGlowUrl);
+    glow.colorSpace = SRGBColorSpace;
+    glow.minFilter = LinearFilter;
+    glow.magFilter = LinearFilter;
+    if (this.instancedMeshManager) {
+      this.instancedMeshManager.setGlowTexture(glow);
     }
   }
 

@@ -1,7 +1,52 @@
-import { Vector3, Euler, Color, InstancedMesh, Object3D, Scene, BufferGeometry, ShaderMaterial, DoubleSide, DynamicDrawUsage, InstancedBufferAttribute, Matrix4, Texture, Material } from 'three';
+import { Vector3, Euler, Color, InstancedMesh, Object3D, Scene, BufferGeometry, ShaderMaterial, DoubleSide, DynamicDrawUsage, InstancedBufferAttribute, Matrix4, Texture, Material, DataTexture, RGBAFormat, UnsignedByteType, PlaneGeometry } from 'three';
 
 import instancedVert from '../shaders/instanced.vert'
 import instancedFrag from '../shaders/instanced.frag'
+
+/** 1x1 全透明贴图：辉光贴图未加载时占位，避免 sampler 绑定为 null。 */
+function makeEmptyTexture(): DataTexture {
+    const tex = new DataTexture(new Uint8Array([0, 0, 0, 0]), 1, 1, RGBAFormat, UnsignedByteType);
+    tex.needsUpdate = true;
+    return tex;
+}
+
+// ── 砖块辉度（topGlow）叠加层着色器：单位正方形 + 每实例 alpha ──
+const GLOW_VERT = `
+attribute float iGlow;
+varying vec2 vUv;
+varying float vGlow;
+void main() {
+    vUv = uv;
+    vGlow = iGlow;
+    vec4 p = vec4( position, 1.0 );
+    #ifdef USE_INSTANCING
+        p = instanceMatrix * p;
+    #endif
+    gl_Position = projectionMatrix * modelViewMatrix * p;
+}
+`;
+
+const GLOW_FRAG = `
+uniform sampler2D uGlowTexture;
+varying vec2 vUv;
+varying float vGlow;
+void main() {
+    vec4 c = texture2D( uGlowTexture, vUv );
+    float a = c.a * vGlow;
+    if ( a < 0.003 ) discard;
+    gl_FragColor = vec4( c.rgb, a );
+    #include <colorspace_fragment>
+}
+`;
+
+/** 辉光直径 = 砖块长度 × 该系数（官方 topGlow sprite 比砖大 1.28 倍）。 */
+const GLOW_SCALE = 1.28;
+/** 辉光四边形相对砖面的 z 偏移。砖的层级步进约 2e-4、深度分辨率约 6e-5，
+ *  取 1.5e-4：既高于自身砖面（不 z-fighting），又低于相邻砖层（不会盖住前面的砖）。 */
+const GLOW_Z_OFFSET = 0.00015;
+
+/** setInstanceMatrix 用的临时矩阵，避免每帧分配。 */
+const _tmpGlowMatrix = new Matrix4();
 
 /**
  * Instance data for a single tile
@@ -17,6 +62,8 @@ interface TileInstance {
     opacity: number;
     texSeed: number;
     visible: boolean;
+    /** 砖块辉度层 alpha（topGlow，玩家经过后点亮）。0 = 不发光。 */
+    glow: number;
     /** Depth layer offset (world z) assigned in real time from tile id for visible
      *  tiles. Kept separate from `position` so external position writers (MoveTrack,
      *  PositionTrack sync) never wipe it. Higher layerZ = closer to camera = on top. */
@@ -35,6 +82,10 @@ interface ShapeInstancedMesh {
     maxInstances: number;
     instanceCount: number;
     minTileIndex: number; // lowest tile ID in this mesh → highest render priority
+    /** 砖块辉度（topGlow）叠加层：单位正方形，实例索引与 instancedMesh 一一对应。 */
+    glowMesh: InstancedMesh;
+    /** 局部变换：平移到砖几何中心 + 缩放到辉光直径（放在实例矩阵右侧）。 */
+    glowLocal: Matrix4;
 }
 
 /**
@@ -54,6 +105,8 @@ export class InstancedMeshManager {
     private iconAtlasTexture: Texture | null = null;
     private iconAtlasCols: number = 8;
     private iconSize: number = 0.44;
+    /** 砖块辉度贴图（floor-top-glow.png）。默认 1x1 全透明，加载后替换。 */
+    private glowTexture: Texture = makeEmptyTexture();
 
     /**
      * Set the tile texture overlay and tiling scale
@@ -143,6 +196,21 @@ export class InstancedMeshManager {
             depthWrite: true
         });
 
+        // 辉光（topGlow）局部变换：平移到砖几何中心 + 缩放到直径 = 砖块长度 × 1.28。
+        // 正圆、可超出砖宽（独立四边形，不受砖几何裁剪）。放在实例矩阵右侧，
+        // 于是随砖的位置/旋转/缩放/隐藏（scale=0）一起变换。
+        geometry.computeBoundingBox();
+        const bb = geometry.boundingBox;
+        const cx = bb ? (bb.min.x + bb.max.x) * 0.5 : 0;
+        const cy = bb ? (bb.min.y + bb.max.y) * 0.5 : 0;
+        const tileLength = (geometry.userData && geometry.userData.tileLength)
+            ? geometry.userData.tileLength
+            : (bb ? Math.max(bb.max.x - bb.min.x, bb.max.y - bb.min.y) : 1);
+        const glowSize = tileLength * GLOW_SCALE;
+        const glowLocal = new Matrix4()
+            .makeTranslation(cx, cy, GLOW_Z_OFFSET)
+            .multiply(new Matrix4().makeScale(glowSize, glowSize, 1));
+
         const instancedMesh = new InstancedMesh(geometry, material, maxInstances);
         instancedMesh.instanceMatrix.setUsage(DynamicDrawUsage);
         instancedMesh.renderOrder = 0; // Standard tile level
@@ -185,6 +253,8 @@ export class InstancedMeshManager {
         instancedMesh.instanceMatrix.needsUpdate = true;
 
         const dummy = new Object3D();
+        // 辉光叠加层：单位正方形，实例索引与 instancedMesh 一一对应。
+        const glowMesh = this.createGlowMesh(maxInstances);
 
         const shapeData: ShapeInstancedMesh = {
             shapeKey,
@@ -194,13 +264,50 @@ export class InstancedMeshManager {
             tileIdsByPosition: [],
             maxInstances,
             instanceCount: 0,
-            minTileIndex: Infinity // will be set when first tile is added
+            minTileIndex: Infinity, // will be set when first tile is added
+            glowMesh,
+            glowLocal
         };
 
         this.scene.add(instancedMesh);
+        this.scene.add(glowMesh);
         this.instancedMeshes.set(shapeKey, shapeData);
 
         return shapeData;
+    }
+
+    /** 创建砖块辉度叠加层（单位正方形 + 每实例 alpha）。 */
+    private createGlowMesh(capacity: number): InstancedMesh {
+        const geo = new PlaneGeometry(1, 1);
+        const iGlow = new InstancedBufferAttribute(new Float32Array(capacity), 1);
+        iGlow.setUsage(DynamicDrawUsage);
+        geo.setAttribute('iGlow', iGlow);
+
+        const material = new ShaderMaterial({
+            uniforms: { uGlowTexture: { value: this.glowTexture } },
+            vertexShader: GLOW_VERT,
+            fragmentShader: GLOW_FRAG,
+            transparent: true,
+            depthTest: true,
+            depthWrite: false,
+            side: DoubleSide,
+        });
+
+        const mesh = new InstancedMesh(geo, material, capacity);
+        mesh.instanceMatrix.setUsage(DynamicDrawUsage);
+        mesh.frustumCulled = false;
+        mesh.renderOrder = 1; // 在所有砖（renderOrder<=0）之后
+        mesh.count = 0;
+        return mesh;
+    }
+
+    /** 写入砖实例矩阵，并同步其辉光叠加层的矩阵。 */
+    private setInstanceMatrix(s: ShapeInstancedMesh, i: number, tileMatrix: Matrix4): void {
+        s.instancedMesh.setMatrixAt(i, tileMatrix);
+        s.instancedMesh.instanceMatrix.needsUpdate = true;
+        const glowMat = _tmpGlowMatrix.multiplyMatrices(tileMatrix, s.glowLocal);
+        s.glowMesh.setMatrixAt(i, glowMat);
+        s.glowMesh.instanceMatrix.needsUpdate = true;
     }
 
     /**
@@ -218,7 +325,8 @@ export class InstancedMeshManager {
         visible: boolean = true,
         texSeed: number = 0,
         floorIconType: number = 0,
-        floorIconAngle: number = 0
+        floorIconAngle: number = 0,
+        glow: number = 0
     ): void {
         if (!this.useInstancedMesh) return;
 
@@ -250,8 +358,10 @@ export class InstancedMeshManager {
             opacity,
             texSeed,
             visible,
+            glow: this.tileInstances.get(tileIndex)?.glow ?? glow,
             layerZ: this.tileInstances.get(tileIndex)?.layerZ ?? 0
         };
+        if (glow > 0) instance.glow = glow;
 
         this.tileInstances.set(tileIndex, instance);
 
@@ -293,10 +403,13 @@ export class InstancedMeshManager {
 
             // Shift instances at positions >= insertAt up by 1
             if (count > 0 && insertAt < count) {
+                const { glowMesh } = shapeData;
                 for (let i = count - 1; i >= insertAt; i--) {
                     const mat = new Matrix4();
                     instancedMesh.getMatrixAt(i, mat);
                     instancedMesh.setMatrixAt(i + 1, mat);
+                    glowMesh.getMatrixAt(i, mat);
+                    glowMesh.setMatrixAt(i + 1, mat);
                 }
 
                 const iColor = instancedMesh.geometry.attributes.iColor! as InstancedBufferAttribute;
@@ -305,6 +418,7 @@ export class InstancedMeshManager {
                 const iTexSeed = instancedMesh.geometry.attributes.iTexSeed! as InstancedBufferAttribute;
                 const iFloorIconType = instancedMesh.geometry.attributes.iFloorIconType! as InstancedBufferAttribute;
                 const iFloorIconAngle = instancedMesh.geometry.attributes.iFloorIconAngle! as InstancedBufferAttribute;
+                const iGlow = glowMesh.geometry.attributes.iGlow! as InstancedBufferAttribute;
 
                 for (let i = count - 1; i >= insertAt; i--) {
                     iColor.setXYZ(i + 1, iColor.getX(i), iColor.getY(i), iColor.getZ(i));
@@ -313,6 +427,7 @@ export class InstancedMeshManager {
                     iTexSeed.setX(i + 1, iTexSeed.getX(i));
                     iFloorIconType.setX(i + 1, iFloorIconType.getX(i));
                     iFloorIconAngle.setX(i + 1, iFloorIconAngle.getX(i));
+                    iGlow.setX(i + 1, iGlow.getX(i));
                 }
                 iColor.needsUpdate = true;
                 iBgColor.needsUpdate = true;
@@ -320,7 +435,9 @@ export class InstancedMeshManager {
                 iTexSeed.needsUpdate = true;
                 iFloorIconType.needsUpdate = true;
                 iFloorIconAngle.needsUpdate = true;
+                iGlow.needsUpdate = true;
                 instancedMesh.instanceMatrix.needsUpdate = true;
+                glowMesh.instanceMatrix.needsUpdate = true;
 
                 // Update tileIndex→instanceIndex mapping for shifted instances only
                 for (const [tIdx, instIdx] of shapeData.instances) {
@@ -338,6 +455,7 @@ export class InstancedMeshManager {
             shapeData.instances.set(tileIndex, insertAt);
             shapeData.instanceCount++;
             shapeData.instancedMesh.count = shapeData.instanceCount;
+            shapeData.glowMesh.count = shapeData.instanceCount;
 
             // Update minTileIndex and renderOrder for between-shape draw order.
             // This is only a blending-order heuristic now: exact per-tile occlusion
@@ -364,7 +482,7 @@ export class InstancedMeshManager {
         
         dummy.updateMatrix();
 
-        instancedMesh.setMatrixAt(instanceIndex, dummy.matrix);
+        this.setInstanceMatrix(shapeData, instanceIndex, dummy.matrix);
 
         // Update instance colors
         const color3 = new Color(color);
@@ -386,6 +504,9 @@ export class InstancedMeshManager {
         instancedMesh.geometry.attributes.iTexSeed!.setX(instanceIndex, texSeed);
         instancedMesh.geometry.attributes.iFloorIconType!.setX(instanceIndex, floorIconType);
         instancedMesh.geometry.attributes.iFloorIconAngle!.setX(instanceIndex, floorIconAngle);
+        const glowAttr = shapeData.glowMesh.geometry.attributes.iGlow! as InstancedBufferAttribute;
+        glowAttr.setX(instanceIndex, instance.glow);
+        glowAttr.needsUpdate = true;
 
         instancedMesh.instanceMatrix.needsUpdate = true;
         instancedMesh.geometry.attributes.iColor!.needsUpdate = true;
@@ -439,8 +560,7 @@ export class InstancedMeshManager {
                     }
                     dummy.updateMatrix();
 
-                    instancedMesh.setMatrixAt(instanceIndex, dummy.matrix);
-                    instancedMesh.instanceMatrix.needsUpdate = true;
+                    this.setInstanceMatrix(shapeData, instanceIndex, dummy.matrix);
                 }
 
                 if (opacityChanged) {
@@ -529,6 +649,27 @@ export class InstancedMeshManager {
         }
     }
 
+    /**
+     * 设置砖块辉度层 alpha（topGlow）。0 = 不发光；玩家经过该砖后由 Player 写入
+     * `min(floorOpacity * trackGlowIntensity/100 * 0.8, colorAlpha)`。
+     */
+    public setTileGlow(tileIndex: number, glow: number): void {
+        const instance = this.tileInstances.get(tileIndex);
+        if (instance) {
+            if (Math.abs(instance.glow - glow) < 1e-6) return;
+            instance.glow = glow;
+        }
+        for (const shapeData of this.instancedMeshes.values()) {
+            const instanceIndex = shapeData.instances.get(tileIndex);
+            if (instanceIndex !== undefined) {
+                const attr = shapeData.glowMesh.geometry.attributes.iGlow!;
+                attr.setX(instanceIndex, glow);
+                attr.needsUpdate = true;
+                break;
+            }
+        }
+    }
+
     public setIconAtlas(texture: Texture, atlasCols: number, iconSize: number): void {
         this.iconAtlasTexture = texture;
         this.iconAtlasCols = atlasCols;
@@ -539,6 +680,17 @@ export class InstancedMeshManager {
                 mat.uniforms.uIconAtlas.value = texture;
                 mat.uniforms.uIconAtlasCols.value = atlasCols;
                 mat.uniforms.uIconSize.value = iconSize;
+            }
+        }
+    }
+
+    /** 设置砖块辉度贴图（floor-top-glow.png）。 */
+    public setGlowTexture(texture: Texture): void {
+        this.glowTexture = texture;
+        for (const shapeData of this.instancedMeshes.values()) {
+            const mat = shapeData.glowMesh.material as ShaderMaterial;
+            if (mat.uniforms && mat.uniforms.uGlowTexture) {
+                mat.uniforms.uGlowTexture.value = texture;
             }
         }
     }
@@ -634,6 +786,26 @@ export class InstancedMeshManager {
 
         shapeData.instancedMesh = newMesh;
         shapeData.maxInstances = newMax;
+
+        // 重建辉光叠加层（容量翻倍），拷贝旧实例矩阵与 alpha。
+        const oldGlow = shapeData.glowMesh;
+        const newGlow = this.createGlowMesh(newMax);
+        newGlow.count = shapeData.instanceCount;
+        newGlow.renderOrder = oldGlow.renderOrder;
+        const oldGlowMatrix = new Matrix4();
+        const newGlowAttr = newGlow.geometry.attributes.iGlow! as InstancedBufferAttribute;
+        const oldGlowAttr = oldGlow.geometry.attributes.iGlow;
+        for (let i = 0; i < oldMax; i++) {
+            oldGlow.getMatrixAt(i, oldGlowMatrix);
+            newGlow.setMatrixAt(i, oldGlowMatrix);
+            newGlowAttr.setX(i, oldGlowAttr ? oldGlowAttr.getX(i) : 0);
+        }
+        newGlow.instanceMatrix.needsUpdate = true;
+        newGlowAttr.needsUpdate = true;
+        this.scene.remove(oldGlow);
+        oldGlow.geometry.dispose();
+        if (oldGlow.material instanceof Material) oldGlow.material.dispose();
+        shapeData.glowMesh = newGlow;
     }
 
     /**
@@ -653,6 +825,12 @@ export class InstancedMeshManager {
                 const opacityAttr = shapeData.instancedMesh.geometry.attributes.iOpacity;
                 opacityAttr.setX(instanceIndex, 0);
                 opacityAttr.needsUpdate = true;
+                // 同时熄灭辉光（否则叠加层会残留）
+                const glowAttr = shapeData.glowMesh.geometry.attributes.iGlow;
+                if (glowAttr) {
+                    glowAttr.setX(instanceIndex, 0);
+                    glowAttr.needsUpdate = true;
+                }
                 shapeData.instances.delete(tileIndex);
                 break;
             }
@@ -686,8 +864,7 @@ export class InstancedMeshManager {
                 }
                 
                 dummy.updateMatrix();
-                instancedMesh.setMatrixAt(instanceIndex, dummy.matrix);
-                instancedMesh.instanceMatrix.needsUpdate = true;
+                this.setInstanceMatrix(shapeData, instanceIndex, dummy.matrix);
                 
                 // Also sync opacity and colors when becoming visible
                 // to prevent stale state from off-screen animations
@@ -751,8 +928,7 @@ export class InstancedMeshManager {
                     dummy.scale.set(0, 0, 0);
                 }
                 dummy.updateMatrix();
-                instancedMesh.setMatrixAt(instanceIndex, dummy.matrix);
-                instancedMesh.instanceMatrix.needsUpdate = true;
+                this.setInstanceMatrix(shapeData, instanceIndex, dummy.matrix);
                 break;
             }
         }
@@ -776,6 +952,8 @@ export class InstancedMeshManager {
             shapeData.instanceCount = 0;
             shapeData.instancedMesh.count = 0;
             shapeData.instancedMesh.instanceMatrix.needsUpdate = true;
+            shapeData.glowMesh.count = 0;
+            shapeData.glowMesh.instanceMatrix.needsUpdate = true;
         }
     }
 
@@ -790,6 +968,11 @@ export class InstancedMeshManager {
             shapeData.instancedMesh.geometry.dispose();
             if (shapeData.instancedMesh.material instanceof Material) {
                 shapeData.instancedMesh.material.dispose();
+            }
+            this.scene.remove(shapeData.glowMesh);
+            shapeData.glowMesh.geometry.dispose();
+            if (shapeData.glowMesh.material instanceof Material) {
+                shapeData.glowMesh.material.dispose();
             }
             shapeData.instances.clear();
         }

@@ -230,15 +230,18 @@ class ShiftType extends ColorType {
   pulsecal: Pulse;
   startFloor: number;
   floortype: string;
+  /** 砖块辉度系数 = trackGlowIntensity/100（官方 glowMultiplier）。 */
+  glowIntensity: number;
   gapLength: number = 0;
   changeFloors: number[] = [];
 
-  constructor(colortype: string, color1: string, color2: string, type: string, startTime: number, startFloor: number, pulseLength: number, animationLength: number, floortype: string) {
+  constructor(colortype: string, color1: string, color2: string, type: string, startTime: number, startFloor: number, pulseLength: number, animationLength: number, floortype: string, glowIntensity: number = 1) {
     super(color1, color2);
     this.onType = colortype;
     this.pulsecal = new Pulse(type, startTime, startFloor, pulseLength, animationLength);
     this.startFloor = startFloor;
     this.floortype = floortype;
+    this.glowIntensity = glowIntensity;
   }
 
   doColor(nowTime: number, nowFloor: number): number {
@@ -274,6 +277,8 @@ export interface TileColorConfig {
   trackColorAnimDuration: number;
   trackPulseLength: number;
   trackOpacity: number;
+  /** 砖块辉度原值（trackGlowIntensity，0-100+）。辉光 alpha 用 /100 的系数。 */
+  trackGlowIntensity?: number;
   startFloor?: number;
   recolorTriggerTime?: number;
 }
@@ -365,6 +370,7 @@ export class TileColorManager {
         trackColorAnimDuration: shift.pulsecal.animationLength,
         trackPulseLength: shift.pulsecal.pulseLength,
         trackOpacity: shift.alpha,
+        trackGlowIntensity: shift.glowIntensity * 100,
         startFloor: 0
       };
       const rendered = this.getTileRenderer(i, 0, this.tileRecolorConfigs[i]!);
@@ -457,7 +463,12 @@ export class TileColorManager {
     const animDur = event.trackColorAnimDuration || 2;
     const pulseLen = event.trackPulseLength || 10;
     const style = event.trackStyle || 'Standard';
-    return new ShiftType(ct, c1, c2, pulseType, 0, startFloor, pulseLen, animDur, style);
+    // 砖块辉度：trackGlowIntensity/100；事件未给则用关卡设置的默认值（官方默认 100）。
+    const rawGlow = event.trackGlowIntensity !== undefined
+      ? Number(event.trackGlowIntensity)
+      : (this.levelData?.settings?.trackGlowIntensity ?? 100);
+    const glow = Number.isFinite(rawGlow) ? Math.max(0, rawGlow / 100) : 1;
+    return new ShiftType(ct, c1, c2, pulseType, 0, startFloor, pulseLen, animDur, style, glow);
   }
 
   getTileColors(): { color: string; secondaryColor: string }[] {
@@ -580,7 +591,8 @@ export class TileColorManager {
       rct.startFloor ?? id,
       trackPulseLength,
       trackColorAnimDuration,
-      trackStyle
+      trackStyle,
+      (rct.trackGlowIntensity ?? 100) / 100
     );
 
     if (trackColorType === 'Volume') {

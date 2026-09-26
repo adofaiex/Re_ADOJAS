@@ -237,7 +237,16 @@ const createCircle = (
 };
 
 // ========== MeshData 接口 ==========
-interface MeshData { vertices: number[]; faces: number[]; colors: number[]; }
+interface MeshData {
+    vertices: number[];
+    faces: number[];
+    colors: number[];
+    /** 砖块沿路径方向的**完整长度**（含 outline，= 2×(length+outline)）。
+     *  砖块辉度（topGlow）用它的直径画正圆。弯砖的 AABB 不等于该值。 */
+    tileLength?: number;
+    /** 砖块横向**完整宽度**（含 outline）。 */
+    tileWidth?: number;
+}
 
 // ========== 多边形转网格 ==========
 const polygonToMesh = (
@@ -526,15 +535,23 @@ const createTrackMesh = (
         adjustedLength = width * 3.2 / 2.75;
     }
 
+    // 沿路径的完整尺寸（含 outline）：砖块辉度按 tileLength 画正圆。
+    // CaculatePoints 的 length 是"半长"，几何跨 ±(length+outline)。
+    const dims = {
+        tileLength: 2 * (adjustedLength + outline),
+        tileWidth: 2 * (width + outline),
+    };
+
     if (trackStyle === "Gems") {
-        return createGemsMesh(startAngle, endAngle, adjustedLength, width, outline);
+        return { ...createGemsMesh(startAngle, endAngle, adjustedLength, width, outline), ...dims };
     }
 
     if (trackStyle === "Minimal") {
         adjustedLength -= 0.03;
+        dims.tileLength = 2 * (adjustedLength + outline);
     }
 
-    return createTileMesh(startAngle, endAngle, adjustedLength, width, outline);
+    return { ...createTileMesh(startAngle, endAngle, adjustedLength, width, outline), ...dims };
 };
 
 // ========== 展开为每面独立顶点 ==========
