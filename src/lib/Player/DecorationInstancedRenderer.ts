@@ -91,13 +91,14 @@ export class DecorationInstancedRenderer {
   }
 
   private createBatch(key: string, tex: Texture, blending: Blending, renderOrder: number, capacity: number): Batch {
-    // alpha 裁剪（同一批次共用一个贴图 → 用批次级 uniform 就够）
-    const crop = (tex.userData as any)?.alphaCrop;
+    // UV 统一为中性值：alpha 裁剪的应用由 DecorationManager 的 USE_ALPHA_CROP 统一控制，
+    // 这里如果单独读 texture.userData.alphaCrop，就会出现"UV 裁了、四边形没缩"
+    // → 装饰被拉伸/顶部被切。**必须四条路径同开同关**。
     const mat = new ShaderMaterial({
       uniforms: {
         uMap: { value: tex },
-        uUvOffset: { value: new Vector2(crop?.uvOffsetX ?? 0, crop?.uvOffsetY ?? 0) },
-        uUvRepeat: { value: new Vector2(crop?.uvRepeatX ?? 1, crop?.uvRepeatY ?? 1) },
+        uUvOffset: { value: new Vector2(0, 0) },
+        uUvRepeat: { value: new Vector2(1, 1) },
       },
       vertexShader: decoVert,
       fragmentShader: decoFrag,
