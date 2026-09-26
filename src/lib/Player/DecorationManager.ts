@@ -26,7 +26,7 @@ const USE_OBJECT_FLOOR_BATCH = true;
  * **视野内本该显示的装饰被剔除（消失）**。WAD 没有这种预筛，所以默认关闭；
  * 需要那几毫秒时再开（开着的话要先把预测做成精确的）。
  */
-const USE_DYNAMIC_PRECULL = false;
+const USE_DYNAMIC_PRECULL = true;
 import { PlanetTrail } from './PlanetTrail';
 import { backdropBlendModeOf, createBackdropBlendMaterial, BackdropBlendMode } from './BackdropBlend';
 import type { ShaderMaterial } from 'three';
@@ -2872,6 +2872,9 @@ export class DecorationManager {
         }
         const camX = cameraPosition.x;
         const camY = cameraPosition.y;
+        // 上一帧的相机位置（下面 camMoved 里会覆盖 _lastCamX/Y）——预筛要用"本帧相机位移"
+        const prevCamX = this._lastCamX;
+        const prevCamY = this._lastCamY;
         const camMoved = Math.abs(camX - this._lastCamX) > 0.01 || Math.abs(camY - this._lastCamY) > 0.01 || Math.abs(camZ - this._lastCamZoom) > 0.001
             // 相机旋转：Camera/CameraAspect 位置偏移要按 camRot 旋转、lockRotation 装饰
             // 的朝向也取 camRot → 只转不移动时同样必须重算。
@@ -2975,13 +2978,22 @@ export class DecorationManager {
                     && rt !== DecPlacementType.Player
                     && rt !== DecPlacementType.RedPlanet && rt !== DecPlacementType.BluePlanet
                     && rt !== DecPlacementType.GreenPlanet) {
+                    // 精确预测（非动画装饰的位置 = 基准 + 视差 × 相机位移），
+                    // 再和"上一帧的实际位置"做一致性校验：**对得上**才允许跳过。
+                    // 这样任何状态变更（SetPlacementType / 基点重算等）都会因 drift
+                    // 变大而自动放弃剔除，不会出现"被剔掉的装饰再也回不来"。
                     const bx = d.currentPosition.x, by = d.currentPosition.y;
                     const px = d.currentParallax.x, py = d.currentParallax.y;
                     const predX = bx + (camX - bx) * px;
                     const predY = by + (camY - by) * py;
+                    const camShift = Math.max(Math.abs(camX - prevCamX), Math.abs(camY - prevCamY));
                     const padP = (d.baseSizeX * Math.abs(d.config.scale[0]) + d.baseSizeY * Math.abs(d.config.scale[1])) / 100 + 8;
-                    if (predX + padP < preMinX || predX - padP > preMaxX
-                        || predY + padP < preMinY || predY - padP > preMaxY) {
+                    const slack = padP + camShift * 2;
+                    const p = d.container.position;
+                    const drift = Math.max(Math.abs(p.x - predX), Math.abs(p.y - predY));
+                    if (drift <= slack
+                        && (predX + slack < preMinX || predX - slack > preMaxX
+                            || predY + slack < preMinY || predY - slack > preMaxY)) {
                         d.setCulledVisible(false);
                         continue;
                     }
