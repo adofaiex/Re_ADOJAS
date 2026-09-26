@@ -843,6 +843,10 @@ class DecorationInstance {
         // syncFloorDepth：继承父砖 sorting layer/order（复刻：贴父砖 z、归砖层 renderOrder）
         if (this._syncFloorZ !== null) return [this._syncFloorZ, 0];
         const d = this.config.depth;
+        // ADOFAI 的规则：depth 0 **与轨道平齐**，>0 越大越深（越靠后），<0 越靠前。
+        // 我们的砖块带是 z ∈ [-0.008, 0.09]、renderOrder 0，所以 depth=0 必须落在这里，
+        // 而不是被当成"背景带"（那样它会被放到轨道后面）。
+        if (d === 0) return [0, 0];
         if (d < 0) return [0.1 - d * 0.1, -d];
         // Bg tier: strictly below the tiles' renderOrder 0, preserving -depth ordering.
         const tiles = this._manager?.levelData?.tiles;
