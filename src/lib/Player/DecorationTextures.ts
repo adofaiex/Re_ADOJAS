@@ -32,6 +32,33 @@ export class DecorationTextureStore {
     /** 装饰纹理最大边长（见 TextureCompress：超限图必须缩到该值再上传）。 */
     public static readonly MAX_DIMENSION = 2048;
 
+    /**
+     * 解码后装饰纹理的**总显存预算**。一张边长 D 的 RGBA 纹理 = D²×4 字节；
+     * 387 张 2048² 就是 ~2.0GB —— 浏览器会直接丢 WebGL 上下文
+     * （症状：canvas 卡死但 React 页面仍流畅）。这里按本关唯一图片数自适应下调。
+     */
+    private static readonly MEMORY_BUDGET_BYTES = 640 * 1024 * 1024;
+    private maxDimension: number = DecorationTextureStore.MAX_DIMENSION;
+
+    /**
+     * 按本关**唯一图片数**自适应最大边长（须在首次加载前调用）。
+     * 例：387 张 → 每张 ~1.7MB → 边长 ~650 → 对齐 640，总显存 ~0.6GB。
+     */
+    public setTextureBudget(uniqueImageCount: number): number {
+        const count = Math.max(1, uniqueImageCount);
+        const perImageBytes = DecorationTextureStore.MEMORY_BUDGET_BYTES / count;
+        const rawDim = Math.floor(Math.sqrt(Math.max(1, perImageBytes) / 4));
+        const snapped = Math.max(512, Math.min(
+            DecorationTextureStore.MAX_DIMENSION,
+            Math.floor(rawDim / 64) * 64,
+        ));
+        this.maxDimension = snapped;
+        return snapped;
+    }
+
+    /** 当前生效的最大边长。 */
+    public get maxDim(): number { return this.maxDimension; }
+
     /** 已缓存（含兜底）的纹理；未加载完返回 undefined。 */
     public get(name: string): Texture | undefined {
         return this.cache.get(name);
@@ -155,7 +182,7 @@ export class DecorationTextureStore {
             this.loading.add(job.name);
             this.active++;
             const gen = this.generation;
-            loadCompressedTexture(job.url, DecorationTextureStore.MAX_DIMENSION)
+            loadCompressedTexture(job.url, this.maxDimension)
                 .then(tex => this.finish(job.name, tex, gen))
                 .catch(err => {
                     console.warn('[Decoration] texture load failed:', job.name, err);

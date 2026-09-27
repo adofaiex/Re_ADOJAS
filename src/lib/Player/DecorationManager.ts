@@ -1619,6 +1619,16 @@ export class DecorationManager {
                 }
             }
         }
+
+        // 按本关**唯一图片数**自适应纹理最大边长：这个关卡的 387 张美术图在
+        // 2048 上限下要 ~2.0GB 显存，直接丢 WebGL 上下文（canvas 卡死、页面仍流畅）。
+        const uniqueImages = new Set<string>();
+        for (const s of this._decoSources) {
+            const img = s?.decorationImage ?? s?.image;
+            if (typeof img === 'string' && img) uniqueImages.add(img);
+        }
+        const maxDim = this.textures.setTextureBudget(uniqueImages.size);
+        debugLog(`[DecorationManager] texture budget: ${uniqueImages.size} unique images -> maxDim ${maxDim}`);
     }
 
     public get decoSourceCount(): number { return this._decoSources.length; }
@@ -2092,7 +2102,8 @@ export class DecorationManager {
             planetColor: event.planetColor,
             planetTailColor: event.planetTailColor,
             trackColor: event.trackColor,
-            trackColor2: event.trackColor2 || event.trackColor,
+            // 官方 AddObject 副色字段 = secondaryTrackColor（trackColor2 只在 SetObject/内部使用）
+            trackColor2: event.secondaryTrackColor || event.trackColor2 || event.trackColor,
             trackColorType: event.trackColorType,
             trackColorAnimDuration: event.trackColorAnimDuration,
             trackColorPulse: event.trackColorPulse,
@@ -2237,10 +2248,12 @@ export class DecorationManager {
                     this.floorGeoCache.set(geoKey, tpl);
                 }
             }
-            const trackOpacity = event.trackOpacity !== undefined ? event.trackOpacity / 100 : 1;
+            const trackOpacity = event.trackOpacity !== undefined ? Number(event.trackOpacity) / 100 : 1;
             if (tpl) {
                 const trackColor = event.trackColor;
-                const trackColor2 = event.trackColor2 || trackColor;
+                // 官方 AddObject 的副色字段是 secondaryTrackColor；trackColor2 是 SetObject 的内部名。
+                // 之前只读 trackColor2 → 副色永远回落到主色（Stripes/Glow/Switch/Blink 全错）。
+                const trackColor2 = event.secondaryTrackColor || event.trackColor2 || trackColor;
                 deco.objMask = tpl.mask;
                 deco.objColor1 = new Color(parseDecoColor(trackColor, 'ffffff')[0]);
                 deco.objColor2 = new Color(parseDecoColor(trackColor2, 'ffffff')[0]);
@@ -2249,6 +2262,12 @@ export class DecorationManager {
                 deco.objColorPulse = String(event.trackColorPulse || 'None');
                 deco.objColorAnimDuration = event.trackColorAnimDuration ?? 2;
                 deco.objColorPulseLength = event.trackPulseLength ?? 10;
+                // AddObject(Floor) 没有 opacity 字段，整体透明度来自 trackOpacity
+                // （官方 scrDecoration: num = trackOpacity/100）。之前创建时被忽略。
+                if (event.trackOpacity !== undefined && Number.isFinite(trackOpacity)) {
+                    deco.config.trackOpacity = Number(event.trackOpacity);
+                    deco.currentOpacity = ((deco.config.opacity ?? 100) / 100) * trackOpacity;
+                }
 
                 if (USE_OBJECT_FLOOR_BATCH) {
                     // 实例化：只登记几何定义；每帧由批次写实例矩阵/填充/描边/透明度。
@@ -3245,7 +3264,7 @@ export class DecorationManager {
         }
         if (props.trackOpacity !== undefined) {
             deco.config.trackOpacity = props.trackOpacity;
-            deco.currentOpacity = props.trackOpacity / 100;
+            deco.currentOpacity = ((deco.config.opacity ?? 100) / 100) * (Number(props.trackOpacity) / 100);
         }
         if (props.trackIcon !== undefined) deco.config.trackIcon = props.trackIcon;
 
