@@ -5467,13 +5467,26 @@ export class Player implements IPlayer {
             this.videoElement.play().catch(e => console.warn("Video play failed:", e));
         }
 
-        const drift = Math.abs(this.videoElement.currentTime - targetVideoTime);
-        // Throttle seeking: only seek when drift exceeds threshold, max once per 250ms
+        // 官方 scrVfxPlus.Update：`videoBG.playbackSpeed = cond.song.pitch`。
+        // 不同步改速率 → 谱面 pitch≠1 时视频必然越放越偏（"视频背景没对齐"）。
+        const rate = this.songPitch && this.songPitch > 0 ? this.songPitch : 1;
+        const drift = this.videoElement.currentTime - targetVideoTime;
+        const absDrift = Math.abs(drift);
+
+        if (absDrift > 0.03 && absDrift <= 1.0) {
+            // 小幅漂移用速率追赶（±15% 以内），比硬 seek 平滑得多
+            const corr = Math.max(-0.15, Math.min(0.15, -drift * 0.5));
+            this.videoElement.playbackRate = rate * (1 + corr);
+        } else {
+            this.videoElement.playbackRate = rate;
+        }
+
+        // 只有大漂移（跳转 / 卡顿）才硬 seek
         const now = performance.now();
-        if (drift > 0.3 && now - this.lastVideoSeekTime > 250) {
+        if (absDrift > 1.0 && now - this.lastVideoSeekTime > 250) {
             this.videoElement.currentTime = targetVideoTime;
             this.lastVideoSeekTime = now;
-      }
+        }
     }
   }
 
