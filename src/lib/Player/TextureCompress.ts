@@ -76,7 +76,7 @@ async function downscaleBitmap(src: ImageBitmap, maxDim: number): Promise<ImageB
     canvas.height = ch;
     const ctx = canvas.getContext('2d')!;
     ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = 'medium';
+    ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(src, 0, 0, cw, ch);
     src.close();
     return createImageBitmap(canvas);
@@ -105,7 +105,8 @@ export async function loadCompressedTexture(url: string, maxDim: number = MAX_TE
                 bitmap = await createImageBitmap(blob, {
                     resizeWidth: Math.max(1, Math.round(dims.w * scale)),
                     resizeHeight: Math.max(1, Math.round(dims.h * scale)),
-                    resizeQuality: 'medium',
+                    // high：降采样质量直接决定剪影边缘的锯齿程度（medium 会有明显台阶）
+                    resizeQuality: 'high',
                     premultiplyAlpha: 'none',
                     // ImageBitmap 会忽略 texture.flipY，必须在创建时翻转，
                     // 才能和 <img>/TextureLoader 的 flipY=true 行为一致（否则图上下颠倒）
@@ -143,7 +144,8 @@ export async function loadCompressedTexture(url: string, maxDim: number = MAX_TE
                         const ctx = canvas.getContext('2d');
                         if (ctx) {
                             ctx.imageSmoothingEnabled = true;
-                            ctx.imageSmoothingQuality = 'medium';
+                            // high：同上，边缘质量优先
+                            ctx.imageSmoothingQuality = 'high';
                             ctx.drawImage(img, 0, 0, cw, ch);
                             src = canvas;
                         }

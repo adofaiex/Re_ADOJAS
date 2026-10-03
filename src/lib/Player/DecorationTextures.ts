@@ -36,19 +36,24 @@ export class DecorationTextureStore {
      * 解码后装饰纹理的**总显存预算**。一张边长 D 的 RGBA 纹理 = D²×4 字节；
      * 387 张 2048² 就是 ~2.0GB —— 浏览器会直接丢 WebGL 上下文
      * （症状：canvas 卡死但 React 页面仍流畅）。这里按本关唯一图片数自适应下调。
+     *
+     * 代价是**画质**：降采样会让高对比剪影的边缘出现明显锯齿（1.71 倍的台阶）。
+     * 所以预算取 1GB（尽量保画质），并把下限设在 768 —— 再低锯齿就非常明显了。
+     * 图少时（≤ 约 60 张）根本不会触发缩放，保持 2048 原尺寸。
      */
-    private static readonly MEMORY_BUDGET_BYTES = 640 * 1024 * 1024;
+    private static readonly MEMORY_BUDGET_BYTES = 1024 * 1024 * 1024;
+    private static readonly MIN_DIMENSION = 768;
     private maxDimension: number = DecorationTextureStore.MAX_DIMENSION;
 
     /**
      * 按本关**唯一图片数**自适应最大边长（须在首次加载前调用）。
-     * 例：387 张 → 每张 ~1.7MB → 边长 ~650 → 对齐 640，总显存 ~0.6GB。
+     * 例：387 张 → 每张 ~2.6MB → 边长 ~810 → 对齐 768，总显存 ~0.9GB。
      */
     public setTextureBudget(uniqueImageCount: number): number {
         const count = Math.max(1, uniqueImageCount);
         const perImageBytes = DecorationTextureStore.MEMORY_BUDGET_BYTES / count;
         const rawDim = Math.floor(Math.sqrt(Math.max(1, perImageBytes) / 4));
-        const snapped = Math.max(512, Math.min(
+        const snapped = Math.max(DecorationTextureStore.MIN_DIMENSION, Math.min(
             DecorationTextureStore.MAX_DIMENSION,
             Math.floor(rawDim / 64) * 64,
         ));
