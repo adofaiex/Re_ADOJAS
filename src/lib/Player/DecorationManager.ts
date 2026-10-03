@@ -2725,6 +2725,9 @@ export class DecorationManager {
                 image: d.config.decorationImage,
                 textureKey: d.config.decorationImage
                     ? this.decoTextureKey(d, d.config.decorationImage) : null,
+                // 贴图是否真的进了缓存：false → 该装饰用的是兜底占位（会渲染成纯色块）
+                textureLoaded: d.config.decorationImage
+                    ? this.textures.has(this.decoTextureKey(d, d.config.decorationImage)) : null,
                 relativeTo: d.config.relativeTo,
                 anchorFloor: d.config.anchorFloor,
                 floor: d.config.floor,
