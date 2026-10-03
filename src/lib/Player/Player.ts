@@ -5455,7 +5455,16 @@ export class Player implements IPlayer {
 
     const timeInLevel = (this.elapsedTime / 1000) - this.getTimeOrigin();
 
-    const targetVideoTime = timeInLevel + (this.videoOffset / 1000);
+    // 官方 scrVfxPlus.Update：`videoBG.time = songposition_minusi − countdown + vidOffset`，
+    // 基准是**倒计时结束**（separateCountdownTime 时 countdown = countdownTicks × 一拍）。
+    // 我们的 timeInLevel 基准却是"第一块砖的判定时刻"（getTimeOrigin = cd0 + offsetSec − t1），
+    // 于是 timeInLevel = songpos + t1 → 视频会**提前 t1 秒**（≈ 几拍）开始 ✗。
+    // 这里把 t1 扣掉，让视频与官方同基准。
+    const s0 = this.levelData.settings;
+    const sepCd0 = isEnabled(s0.separateCountdownTime);
+    const t1 = (sepCd0 && this.tileStartTimes && this.tileStartTimes.length > 1)
+        ? this.tileStartTimes[1] : 0;
+    const targetVideoTime = timeInLevel - t1 + (this.videoOffset / 1000);
 
     if (targetVideoTime < 0) {
         if (!this.videoElement.paused) {
