@@ -559,7 +559,15 @@ export class Player implements IPlayer {
             threshold: this.bloomThreshold,
             intensity: this.bloomIntensity,
             color: this.bloomColor,
+            mediumAmount: this.bloomEffect?.getMediumAmount?.() ?? null,
         };
+    };
+    // Bloom 强度定标：__adojasBloomAmount(0.2) → 改官方 VideoBloom.MediumAmount（prefab 值读不到）。
+    // 官方合成 = 原图 + tint × mediumBloom × (0.5 × intensity/100 × MediumAmount)；
+    // 我们默认取组件默认 1，若比官方亮就是它偏大。
+    (window as any).__adojasBloomAmount = (amount?: number) => {
+        if (typeof amount === 'number' && Number.isFinite(amount)) this.bloomEffect?.setMediumAmount?.(amount);
+        return this.bloomEffect?.getMediumAmount?.() ?? null;
     };
     // 贴图预算查询：__adojasTexBudget() → 本关装饰贴图的最大边长（<2048 说明被降采样，
     // 高对比剪影的边缘会出现锯齿；锯齿程度随该值变小而变明显）。

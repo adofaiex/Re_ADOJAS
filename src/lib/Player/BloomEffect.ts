@@ -24,10 +24,11 @@ import copyFrag from '../shaders/copy.frag'
 
 /** VideoBloom.OnRenderImage 的固定降采样高度。 */
 const BLOOM_HEIGHT = 198;
-/** VideoBloom 组件默认参数（ffxBloomPlus 只改 Threshold/MasterAmount/Tint）。 */
+/** VideoBloom 组件默认参数（ffxBloomPlus 只改 Threshold/MasterAmount/Tint）。
+ *  MediumAmount/KernelSize/MediumKernelScale 在 ADOFAI 的 prefab 里可能被改过 —— 反编译
+ *  读不到，所以做成可调（见 setMediumAmount / __adojasBloomAmount）。 */
 const KERNEL_SIZE = 50;
 const MEDIUM_KERNEL_SCALE = 1;
-const MEDIUM_AMOUNT = 1;
 const SQRT2 = Math.SQRT2;
 
 /**
@@ -50,6 +51,8 @@ export class BloomEffect {
     private intensity: number = 0.5;
     /** 官方 Tint（sRGB 分量）。 */
     private bloomColor: Color = new Color(1, 1, 1);
+    /** 官方 VideoBloom.MediumAmount（prefab 值未知 → 可调，默认 1）。 */
+    private mediumAmount: number = 1;
     private quality: number = 1;
 
     private width: number = 1;
@@ -137,8 +140,16 @@ export class BloomEffect {
 
     setIntensity(intensity: number): void {
         this.intensity = intensity;
-        this.compositeMaterial.uniforms.bloomAmount.value = 0.5 * intensity * MEDIUM_AMOUNT;
+        this.compositeMaterial.uniforms.bloomAmount.value = 0.5 * intensity * this.mediumAmount;
     }
+
+    /** 官方 VideoBloom.MediumAmount（prefab 值读不到，做成可调以便对照官方定标）。 */
+    public setMediumAmount(amount: number): void {
+        this.mediumAmount = amount;
+        this.compositeMaterial.uniforms.bloomAmount.value = 0.5 * this.intensity * amount;
+    }
+
+    public getMediumAmount(): number { return this.mediumAmount; }
 
     setQuality(quality: number): void {
         this.quality = quality === 0 ? 0 : 1;
@@ -262,7 +273,7 @@ export class BloomEffect {
         // ── Add 合成：out = 原图 + tint * medium * (0.5*Master*Medium)
         this.compositeMaterial.uniforms.tDiffuse.value = sourceTexture;
         this.compositeMaterial.uniforms.tBloom.value = this.bloomTexture;
-        this.compositeMaterial.uniforms.bloomAmount.value = 0.5 * this.intensity * MEDIUM_AMOUNT;
+        this.compositeMaterial.uniforms.bloomAmount.value = 0.5 * this.intensity * this.mediumAmount;
         this.compositeMaterial.uniforms.tint.value.copy(this.bloomColor);
         draw(this.compositeMaterial, targetRenderTarget);
 
