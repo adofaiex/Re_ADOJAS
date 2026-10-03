@@ -1,4 +1,4 @@
-import { Color, Mesh, MeshBasicMaterial, Scene, OrthographicCamera, PlaneGeometry, WebGLRenderer } from 'three';
+import { Color, Mesh, MeshBasicMaterial, Scene, OrthographicCamera, PlaneGeometry, WebGLRenderer, AdditiveBlending } from 'three';
 import { EasingFunctions } from './Easing';
 
 interface FlashTransition {
@@ -71,6 +71,12 @@ export class FlashEffect {
             opacity: 0,
             depthTest: false,
             depthWrite: false,
+            // **加色混合**：由实测反推 —— 官方 FG 闪屏 plane 的材质是 additive：
+            //   · `000000ff@100`（Rainy Gate f1/f55 的黑幕）= 加 0 = 不产生任何遮挡
+            //     → 开局画面正常可见（若为 alpha 混合，会整屏黑掉，与实际不符）
+            //   · `ffffffff@100` = 加到全白 → 整屏白（与实际相符 ✓）
+            // BG 面则必须是 alpha（f73 白→暗红 25%、f274 →黑 80% 都是"压暗背景"的语义）。
+            blending: AdditiveBlending,
         });
         // 背景闪光：透明混合，但**开启深度测试**——放在砖块后面的 z 上，
         // 这样砖块（不透明，先写深度）会把它挡住，只盖住背景。
