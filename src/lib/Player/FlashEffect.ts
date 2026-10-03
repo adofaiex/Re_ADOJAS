@@ -1,4 +1,4 @@
-import { Color, Mesh, MeshBasicMaterial, Scene, OrthographicCamera, PlaneGeometry, WebGLRenderer, AdditiveBlending } from 'three';
+import { Color, Mesh, MeshBasicMaterial, Scene, OrthographicCamera, PlaneGeometry, WebGLRenderer } from 'three';
 import { EasingFunctions } from './Easing';
 
 interface FlashTransition {
@@ -33,6 +33,8 @@ function easeOutQuad(t: number): number {
 export class FlashEffect {
     /** 背景闪光平面的世界 z：比所有场景内容都远（但在背景视频 -500 之前）。 */
     private static readonly BG_QUAD_Z = -400;
+    /** FG 平面在 'behind' 模式下的世界 z：在 BG 平面之前、砖块（z≈0）之后。 */
+    private static readonly FG_QUAD_BEHIND_Z = -399;
 
     private enabled: boolean = true;
 
@@ -71,12 +73,6 @@ export class FlashEffect {
             opacity: 0,
             depthTest: false,
             depthWrite: false,
-            // **加色混合**：由实测反推 —— 官方 FG 闪屏 plane 的材质是 additive：
-            //   · `000000ff@100`（Rainy Gate f1/f55 的黑幕）= 加 0 = 不产生任何遮挡
-            //     → 开局画面正常可见（若为 alpha 混合，会整屏黑掉，与实际不符）
-            //   · `ffffffff@100` = 加到全白 → 整屏白（与实际相符 ✓）
-            // BG 面则必须是 alpha（f73 白→暗红 25%、f274 →黑 80% 都是"压暗背景"的语义）。
-            blending: AdditiveBlending,
         });
         // 背景闪光：透明混合，但**开启深度测试**——放在砖块后面的 z 上，
         // 这样砖块（不透明，先写深度）会把它挡住，只盖住背景。
@@ -106,9 +102,39 @@ export class FlashEffect {
 
     /** 把背景闪光平面挂到主场景（砖块下面那一层）。 */
     attachToScene(scene: Scene): void {
+        this.scene = scene;
         if (this.bgQuad.parent) this.bgQuad.parent.remove(this.bgQuad);
         scene.add(this.bgQuad);
+        // FG 若处于 'behind' 模式，也一起挂到主场景（见 setFgPlaneMode）
+        if (this.fgMode === 'behind') {
+            if (this.fgQuad.parent) this.fgQuad.parent.remove(this.fgQuad);
+            scene.add(this.fgQuad);
+        }
     }
+
+    /**
+     * FG 平面模式：
+     *   - 'front'（默认，官方语义）：屏幕空间最上层，FG 闪屏会盖住轨道 —— 官方 FgFlash 层。
+     *   - 'behind'：放到主场景里"BG 平面之前、砖块之后"。
+     * 有些谱面把 `plane: Foreground` 当**背景幕布**用（例如 3. Rainy Gate：f1 FG 渐到黑 100%
+     * 并保持、f64 渐到白 100% 并保持到 f231）—— 那种谱在 'front' 下会长期糊住轨道。
+     * 用 __adojasFlashPlane('behind' | 'front') 现场切换即可判定。
+     */
+    private fgMode: 'front' | 'behind' = 'front';
+    private scene: Scene | null = null;
+
+    public setFgPlaneMode(mode: 'front' | 'behind'): void {
+        if (this.fgMode === mode) return;
+        this.fgMode = mode;
+        if (this.fgQuad.parent) this.fgQuad.parent.remove(this.fgQuad);
+        if (mode === 'front') {
+            this.overlayScene.add(this.fgQuad);
+        } else if (this.scene) {
+            this.scene.add(this.fgQuad);
+        }
+    }
+
+    public getFgPlaneMode(): 'front' | 'behind' { return this.fgMode; }
 
     setEnabled(enabled: boolean): void {
         this.enabled = enabled;
@@ -323,28 +349,41 @@ export class FlashEffect {
      * 平面铺满视口并跟随主相机（位置/旋转/缩放），从而只覆盖背景。
      */
     updateBG(camera: OrthographicCamera, currentTime: number): void {
+        const zoom = camera.zoom || 1;
+        const viewW = (camera.right - camera.left) / zoom;
+        const viewH = (camera.top - camera.bottom) / zoom;
+
         const active = this.enabled && this.updateTransition(this.bgTransition, this.bgMaterial, currentTime);
         if (!active || this.bgMaterial.opacity <= 0.001) {
             this.bgQuad.visible = false;
-            return;
+        } else {
+            // 与自定义背景同一套换算：铺满视口（含相机 zoom），跟随相机位置/旋转
+            this.bgQuad.scale.set(viewW, viewH, 1);
+            // 极远的 z：任何在它前面的物体都会通过深度测试盖住它，只留下背景被压暗。
+            this.bgQuad.position.set(camera.position.x, camera.position.y, FlashEffect.BG_QUAD_Z);
+            this.bgQuad.rotation.z = camera.rotation.z;
+            this.bgQuad.visible = true;
         }
 
-        // 与自定义背景同一套换算：铺满视口（含相机 zoom），跟随相机位置/旋转
-        const zoom = camera.zoom || 1;
-        this.bgQuad.scale.set(
-            (camera.right - camera.left) / zoom,
-            (camera.top - camera.bottom) / zoom,
-            1,
-        );
-        // 极远的 z：任何在它前面的物体都会通过深度测试盖住它，只留下背景被压暗。
-        this.bgQuad.position.set(camera.position.x, camera.position.y, FlashEffect.BG_QUAD_Z);
-        this.bgQuad.rotation.z = camera.rotation.z;
-        this.bgQuad.visible = true;
+        // FG 在 'behind' 模式下也走主场景（BG 平面之前、砖块之后）
+        if (this.fgMode === 'behind') {
+            const fgActive = this.enabled && this.updateTransition(this.fgTransition, this.fgMaterial, currentTime);
+            if (!fgActive || this.fgMaterial.opacity <= 0.001) {
+                this.fgQuad.visible = false;
+            } else {
+                this.fgQuad.scale.set(viewW, viewH, 1);
+                this.fgQuad.position.set(camera.position.x, camera.position.y, FlashEffect.FG_QUAD_BEHIND_Z);
+                this.fgQuad.rotation.z = camera.rotation.z;
+                this.fgQuad.visible = true;
+            }
+        }
     }
 
     /** 主场景渲染【之后】调用：渲染前景闪光叠层（plane=Foreground），画在最上层。 */
     renderFG(renderer: WebGLRenderer, currentTime: number): void {
         if (!this.enabled) return;
+        // 'behind' 模式：FG 已在主场景里画过（updateBG），不再画屏幕叠层
+        if (this.fgMode === 'behind') return;
         const active = this.updateTransition(this.fgTransition, this.fgMaterial, currentTime);
         if (!active || this.fgMaterial.opacity <= 0.001) return;
 
@@ -382,6 +421,7 @@ export class FlashEffect {
         return {
             fg: dump(this.fgTransition, this.fgMaterial),
             bg: dump(this.bgTransition, this.bgMaterial),
+            fgPlaneMode: this.fgMode,
             bgQuadVisible: this.bgQuad.visible,
             bgQuadZ: this.bgQuad.position.z,
         };

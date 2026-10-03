@@ -574,6 +574,12 @@ export class Player implements IPlayer {
     // Flash 探针：__adojasFlash() → 两条 plane（FG/BG）的过渡状态与材质实际色/透明度。
     // 判定"屏幕全白"：看 bg.active/材料 opacity 是否停在起始的 100% 白。
     (window as any).__adojasFlash = () => this.flashEffect?.debugSnapshot?.() ?? null;
+    // FG 平面层级现场切换：__adojasFlashPlane('behind') / ('front')。
+    // 有些谱把 plane:Foreground 当背景幕布用（FG 白/黑会长期糊住轨道）→ 切 'behind' 即刻可判。
+    (window as any).__adojasFlashPlane = (mode?: 'front' | 'behind') => {
+        if (mode === 'front' || mode === 'behind') this.flashEffect?.setFgPlaneMode?.(mode);
+        return this.flashEffect?.getFgPlaneMode?.() ?? null;
+    };
     if (opts?.deferDecorations) {
       // 装饰物分帧/异步创建（加载界面显示进度）——见 buildDecorationsAsync()
       this.decorationManager.collectDecoSources();
