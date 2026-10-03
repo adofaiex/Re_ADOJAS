@@ -50,6 +50,9 @@ export interface DecoInstanceSlot {
   renderOrder: number;
   tex: Texture;
   blending: Blending;
+  /** 装饰的 tile（平铺次数）：原版 `_Tile` uniform，批次的 uUvRepeat 用 */
+  repeatX: number;
+  repeatY: number;
 }
 
 interface Batch {
@@ -90,15 +93,16 @@ export class DecorationInstancedRenderer {
     return `${tex.uuid}|${blendKey(blending)}|${renderOrder}`;
   }
 
-  private createBatch(key: string, tex: Texture, blending: Blending, renderOrder: number, capacity: number): Batch {
-    // UV 统一为中性值：alpha 裁剪的应用由 DecorationManager 的 USE_ALPHA_CROP 统一控制，
-    // 这里如果单独读 texture.userData.alphaCrop，就会出现"UV 裁了、四边形没缩"
-    // → 装饰被拉伸/顶部被切。**必须四条路径同开同关**。
+  private createBatch(key: string, tex: Texture, blending: Blending, renderOrder: number, capacity: number, repeatX = 1, repeatY = 1): Batch {
+    // tile（平铺）：原版把 `_Tile` 交给材质；装饰的 tile 是"每个 tile 一张图"，
+    // 必须真的把 UV 乘上 repeat，否则一张图会被拉满整个四边形
+    // （例：Infinity Heaven 的 mountain：tile=[10,1] → 不乘就横向拉伸 10 倍）。
+    // alpha 裁剪关闭时 offset 恒为 0，repeat 只反映 tile，可直接用。
     const mat = new ShaderMaterial({
       uniforms: {
         uMap: { value: tex },
         uUvOffset: { value: new Vector2(0, 0) },
-        uUvRepeat: { value: new Vector2(1, 1) },
+        uUvRepeat: { value: new Vector2(repeatX, repeatY) },
       },
       vertexShader: decoVert,
       fragmentShader: decoFrag,
@@ -189,7 +193,9 @@ export class DecorationInstancedRenderer {
     oldMesh.geometry.dispose();
     this.batches.delete(batch.key);
 
-    const nb = this.createBatch(batch.key, tex, blending, ro, newMax);
+    const nb = this.createBatch(batch.key, tex, blending, ro, newMax,
+      (mat.uniforms.uUvRepeat?.value as Vector2)?.x ?? 1,
+      (mat.uniforms.uUvRepeat?.value as Vector2)?.y ?? 1);
     nb.count = oldCount;
     nb.mesh.count = oldCount;
     nb.free = oldFree;
@@ -213,10 +219,12 @@ export class DecorationInstancedRenderer {
     baseH: number,
     pivotX: number,
     pivotY: number,
+    repeatX: number = 1,
+    repeatY: number = 1,
   ): DecoInstanceSlot {
     const key = this.makeKey(tex, blending, renderOrder);
     let batch = this.batches.get(key);
-    if (!batch) batch = this.createBatch(key, tex, blending, renderOrder, 16);
+    if (!batch) batch = this.createBatch(key, tex, blending, renderOrder, 16, repeatX, repeatY);
 
     let index: number;
     if (batch.free.length > 0) {
@@ -237,6 +245,8 @@ export class DecorationInstancedRenderer {
       renderOrder,
       tex,
       blending,
+      repeatX,
+      repeatY,
     };
   }
 
@@ -261,9 +271,9 @@ export class DecorationInstancedRenderer {
    */
   public ensureLayer(slot: DecoInstanceSlot, renderOrder: number): DecoInstanceSlot {
     if (slot.renderOrder === renderOrder) return slot;
-    const { tex, blending, baseW, baseH, pivotX, pivotY } = slot;
+    const { tex, blending, baseW, baseH, pivotX, pivotY, repeatX, repeatY } = slot;
     this.free(slot);
-    return this.alloc(tex, blending, renderOrder, baseW, baseH, pivotX, pivotY);
+    return this.alloc(tex, blending, renderOrder, baseW, baseH, pivotX, pivotY, repeatX, repeatY);
   }
 
   public write(

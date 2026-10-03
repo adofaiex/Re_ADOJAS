@@ -757,6 +757,10 @@ class DecorationInstance {
                     // alpha 裁剪的内容中心偏移直接加到 pivot（write() 里 pivot 与 baseW 同单位）
                     this.config.pivotOffset[0] + this.cropOffX,
                     this.config.pivotOffset[1] + this.cropOffY,
+                    // tile（平铺次数）→ 批次 uUvRepeat。官方把 `_Tile` 交给材质；
+                    // 不传就会把一张图拉满整个四边形（mountain 这类 tile=[10,1] 的会横向拉伸 10 倍）。
+                    this.config.tile?.[0] ?? 1,
+                    this.config.tile?.[1] ?? 1,
                 );
             } else {
                 // 用 **Mesh（world 空间四边形）**，不用 Sprite：Sprite 永远面向相机、
@@ -910,10 +914,11 @@ class DecorationInstance {
         // syncFloorDepth：继承父砖 sorting layer/order（复刻：贴父砖 z、归砖层 renderOrder）
         if (this._syncFloorZ !== null) return [this._syncFloorZ, 0];
         const d = this.config.depth;
-        // ADOFAI 的规则：depth 0 **与轨道平齐**，>0 越大越深（越靠后），<0 越靠前。
-        // 我们的砖块带是 z ∈ [-0.008, 0.09]、renderOrder 0，所以 depth=0 必须落在这里，
-        // 而不是被当成"背景带"（那样它会被放到轨道后面）。
-        if (d === 0) return [0, 0];
+        // 官方 scrVisualDecoration.SetSortingOrder（410-418）：
+        //   `sortingLayerName = (depth >= 0) ? "Bg" : "Default"`，`sortingOrder = -depth`。
+        // 也就是 **depth >= 0（含 0）都在 Bg 层 = 轨道后面**，只有 depth < 0 才在轨道前面。
+        // 之前把 depth===0 当成"与轨道平齐"（z=0/renderOrder=0，和砖同平面）是错的：
+        // 大面积的 depth=0 装饰会盖在轨道上、挡视野。
         if (d < 0) return [0.1 - d * 0.1, -d];
         // Bg tier: strictly below the tiles' renderOrder 0, preserving -depth ordering.
         const tiles = this._manager?.levelData?.tiles;
