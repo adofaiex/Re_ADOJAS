@@ -682,8 +682,17 @@ class DecorationInstance {
             }
             // 用【原图】像素尺寸（sprite 原始尺寸）。texture.image 可能是被
             // TextureCompress 缩放过的版本，直接用它会把超限大图算小。
-            const texW = (texture.userData as any)?.origWidth || texture.image?.width || 100;
-            const texH = (texture.userData as any)?.origHeight || texture.image?.height || 100;
+            //
+            // **必须两个轴一起判定**：之前是 `origWidth || image.width` 与
+            // `origHeight || image.height` 各自独立回退 —— 一旦 origWidth 有值而
+            // origHeight 缺失/为 0，就会变成"宽取原图(2048)、高取缩放后位图(640)"，
+            // 装饰被压扁成"宽正常、高很矮"。只有**两个都有效**时才用原图尺寸，
+            // 否则统一退回位图自身的尺寸（自带正确长宽比）。
+            const oW = Number((texture.userData as any)?.origWidth);
+            const oH = Number((texture.userData as any)?.origHeight);
+            const hasOrig = Number.isFinite(oW) && Number.isFinite(oH) && oW > 0 && oH > 0;
+            const texW = hasOrig ? oW : (texture.image?.width || 100);
+            const texH = hasOrig ? oH : (texture.image?.height || 100);
             this.baseSizeX = (texW / 100) * DECO_SIZE_SCALE;
             this.baseSizeY = (texH / 100) * DECO_SIZE_SCALE;
 

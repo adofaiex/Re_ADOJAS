@@ -105,8 +105,12 @@ export class ParticleDecorationSystem {
     // 逻辑尺寸必须用**原图**像素：贴图会被 resize 到 2048 以内只为省显存（更糊），
     // 直接拿 texture.image.width 会把粒子算小一个数量级。
     const ud = texture.userData as { origWidth?: number; origHeight?: number } | undefined
-    const origW = ud?.origWidth || image?.width || 100
-    const origH = ud?.origHeight || image?.height || 100
+    // 与 DecorationManager.setupVisual 同一守卫：两个轴必须**一起**判定，
+    // 否则 origWidth 有值而 origHeight 缺失时粒子会被压扁。
+    const oW = Number(ud?.origWidth), oH = Number(ud?.origHeight)
+    const hasOrig = Number.isFinite(oW) && Number.isFinite(oH) && oW > 0 && oH > 0
+    const origW = hasOrig ? oW : (image?.width || 100)
+    const origH = hasOrig ? oH : (image?.height || 100)
     this.quadW = ((origW / this.cols) / 100)
     this.quadH = ((origH / this.rows) / 100)
     this.parseGradient()

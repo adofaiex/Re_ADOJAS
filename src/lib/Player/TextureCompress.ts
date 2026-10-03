@@ -161,7 +161,7 @@ export async function loadCompressedTexture(url: string, maxDim: number = MAX_TE
             });
         }
 
-        if (!origW || !origH) { origW = (bitmap as any).width; origH = (bitmap as any).height; }
+        if (!origW || !origH || origW <= 0 || origH <= 0) { origW = (bitmap as any).width; origH = (bitmap as any).height; }
         const tex = new Texture(bitmap as unknown as HTMLImageElement);
         // 记录【原图】像素尺寸：装饰物世界尺寸必须按原图算（用 sprite 原始尺寸），
         // 否则超过上限被缩放过的图会算小。
