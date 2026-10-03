@@ -171,11 +171,13 @@ export function useEditorState() {
       player.setShowTrail(settings.showTrail)
       player.setHitsoundEnabled(settings.hitsoundEnabled)
       player.setTargetFramerate(settings.targetFramerate)
+      player.setRenderScale(settings.renderScale)
+      player.setInputMethod(settings.inputMethod)
       player.setOGGCompression(settings.useOGGCompression)
       player.setStatsPanel(settings.showStats)
       player.setDisableTrackTexture(settings.disableTrackTexture)
       player.setMusicDelayMs(settings.musicDelayMs)
-      
+
       previewerRef.current = player
       bindOttoEvents(player)
       // 重新应用手动模式状态到新 Player
@@ -388,6 +390,8 @@ export function useEditorState() {
       player.setShowTrail(settings.showTrail)
       player.setHitsoundEnabled(settings.hitsoundEnabled)
       player.setTargetFramerate(settings.targetFramerate)
+      player.setRenderScale(settings.renderScale)
+      player.setInputMethod(settings.inputMethod)
       player.setOGGCompression(settings.useOGGCompression)
       player.setStatsPanel(settings.showStats)
       player.setDisableTrackTexture(settings.disableTrackTexture)
@@ -398,6 +402,8 @@ export function useEditorState() {
     settings.showTrail,
     settings.hitsoundEnabled,
     settings.targetFramerate,
+    settings.renderScale,
+    settings.inputMethod,
     settings.showStats,
     settings.disableTrackTexture,
   ])
@@ -443,6 +449,16 @@ export function useEditorState() {
       previewerRef.current.setTargetFramerate(settings.targetFramerate)
     }
   }, [settings.targetFramerate])
+
+  // 监听渲染倍率设置变化
+  useEffect(() => {
+    previewerRef.current?.setRenderScale(settings.renderScale)
+  }, [settings.renderScale])
+
+  // 监听输入方式设置变化
+  useEffect(() => {
+    previewerRef.current?.setInputMethod(settings.inputMethod)
+  }, [settings.inputMethod])
 
   // 监听性能面板设置变化
   useEffect(() => {
@@ -498,8 +514,10 @@ export function useEditorState() {
             player.setShowTrail(settings.showTrail)
             player.setHitsoundEnabled(settings.hitsoundEnabled)
             player.setTargetFramerate(settings.targetFramerate)
+            player.setRenderScale(settings.renderScale)
+            player.setInputMethod(settings.inputMethod)
             player.setStatsPanel(settings.showStats)
-            
+
             player.setDisableTrackTexture(settings.disableTrackTexture)
             player.setMusicDelayMs(settings.musicDelayMs)
             

@@ -1,6 +1,22 @@
 import { Mesh, Vector3, Color, Scene, Texture, BufferGeometry, Material, Euler, Sprite, SpriteMaterial, ShaderMaterial, InstancedMesh, Object3D, WebGLRenderer, WebGLRenderTarget, Group, MeshBasicMaterial } from 'three';
+import type { AsyncInputEvent } from './AsyncInputManager';
 
 export type TargetFramerateType = "auto" | "30" | "60" | "120" | "144" | "165" | "240" | "unlimited";
+
+/** 渲染倍率：pixelRatio = native 时取 devicePixelRatio，否则取 min(DPR, 该值)。 */
+export type RenderScaleType = "0.75" | "1" | "1.5" | "native";
+
+/** 输入方式：sync = 主线程事件队列；worker = Worker 队列（主线程打戳、Worker 搬运）。 */
+export type InputMethodType = "sync" | "worker";
+
+/** 输入队列抽象：AsyncInputManager 与 WorkerInputManager 共用同一 API。 */
+export interface InputQueue {
+  attach(): void;
+  detach(): void;
+  drain(): AsyncInputEvent[];
+  clear(): void;
+  readonly pendingCount: number;
+}
 
 export interface IPlayer {
   createPlayer(container: HTMLElement): void;
@@ -17,6 +33,8 @@ export interface IPlayer {
   setShowTrail(show: boolean): void;
   setHitsoundEnabled(enabled: boolean): void;
   setTargetFramerate(framerate: TargetFramerateType): void;
+  setRenderScale(scale: RenderScaleType): void;
+  setInputMethod(method: InputMethodType): void;
   setOGGCompression(enabled: boolean): void;
   setZoom(zoom: number): void;
   loadMusic(src: string): void;

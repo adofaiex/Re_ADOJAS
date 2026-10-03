@@ -10,6 +10,8 @@
  * 二者偏移恒定，可在处理时互相换算（见 Player.getElapsedTimeAt）。
  */
 
+import type { InputQueue } from './types';
+
 export type AsyncInputType = 'down' | 'up';
 
 export interface AsyncInputEvent {
@@ -17,7 +19,7 @@ export interface AsyncInputEvent {
   perfTime: number; // performance.now() 时刻
 }
 
-export class AsyncInputManager {
+export class AsyncInputManager implements InputQueue {
   private queue: AsyncInputEvent[] = [];
   private attached: boolean = false;
 

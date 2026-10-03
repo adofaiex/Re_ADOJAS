@@ -88,10 +88,22 @@ export default function SettingsPage() {
           type: "targetFramerate",
         },
         {
+          id: "renderScale",
+          title: t("settings.renderScale.title"),
+          description: t("settings.renderScale.description"),
+          type: "renderScale",
+        },
+        {
           id: "loadMethod",
           title: t("settings.loadMethod.title"),
           description: t("settings.loadMethod.description"),
           type: "loadMethod",
+        },
+        {
+          id: "inputMethod",
+          title: t("settings.inputMethod.title"),
+          description: t("settings.inputMethod.description"),
+          type: "inputMethod",
         },
         {
           id: "useOGGCompression",
@@ -384,6 +396,28 @@ export default function SettingsPage() {
                     </Select>
                   )}
 
+                  {setting.type === "renderScale" && (
+                    <Select value={settings.renderScale} onValueChange={(value: any) => updateSettings({ renderScale: value })}>
+                      <SelectTrigger className="bg-white dark:bg-slate-700 border-slate-200 dark:border-slate-600 text-slate-900 dark:text-white w-full sm:w-48 hover:bg-slate-50 dark:hover:bg-slate-600 focus:border-purple-500 dark:focus:border-purple-400 focus:ring-purple-500/20 dark:focus:ring-purple-400/20">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent className="bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 shadow-lg dark:shadow-slate-900/50">
+                        <SelectItem value="0.75" className="text-slate-900 dark:text-white hover:bg-slate-100 dark:hover:bg-slate-700 focus:bg-slate-100 dark:focus:bg-slate-700 cursor-pointer">
+                          {t("settings.renderScale.r075")}
+                        </SelectItem>
+                        <SelectItem value="1" className="text-slate-900 dark:text-white hover:bg-slate-100 dark:hover:bg-slate-700 focus:bg-slate-100 dark:focus:bg-slate-700 cursor-pointer">
+                          {t("settings.renderScale.r1")}
+                        </SelectItem>
+                        <SelectItem value="1.5" className="text-slate-900 dark:text-white hover:bg-slate-100 dark:hover:bg-slate-700 focus:bg-slate-100 dark:focus:bg-slate-700 cursor-pointer">
+                          {t("settings.renderScale.r15")}
+                        </SelectItem>
+                        <SelectItem value="native" className="text-slate-900 dark:text-white hover:bg-slate-100 dark:hover:bg-slate-700 focus:bg-slate-100 dark:focus:bg-slate-700 cursor-pointer">
+                          {t("settings.renderScale.native")}
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                  )}
+
                   {setting.type === "loadMethod" && (
                     <Select value={settings.loadMethod} onValueChange={(value: any) => updateSettings({ loadMethod: value })}>
                       <SelectTrigger className="bg-white dark:bg-slate-700 border-slate-200 dark:border-slate-600 text-slate-900 dark:text-white w-full sm:w-48 hover:bg-slate-50 dark:hover:bg-slate-600 focus:border-purple-500 dark:focus:border-purple-400 focus:ring-purple-500/20 dark:focus:ring-purple-400/20">
@@ -398,6 +432,22 @@ export default function SettingsPage() {
                         </SelectItem>
                         <SelectItem value="worker" className="text-slate-900 dark:text-white hover:bg-slate-100 dark:hover:bg-slate-700 focus:bg-slate-100 dark:focus:bg-slate-700 cursor-pointer">
                           {t("settings.loadMethod.worker")}
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                  )}
+
+                  {setting.type === "inputMethod" && (
+                    <Select value={settings.inputMethod} onValueChange={(value: any) => updateSettings({ inputMethod: value })}>
+                      <SelectTrigger className="bg-white dark:bg-slate-700 border-slate-200 dark:border-slate-600 text-slate-900 dark:text-white w-full sm:w-48 hover:bg-slate-50 dark:hover:bg-slate-600 focus:border-purple-500 dark:focus:border-purple-400 focus:ring-purple-500/20 dark:focus:ring-purple-400/20">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent className="bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 shadow-lg dark:shadow-slate-900/50">
+                        <SelectItem value="sync" className="text-slate-900 dark:text-white hover:bg-slate-100 dark:hover:bg-slate-700 focus:bg-slate-100 dark:focus:bg-slate-700 cursor-pointer">
+                          {t("settings.inputMethod.sync")}
+                        </SelectItem>
+                        <SelectItem value="worker" className="text-slate-900 dark:text-white hover:bg-slate-100 dark:hover:bg-slate-700 focus:bg-slate-100 dark:focus:bg-slate-700 cursor-pointer">
+                          {t("settings.inputMethod.worker")}
                         </SelectItem>
                       </SelectContent>
                     </Select>

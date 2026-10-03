@@ -1,6 +1,6 @@
 import { Scene, OrthographicCamera, WebGLRenderer, Mesh, Vector3, Texture, BufferGeometry, WebGLRenderTarget, Color, Vector2, DirectionalLight, Float32BufferAttribute, Euler, Material, MeshBasicMaterial, TextureLoader, SRGBColorSpace, NearestFilter, LinearFilter, PlaneGeometry, BufferAttribute, Sprite, SpriteMaterial, RepeatWrapping, LinearMipmapLinearFilter, VideoTexture, DoubleSide, Raycaster, Intersection } from 'three';
 import {WebGPURenderer} from 'three/webgpu';
-import { IPlayer, ILevelData, IMusic, TargetFramerateType } from './types';
+import { IPlayer, ILevelData, IMusic, TargetFramerateType, RenderScaleType, InputMethodType, InputQueue } from './types';
 import { Planet } from './Planet';
 import { HitsoundManager, HitsoundType, TimestampGroup } from './HitsoundManager';
 import { BloomEffect } from './BloomEffect';
@@ -16,7 +16,7 @@ import { isEnabled, isEventActive } from './EventUtils';
 import { loadCompressedTexture } from './TextureCompress';
 import { getEasingFunction } from './WasmEasing';
 import { CameraController, CameraTimelineEntry } from './CameraController';
-import { DecorationManager, DecPlacementType } from './DecorationManager';
+import { DecorationManager, DecPlacementType, DecorationRuntimeContext } from './DecorationManager';
 import { MoveTrackManager } from './MoveTrackManager';
 import { PositionTrackManager } from './PositionTrackManager';
 import { InstancedMeshManager } from './InstancedMeshManager';
@@ -24,6 +24,7 @@ import { TimelineManager } from './TimelineManager';
 import { OverlayHUD } from './OverlayHUD';
 import { ShakeScreen } from './effects/ShakeScreen';
 import { AsyncInputManager } from './AsyncInputManager';
+import { WorkerInputManager } from './WorkerInputManager';
 import { debugLog } from './DebugLog';
 import {
   HitMargin, HitMarginLimit, Difficulty,
@@ -40,11 +41,11 @@ import { Level } from 'adofai';
 const BG_OVERSCAN = 1.02;
 
 /**
- * 砖块辉度（topGlow）总开关。关掉可隔离验证：排除辉光后 Neon 应是"黑填充 + 彩边框"。
+ * 砖块辉度（topGlow）总开关。该叠加层随砖一起显隐、且不受轨道透明度影响，行为错误，
+ * 故全局禁用（代码保留，置 true 即可恢复；InstancedMeshManager 侧另有 TOP_GLOW_ENABLED 闸门）。
  * 官方语义：玩家经过的砖会叠加一层柔光，alpha = min(floorOpacity*glow/100*0.8, colorAlpha)。
- * 运行期切换：控制台 `__adojasTileGlow(false)`。
  */
-let _tileGlowEnabled = true;
+let _tileGlowEnabled = false;
 
 export class Player implements IPlayer {
   private container: HTMLElement | null = null;
@@ -55,6 +56,23 @@ export class Player implements IPlayer {
   private renderMethod: 'sync' | 'async' = 'sync';
   private showTrail: boolean = false;
   private targetFramerate: TargetFramerateType = 'auto';
+  private renderScale: RenderScaleType = '1.5';
+
+  // updateDecorations 每帧复用的临时对象，避免逐帧分配（options 字面量 + Vector2）。
+  private _decRedPos = new Vector2();
+  private _decBluePos = new Vector2();
+  private _decPlayerPos = new Vector2();
+  private _decPlanetPositions: NonNullable<DecorationRuntimeContext['planetPositions']> = {
+    [DecPlacementType.RedPlanet]: this._decRedPos,
+    [DecPlacementType.BluePlanet]: this._decBluePos,
+  };
+  private _decOptions: DecorationRuntimeContext = {
+    viewportWidth: 0,
+    viewportHeight: 0,
+    editorWheelZoom: 1,
+    paused: false,
+    planetPositions: this._decPlanetPositions,
+  };
   private animationId: number | null = null;
   private lastFrameTime: number = 0;
   private frameInterval: number = 0; // milliseconds between frames
@@ -133,7 +151,9 @@ export class Player implements IPlayer {
   private judgeSpeedTrial: number = 1;
   private judgeHitMarginCounted: number = 60;
   private judgeHitMarginLimit: HitMarginLimit = HitMarginLimit.None;
-  private asyncInput: AsyncInputManager = new AsyncInputManager();
+  private inputQueue: InputQueue = new AsyncInputManager();
+  private inputMethod: InputMethodType = 'sync';
+  private inputAttached: boolean = false;
   private judgmentDisplay: JudgmentDisplay | null = new JudgmentDisplay();
   private hitErrorMeter: HitErrorMeter | null = null; // 准度条
   private _judgeLastCorrectedTile: number = -1; // 防重复矫正
@@ -528,15 +548,6 @@ export class Player implements IPlayer {
             } : null,
         };
     };
-    // 运行期开关：__adojasTileGlow(false) 关闭砖块辉度，隔离验证"灰填充"是否来自辉光。
-    (window as any).__adojasTileGlow = (on: boolean) => {
-        _tileGlowEnabled = on !== false;
-        const hi = Math.min(this._litThroughFloorIndex, (this.levelData.tiles?.length ?? 1) - 1);
-        for (let i = 0; i <= hi; i++) {
-            this.instancedMeshManager?.setTileGlow(i, this.computeTileGlow(i, true));
-        }
-        return _tileGlowEnabled;
-    };
     // 运行期开关/查询：__adojasBloom(false) 关泛光；__adojasBloom() 查询当前 bloom 参数。
     (window as any).__adojasBloom = (on?: boolean) => {
         if (on !== undefined) {
@@ -632,7 +643,8 @@ export class Player implements IPlayer {
     if (config?.hitMarginLimit !== undefined) this.judgeHitMarginLimit = config.hitMarginLimit;
     this._manualDead = false;
     this._consecMisses = 0;
-    this.asyncInput.attach();
+    this.inputQueue.attach();
+    this.inputAttached = true;
     this.judgmentDisplay?.clear();
     // 手动模式：停止整关连续 hitsound（命中音效改由 playHitForTile 单发）
     this.hitsoundManager?.stop();
@@ -642,8 +654,9 @@ export class Player implements IPlayer {
     this.manualMode = false;
     this._manualDead = false;
     this._consecMisses = 0;
-    this.asyncInput.detach();
-    this.asyncInput.clear();
+    this.inputQueue.detach();
+    this.inputQueue.clear();
+    this.inputAttached = false;
     this.judgmentDisplay?.clear();
   }
 
@@ -1023,7 +1036,7 @@ export class Player implements IPlayer {
    */
   private processAsyncInputs(): void {
     if (!this.manualMode) return;
-    const events = this.asyncInput.drain();
+    const events = this.inputQueue.drain();
     if (events.length === 0) return;
 
     // 死亡后按任意键 → 从开头重开
@@ -2018,8 +2031,8 @@ export class Player implements IPlayer {
       }
     }
     
-    this.renderer.setPixelRatio(window.devicePixelRatio);
-    
+    this.applyPixelRatio();
+
     // Initialize ShakeScreen
     this.shakeScreen = new ShakeScreen();
 
@@ -2125,6 +2138,30 @@ export class Player implements IPlayer {
   public setTargetFramerate(framerate: TargetFramerateType): void {
     this.targetFramerate = framerate;
     this.updateFrameInterval();
+  }
+
+  /** pixelRatio = native 取设备 DPR，否则取 min(DPR, renderScale)，限制填充率开销。 */
+  private applyPixelRatio(): void {
+    const dpr = window.devicePixelRatio || 1;
+    const ratio = this.renderScale === 'native' ? dpr : Math.min(dpr, parseFloat(this.renderScale));
+    this.renderer.setPixelRatio(ratio);
+  }
+
+  public setRenderScale(scale: RenderScaleType): void {
+    if (this.renderScale === scale) return;
+    this.renderScale = scale;
+    this.applyPixelRatio();
+  }
+
+  /** 切换输入方式：sync = 主线程事件队列；worker = Worker 队列（主线程打戳转发）。 */
+  public setInputMethod(method: InputMethodType): void {
+    if (this.inputMethod === method) return;
+    const wasAttached = this.inputAttached;
+    if (wasAttached) this.inputQueue.detach();
+    this.inputQueue.clear();
+    this.inputQueue = method === 'worker' ? new WorkerInputManager() : new AsyncInputManager();
+    this.inputMethod = method;
+    if (wasAttached) this.inputQueue.attach();
   }
 
   public setOGGCompression(enabled: boolean): void {
@@ -2948,6 +2985,38 @@ export class Player implements IPlayer {
 
     const timeInLevelMs = this.elapsedTime - this.getTimeOrigin() * 1000;
 
+    // 复用 _decOptions / 复用 Vector2，避免每帧分配。
+    const o = this._decOptions;
+    o.viewportWidth = this.renderer.domElement.clientWidth || this.renderer.domElement.width;
+    o.viewportHeight = this.renderer.domElement.clientHeight || this.renderer.domElement.height;
+    o.editorWheelZoom = this.zoomMultiplier;
+    o.paused = this.isPaused || !this.isPlaying;
+    o.tileLayerZ = this._tileLayerZ ?? undefined;
+
+    const planetPositions = o.planetPositions!;
+    if (this.planetRed) {
+      this._decRedPos.set(this.planetRed.position.x, this.planetRed.position.y);
+      planetPositions[DecPlacementType.RedPlanet] = this._decRedPos;
+    } else {
+      planetPositions[DecPlacementType.RedPlanet] = undefined;
+    }
+    if (this.planetBlue) {
+      this._decBluePos.set(this.planetBlue.position.x, this.planetBlue.position.y);
+      planetPositions[DecPlacementType.BluePlanet] = this._decBluePos;
+    } else {
+      planetPositions[DecPlacementType.BluePlanet] = undefined;
+    }
+
+    // relativeTo: Player = 玩家正在控制的球。pivot 是偶数砖时红球当轴，
+    // 那么正在运动（被控制）的是蓝球，反之亦然。
+    const moving = (this.currentTileIndex % 2 === 0) ? this.planetBlue : this.planetRed;
+    if (moving) {
+      this._decPlayerPos.set(moving.position.x, moving.position.y);
+      o.playerPosition = this._decPlayerPos;
+    } else {
+      o.playerPosition = undefined;
+    }
+
     this.decorationManager.update(
       Math.max(0, timeInLevelMs),
       this.camera.position,
@@ -2955,23 +3024,7 @@ export class Player implements IPlayer {
       this.camera.zoom,
       this.timelineManager,
       this.adoZoom,
-      {
-        viewportWidth: this.renderer.domElement.clientWidth || this.renderer.domElement.width,
-        viewportHeight: this.renderer.domElement.clientHeight || this.renderer.domElement.height,
-        editorWheelZoom: this.zoomMultiplier,
-        paused: this.isPaused || !this.isPlaying,
-        tileLayerZ: this._tileLayerZ ?? undefined,
-        planetPositions: {
-          [DecPlacementType.RedPlanet]: this.planetRed ? new Vector2(this.planetRed.position.x, this.planetRed.position.y) : undefined,
-          [DecPlacementType.BluePlanet]: this.planetBlue ? new Vector2(this.planetBlue.position.x, this.planetBlue.position.y) : undefined,
-        },
-        // relativeTo: Player = 玩家正在控制的球。pivot 是偶数砖时红球当轴，
-        // 那么正在运动（被控制）的是蓝球，反之亦然。
-        playerPosition: (() => {
-          const moving = (this.currentTileIndex % 2 === 0) ? this.planetBlue : this.planetRed;
-          return moving ? new Vector2(moving.position.x, moving.position.y) : undefined;
-        })(),
-      }
+      o
     );
   }
 
@@ -3233,7 +3286,7 @@ export class Player implements IPlayer {
     this.resetMarginStats();
     this.resetTrailHistory();
     this.judgmentDisplay?.clear();
-    this.asyncInput.clear();
+    this.inputQueue.clear();
     this.deselectTile();
     this.useAudioContextTime = false;
     this.audioDriftSynced = false;
@@ -4221,7 +4274,8 @@ export class Player implements IPlayer {
     
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(width, height);
-    
+    this.applyPixelRatio();
+
     if (this.overlayHUD) this.overlayHUD.resize();
     if (this.hitErrorMeter) this.hitErrorMeter.resize();
     
@@ -5496,7 +5550,8 @@ export class Player implements IPlayer {
       cancelAnimationFrame(this.animationId);
     }
     this.removeEventListeners();
-    this.asyncInput.detach();
+    this.inputQueue.detach();
+    this.inputAttached = false;
     this.judgmentDisplay?.dispose();
     this.judgmentDisplay = null;
     

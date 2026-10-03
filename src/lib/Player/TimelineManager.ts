@@ -21,6 +21,39 @@ const REPEAT_SOLO_TYPES = new Set<string>([
     'Hide', 'ScaleMargin', 'ScaleRadius', 'TileDimensions', 'Bookmark',
 ]);
 
+/**
+ * 复刻原版 scrLevelMaker.CalculateFloorEntryTimes 的 entryBeat 数组：
+ *   floors[0].entryBeat = -1（哨兵）；
+ *   从 j = 1 起 entryBeat[j] = Σ_{f<j} angleLength_f / π。
+ * angleLength_f / π 恰等于该砖时长(秒) × bpm / 60 —— 是**纯几何拍数**，
+ * 与 BPM/speed 变化无关。RepeatEvents 的 Floor 模式角偏移正是用它算出来的：
+ *   offset = (entryBeat[target] - entryBeat[base]) * 180
+ * （原版 scnGame.ApplyEventsToFloors）。
+ */
+export function computeEntryBeats(
+    tileStartTimes: number[],
+    tileBPM: number[],
+    totalTiles: number,
+): number[] {
+    const n = Math.max(0, totalTiles);
+    const eb = new Array<number>(n).fill(0);
+    // 原版 listFloors.Count == 1 时提前 return：entryBeat[0] 保持默认 0（不是 -1）。
+    if (n <= 1) return eb;
+    // 哨兵：floor 0 的 entryBeat 显式置 -1。
+    eb[0] = -1;
+    // 原版循环 j ∈ [1, count-2]：最后一砖没有出弧，entryBeat 保持默认 0。
+    let beats = 0;
+    for (let j = 1; j < n - 1; j++) {
+        eb[j] = beats;
+        const t0 = tileStartTimes[j] ?? 0;
+        const t1 = tileStartTimes[j + 1] ?? t0;
+        // 本砖时长的"拍数"：duration * bpm / 60 == angleLength / π（纯几何，含 Pause）。
+        const bpm = tileBPM[j] || 100;
+        beats += ((t1 - t0) * bpm) / 60;
+    }
+    return eb;
+}
+
 export class TimelineManager {
     private timelines: Map<string, Map<string, Keyframe[]>> = new Map();
     private triggerEvents: { time: number; event: any }[] = [];
@@ -42,6 +75,13 @@ export class TimelineManager {
     private tileStartTimes: number[];
     private tileBPM: number[];
     private totalTiles: number;
+    // 几何拍数（原版 entryBeat），RepeatEvents Floor 模式角偏移用。
+    private entryBeat: number[] = [];
+
+    private entryBeatOf(i: number): number {
+        const v = this.entryBeat[i];
+        return typeof v === 'number' ? v : 0;
+    }
 
     // 离散时间轴：存储 string | boolean | number 的"即时"属性
     // （如 deco 的 visible / depth / decorationImage / maskingType 等）。
@@ -80,6 +120,10 @@ export class TimelineManager {
         // crotchet = 60/(bpm*pitch*speed)：时长要含 song pitch。
         const pitch = this.getSongPitch(settings);
 
+        // 几何拍数（原版 entryBeat）：RepeatEvents Floor 模式算角偏移用，
+        // 与 BPM/speed 变化无关（见 computeEntryBeats 注释）。
+        this.entryBeat = computeEntryBeats(this.tileStartTimes, this.tileBPM, this.totalTiles);
+
         const triggerEntries: { time: number; event: any }[] = [];
 
         // Collect MoveTrack events per floor, then sort by id to match apply order
@@ -109,8 +153,12 @@ export class TimelineManager {
             const floor = action.floor ?? 0;
             if (!repeatTable.has(floor)) repeatTable.set(floor, new Map());
             const sub = repeatTable.get(floor)!;
-            const isBeat = action.repeatType === 'Beat';
+            // repeatType 缺省时为枚举 0 = Beat（原版 PropertyInfo：无 default 时 Enum 取 0）。
+            const isBeat = (action.repeatType ?? 'Beat') === 'Beat';
             const repetitions = isBeat ? (action.repetitions ?? 0) : (action.floorCount ?? 0);
+            // 原版 `item2 = flag9 ? GetFloat("interval") : -1f`。GetFloat 的兜底是 0，
+            // 但正常谱面 Decode 会用 LevelEditorProperties 里 interval 的默认值(1)补全；
+            // 兜成 0 会让缺省 interval 的 Beat 事件变成 Floor 语义，故沿用 1。
             const interval = isBeat ? (action.interval ?? 1) : -1;
             const executeOnCurrentFloor = action.executeOnCurrentFloor ?? false;
             const gapLength = action.gapLength ?? 1;
@@ -143,10 +191,14 @@ export class TimelineManager {
             if (repeatInfo) {
                 const info = repeatInfo;
                 const baseFloor = action.floor;
+                // 原版 `flag11 = num33 > 0f`，即 interval > 0 才是 Beat 模式
+                // （不是看 repeatType：repeatType 只决定取 repetitions 还是 floorCount）。
                 const isBeatMode = info.interval > 0;
 
                 for (let rep = 0; rep <= info.repetitions; rep++) {
-                    const targetFloor = baseFloor + rep * info.gapLength;
+                    // Beats 模式目标砖恒为基砖（seqID + 0）；仅 Floor 模式按 gapLength 前进。
+                    // 用 baseFloor + rep*gapLength 做边界检查会误判 Beats 模式在谱尾提前 break。
+                    const targetFloor = isBeatMode ? baseFloor : baseFloor + rep * info.gapLength;
                     if (targetFloor >= this.totalTiles) break;
 
                     let repAngleOffset: number;
@@ -162,14 +214,11 @@ export class TimelineManager {
                             epFloor = targetFloor;
                             repAngleOffset = 0;
                         } else {
-                            // Event stays on original floor, offset = beat difference
+                            // Event stays on original floor，偏移量用**几何拍差**（原版 entryBeat），
+                            // 与路径上的 BPM/speed 变化无关；用时间差 ÷ 基砖 BPM 会在变速段算错。
                             epFloor = baseFloor;
-                            const baseTime = this.tileStartTimes[baseFloor] || 0;
-                            const targetTime = this.tileStartTimes[targetFloor] || 0;
-                            const bpm = this.tileBPM[baseFloor] || 100;
-                            const secPerBeat = 60 / bpm;
-                            const beatDiff = (targetTime - baseTime) / secPerBeat;
-                            repAngleOffset = beatDiff * 180;
+                            repAngleOffset =
+                                (this.entryBeatOf(targetFloor) - this.entryBeatOf(baseFloor)) * 180;
                         }
                     }
 
@@ -831,12 +880,12 @@ export class TimelineManager {
      * should take effect after a disappear animation completes).
      * Uses addKeyframe to handle duplicates at start/end times.
      */
-    private pushTween(entity: string, property: string, startTime: number, endTime: number, endValue: number, ease: string): void {
+    private pushTween(entity: string, property: string, startTime: number, endTime: number, endValue: number, ease: string, fallbackStart: number): void {
         const kfs = this.ensureTimeline(entity, property);
         const prevIdx = this.findKeyframeIndex(kfs, startTime);
         const actualStart = prevIdx >= 0
             ? this.interpolateTimeline(kfs, prevIdx, startTime)
-            : (kfs[0]?.value ?? 0);
+            : (kfs[0]?.value ?? fallbackStart);
 
         // Only remove keyframes strictly between start and end
         for (let i = kfs.length - 1; i >= 0; i--) {
@@ -1093,10 +1142,10 @@ export class TimelineManager {
                 this.addKeyframe(entity, 'positionY', appearStartTime, prevY, null);
                 this.addKeyframe(entity, 'scaleX', appearStartTime, 0, null);
                 this.addKeyframe(entity, 'scaleY', appearStartTime, 0, null);
-                this.pushTween(entity, 'positionX', appearStartTime, appearEndTime, baseX, ease);
-                this.pushTween(entity, 'positionY', appearStartTime, appearEndTime, baseY, ease);
-                this.pushTween(entity, 'scaleX', appearStartTime, appearEndTime, baseSX, ease);
-                this.pushTween(entity, 'scaleY', appearStartTime, appearEndTime, baseSY, ease);
+                this.pushTween(entity, 'positionX', appearStartTime, appearEndTime, baseX, ease, baseX);
+                this.pushTween(entity, 'positionY', appearStartTime, appearEndTime, baseY, ease, baseY);
+                this.pushTween(entity, 'scaleX', appearStartTime, appearEndTime, baseSX, ease, baseSX);
+                this.pushTween(entity, 'scaleY', appearStartTime, appearEndTime, baseSY, ease, baseSY);
                 break;
             }
             case 'Assemble':
@@ -1113,9 +1162,9 @@ export class TimelineManager {
                 this.addKeyframe(entity, 'positionX', appearStartTime, baseX + dx, null);
                 this.addKeyframe(entity, 'positionY', appearStartTime, baseY + dy, null);
                 this.addKeyframe(entity, 'rotation', appearStartTime, baseRot + dr, null);
-                this.pushTween(entity, 'positionX', appearStartTime, appearEndTime, baseX, ease);
-                this.pushTween(entity, 'positionY', appearStartTime, appearEndTime, baseY, ease);
-                this.pushTween(entity, 'rotation', appearStartTime, appearEndTime, baseRot, ease);
+                this.pushTween(entity, 'positionX', appearStartTime, appearEndTime, baseX, ease, baseX);
+                this.pushTween(entity, 'positionY', appearStartTime, appearEndTime, baseY, ease, baseY);
+                this.pushTween(entity, 'rotation', appearStartTime, appearEndTime, baseRot, ease, baseRot);
                 break;
             }
             case 'Grow': {
@@ -1123,8 +1172,8 @@ export class TimelineManager {
                 this.addKeyframe(entity, 'scaleY', 0, 0, null);
                 this.addKeyframe(entity, 'scaleX', appearStartTime, 0, null);
                 this.addKeyframe(entity, 'scaleY', appearStartTime, 0, null);
-                this.pushTween(entity, 'scaleX', appearStartTime, appearEndTime, baseSX, ease);
-                this.pushTween(entity, 'scaleY', appearStartTime, appearEndTime, baseSY, ease);
+                this.pushTween(entity, 'scaleX', appearStartTime, appearEndTime, baseSX, ease, baseSX);
+                this.pushTween(entity, 'scaleY', appearStartTime, appearEndTime, baseSY, ease, baseSY);
                 break;
             }
             case 'Grow_Spin': {
@@ -1134,15 +1183,15 @@ export class TimelineManager {
                 this.addKeyframe(entity, 'scaleX', appearStartTime, 0, null);
                 this.addKeyframe(entity, 'scaleY', appearStartTime, 0, null);
                 this.addKeyframe(entity, 'rotation', appearStartTime, baseRot - Math.PI, null);
-                this.pushTween(entity, 'scaleX', appearStartTime, appearEndTime, baseSX, ease);
-                this.pushTween(entity, 'scaleY', appearStartTime, appearEndTime, baseSY, ease);
-                this.pushTween(entity, 'rotation', appearStartTime, appearEndTime, baseRot, ease);
+                this.pushTween(entity, 'scaleX', appearStartTime, appearEndTime, baseSX, ease, baseSX);
+                this.pushTween(entity, 'scaleY', appearStartTime, appearEndTime, baseSY, ease, baseSY);
+                this.pushTween(entity, 'rotation', appearStartTime, appearEndTime, baseRot, ease, baseRot);
                 break;
             }
             case 'Fade': {
                 this.addKeyframe(entity, 'opacity', 0, 0, null);
                 this.addKeyframe(entity, 'opacity', appearStartTime, 0, null);
-                this.pushTween(entity, 'opacity', appearStartTime, appearEndTime, baseOp, ease);
+                this.pushTween(entity, 'opacity', appearStartTime, appearEndTime, baseOp, ease, baseOp);
                 break;
             }
             case 'Drop': {
@@ -1153,9 +1202,9 @@ export class TimelineManager {
                 this.addKeyframe(entity, 'positionY', appearStartTime, baseY + 8, null);
                 this.addKeyframe(entity, 'scaleX', appearStartTime, 0, null);
                 this.addKeyframe(entity, 'scaleY', appearStartTime, 0, null);
-                this.pushTween(entity, 'positionY', appearStartTime, appearEndTime, baseY, ease);
-                this.pushTween(entity, 'scaleX', appearStartTime, appearStartTime + scaleDur, baseSX, 'Quad.easeOut');
-                this.pushTween(entity, 'scaleY', appearStartTime, appearStartTime + scaleDur, baseSY, 'Quad.easeOut');
+                this.pushTween(entity, 'positionY', appearStartTime, appearEndTime, baseY, ease, baseY);
+                this.pushTween(entity, 'scaleX', appearStartTime, appearStartTime + scaleDur, baseSX, 'Quad.easeOut', baseSX);
+                this.pushTween(entity, 'scaleY', appearStartTime, appearStartTime + scaleDur, baseSY, 'Quad.easeOut', baseSY);
                 break;
             }
             case 'Rise': {
@@ -1166,9 +1215,9 @@ export class TimelineManager {
                 this.addKeyframe(entity, 'positionY', appearStartTime, baseY - 8, null);
                 this.addKeyframe(entity, 'scaleX', appearStartTime, 0, null);
                 this.addKeyframe(entity, 'scaleY', appearStartTime, 0, null);
-                this.pushTween(entity, 'positionY', appearStartTime, appearEndTime, baseY, ease);
-                this.pushTween(entity, 'scaleX', appearStartTime, appearStartTime + scaleDur, baseSX, 'Quad.easeOut');
-                this.pushTween(entity, 'scaleY', appearStartTime, appearStartTime + scaleDur, baseSY, 'Quad.easeOut');
+                this.pushTween(entity, 'positionY', appearStartTime, appearEndTime, baseY, ease, baseY);
+                this.pushTween(entity, 'scaleX', appearStartTime, appearStartTime + scaleDur, baseSX, 'Quad.easeOut', baseSX);
+                this.pushTween(entity, 'scaleY', appearStartTime, appearStartTime + scaleDur, baseSY, 'Quad.easeOut', baseSY);
                 break;
             }
         }
@@ -1210,33 +1259,33 @@ export class TimelineManager {
                 const dx = this.seededRandom(seed) * range * 2 - range;
                 const dy = this.seededRandom(seed + 1) * range * 2 - range;
                 const dr = (this.seededRandom(seed + 2) * 150 - 75) * Math.PI / 180;
-                this.pushTween(entity, 'positionX', disappearStartTime, disappearEndTime, baseX + dx, ease);
-                this.pushTween(entity, 'positionY', disappearStartTime, disappearEndTime, baseY + dy, ease);
-                this.pushTween(entity, 'rotation', disappearStartTime, disappearEndTime, baseRot + dr, ease);
+                this.pushTween(entity, 'positionX', disappearStartTime, disappearEndTime, baseX + dx, ease, baseX);
+                this.pushTween(entity, 'positionY', disappearStartTime, disappearEndTime, baseY + dy, ease, baseY);
+                this.pushTween(entity, 'rotation', disappearStartTime, disappearEndTime, baseRot + dr, ease, baseRot);
                 break;
             }
             case 'Retract': {
                 const nextX = basePositions[floor + 1]?.x ?? baseX;
                 const nextY = basePositions[floor + 1]?.y ?? baseY;
-                this.pushTween(entity, 'positionX', disappearStartTime, disappearEndTime, nextX, ease);
-                this.pushTween(entity, 'positionY', disappearStartTime, disappearEndTime, nextY, ease);
-                this.pushTween(entity, 'scaleX', disappearStartTime, disappearEndTime, 0, ease);
-                this.pushTween(entity, 'scaleY', disappearStartTime, disappearEndTime, 0, ease);
+                this.pushTween(entity, 'positionX', disappearStartTime, disappearEndTime, nextX, ease, baseX);
+                this.pushTween(entity, 'positionY', disappearStartTime, disappearEndTime, nextY, ease, baseY);
+                this.pushTween(entity, 'scaleX', disappearStartTime, disappearEndTime, 0, ease, baseSX);
+                this.pushTween(entity, 'scaleY', disappearStartTime, disappearEndTime, 0, ease, baseSY);
                 break;
             }
             case 'Shrink': {
-                this.pushTween(entity, 'scaleX', disappearStartTime, disappearEndTime, 0, ease);
-                this.pushTween(entity, 'scaleY', disappearStartTime, disappearEndTime, 0, ease);
+                this.pushTween(entity, 'scaleX', disappearStartTime, disappearEndTime, 0, ease, baseSX);
+                this.pushTween(entity, 'scaleY', disappearStartTime, disappearEndTime, 0, ease, baseSY);
                 break;
             }
             case 'Shrink_Spin': {
-                this.pushTween(entity, 'scaleX', disappearStartTime, disappearEndTime, 0, ease);
-                this.pushTween(entity, 'scaleY', disappearStartTime, disappearEndTime, 0, ease);
-                this.pushTween(entity, 'rotation', disappearStartTime, disappearEndTime, baseRot - Math.PI, ease);
+                this.pushTween(entity, 'scaleX', disappearStartTime, disappearEndTime, 0, ease, baseSX);
+                this.pushTween(entity, 'scaleY', disappearStartTime, disappearEndTime, 0, ease, baseSY);
+                this.pushTween(entity, 'rotation', disappearStartTime, disappearEndTime, baseRot - Math.PI, ease, baseRot);
                 break;
             }
             case 'Fade': {
-                this.pushTween(entity, 'opacity', disappearStartTime, disappearEndTime, 0, ease);
+                this.pushTween(entity, 'opacity', disappearStartTime, disappearEndTime, 0, ease, baseOp);
                 break;
             }
         }

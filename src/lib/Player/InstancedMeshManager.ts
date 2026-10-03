@@ -39,6 +39,13 @@ void main() {
 }
 `;
 
+/**
+ * 总开关：topGlow 砖块辉度叠加层。该层随砖一起显隐、且不受轨道透明度影响，
+ * 行为错误，故全局禁用（代码保留，置 true 即可恢复）。
+ * 关闭后：glowMesh 不入场景（无叠加 draw call），setTileGlow 直接返回（无属性写入）。
+ */
+const TOP_GLOW_ENABLED = false;
+
 /** 辉光直径 = 砖块长度 × 该系数（官方 topGlow sprite 比砖大 1.28 倍）。 */
 const GLOW_SCALE = 1.28;
 /** 辉光四边形相对砖面的 z 偏移。砖的层级步进约 2e-4、深度分辨率约 6e-5，
@@ -270,7 +277,7 @@ export class InstancedMeshManager {
         };
 
         this.scene.add(instancedMesh);
-        this.scene.add(glowMesh);
+        if (TOP_GLOW_ENABLED) this.scene.add(glowMesh);
         this.instancedMeshes.set(shapeKey, shapeData);
 
         return shapeData;
@@ -654,6 +661,7 @@ export class InstancedMeshManager {
      * `min(floorOpacity * trackGlowIntensity/100 * 0.8, colorAlpha)`。
      */
     public setTileGlow(tileIndex: number, glow: number): void {
+        if (!TOP_GLOW_ENABLED) return;
         const instance = this.tileInstances.get(tileIndex);
         if (instance) {
             if (Math.abs(instance.glow - glow) < 1e-6) return;

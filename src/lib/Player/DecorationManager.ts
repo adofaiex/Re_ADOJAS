@@ -1,5 +1,5 @@
 import { Group, Mesh, Sprite, Vector2, Color, Texture, MeshBasicMaterial, SpriteMaterial, Material, CanvasTexture, CircleGeometry, BufferGeometry, BufferAttribute, SRGBColorSpace, DoubleSide, Scene, PlaneGeometry, Vector3, WebGLRenderTarget, Float32BufferAttribute, NormalBlending, AdditiveBlending, MultiplyBlending, CustomBlending, AddEquation, ReverseSubtractEquation, OneFactor, OneMinusSrcColorFactor, OneMinusSrcAlphaFactor, LinearFilter, LinearMipMapLinearFilter, NearestFilter, RepeatWrapping, ClampToEdgeWrapping, Blending, AlwaysStencilFunc, EqualStencilFunc, NotEqualStencilFunc, ReplaceStencilOp, KeepStencilOp } from 'three';
-import { TimelineManager } from './TimelineManager';
+import { TimelineManager, computeEntryBeats } from './TimelineManager';
 import createTrackMesh, { DECO_SIZE_SCALE, DECO_POSITION_SCALE } from '../Geo/mesh_reserve';
 import { isEventActive, isEnabled } from './EventUtils';
 import { getIconTexture, getIconTextureForCustomFloor, createIconSprite, getPlanetTexture, planetPresetColor, configurePlanetTexture, applyPlanetFrame } from './IconLoader';
@@ -2725,6 +2725,9 @@ export class DecorationManager {
         const actions = this.levelData.actions || [];
 
         const totalTiles = this.tileStartTimes.length;
+        // 几何拍数（原版 entryBeat）：RepeatEvents Floor 模式角偏移用。
+        const entryBeat = computeEntryBeats(this.tileStartTimes, this.tileBPM, totalTiles);
+        const ebAt = (i: number): number => (i >= 0 && i < entryBeat.length ? entryBeat[i] : 0);
 
         // ── RepeatEvents 表 ────────────────────────────────────────────
         // ApplyEventsToFloors 对【所有】事件统一做重复展开（含
@@ -2739,7 +2742,8 @@ export class DecorationManager {
             const floor = action.floor ?? 0;
             if (!repeatTable.has(floor)) repeatTable.set(floor, new Map());
             const sub = repeatTable.get(floor)!;
-            const isBeat = action.repeatType === 'Beat';
+            // repeatType 缺省 = 枚举 0 = Beat（原版无 default 时 Enum 取 0）。
+            const isBeat = (action.repeatType ?? 'Beat') === 'Beat';
             const repetitions = isBeat ? (action.repetitions ?? 0) : (action.floorCount ?? 0);
             const interval = isBeat ? (action.interval ?? 1) : -1;
             const executeOnCurrentFloor = action.executeOnCurrentFloor ?? false;
@@ -2770,9 +2774,11 @@ export class DecorationManager {
             }
             if (!info) { pushEntry(baseFloor, action, baseAo); continue; }
 
+            // 原版 `flag11 = num33 > 0f`：interval > 0 才是 Beat 模式。
             const isBeatMode = info.interval > 0;
             for (let rep = 0; rep <= info.repetitions; rep++) {
-                const targetFloor = baseFloor + rep * info.gapLength;
+                // Beat 模式目标砖恒为基砖；只有 Floor 模式按 gapLength 前进。
+                const targetFloor = isBeatMode ? baseFloor : baseFloor + rep * info.gapLength;
                 if (targetFloor >= totalTiles) break;
                 let hostFloor: number;
                 let repAngle: number;
@@ -2785,12 +2791,10 @@ export class DecorationManager {
                     hostFloor = targetFloor;
                     repAngle = 0;
                 } else {
-                    // Floor 模式：事件留原 floor，角偏移 = 两 floor 的节拍差×180
+                    // Floor 模式：事件留原 floor，角偏移 = 两 floor 的**几何拍差**×180
+                    // （原版 entryBeat，与路径上的 BPM/speed 无关）。
                     hostFloor = baseFloor;
-                    const baseTime = this.tileStartTimes[baseFloor] || 0;
-                    const targetTime = this.tileStartTimes[targetFloor] || 0;
-                    const secPerBeat = 60 / (this.tileBPM[baseFloor] || 100);
-                    repAngle = ((targetTime - baseTime) / secPerBeat) * 180;
+                    repAngle = (ebAt(targetFloor) - ebAt(baseFloor)) * 180;
                 }
                 pushEntry(hostFloor, action, baseAo + repAngle);
             }

@@ -6,13 +6,17 @@ export type RendererType = "webgl" | "webgpu"
 export type RenderMethodType = "sync" | "async"
 export type LoadMethodType = "sync" | "async" | "worker"
 export type TargetFramerateType = "auto" | "30" | "60" | "120" | "144" | "165" | "240" | "unlimited"
+export type RenderScaleType = "0.75" | "1" | "1.5" | "native"
+export type InputMethodType = "sync" | "worker"
 
 interface AppSettings {
   renderer: RendererType
   renderMethod: RenderMethodType
   showTrail: boolean
   targetFramerate: TargetFramerateType
+  renderScale: RenderScaleType // 渲染倍率上限（pixelRatio = min(DPR, 该值)）
   loadMethod: LoadMethodType
+  inputMethod: InputMethodType // 输入方式：sync 主线程 / worker 队列
   hitsoundEnabled: boolean
   showStats: boolean // 是否使用 stats.js 面板
   useOGGCompression: boolean // 是否使用 OGG 压缩减少内存占用
@@ -25,7 +29,9 @@ const DEFAULT_SETTINGS: AppSettings = {
   renderMethod: "sync", // Default to synchronous rendering
   showTrail: false, // Default to disabled
   targetFramerate: "auto", // Default to auto (monitor refresh rate)
+  renderScale: "1.5", // Cap pixel ratio at min(DPR, 1.5) for fill-rate performance
   loadMethod: "async", // Default to async loading
+  inputMethod: "sync", // Default to main-thread synchronous input
   hitsoundEnabled: true, // Default to enabled
   showStats: false, // Default to using default FPS panel
   useOGGCompression: false, // Default to disabled (may affect quality)

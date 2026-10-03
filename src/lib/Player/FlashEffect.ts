@@ -119,12 +119,12 @@ export class FlashEffect {
      * Supports both old format (color, colorTo, opacity, easing, flashStyle, duration)
      * and new format (startColor, endColor, startOpacity, endOpacity, ease, plane, duration).
      *
-     * flashStyle values:
-     *   "Flash"      – fade from color(×opacity) → transparent
-     *   "Reverse"    – fade from current → color over duration
-     *   "StayBlack"  – immediately set black, stays
-     *   "Kill"       – immediately stop all flash
-     *   "FlashEx"    – fade from color → colorTo over duration
+     * 所有样式统一：把 plane 立刻设成【初始值】(startColor 的 rgb+alpha / startOpacity)，
+     * 再按 ease 过渡到【末值】(endColor 的 rgb+alpha / endOpacity)。与实况 ffxFlashPlus 一致 ——
+     * ffxFlashPlus 不区分 flashStyle，永远是 startColor → endColor 的补间。
+     * flashStyle 只保留两个瞬时特例：
+     *   "Kill"       – 立即停止所有闪光
+     *   "StayBlack"  – 立即变黑并保持
      */
     startFlash(
         currentTime: number,
@@ -133,13 +133,22 @@ export class FlashEffect {
     ): void {
         const flashStyle = event.flashStyle || 'Flash';
 
-        // Handle instant modes first
+        const transition = plane === 'FG' ? this.fgTransition : this.bgTransition;
+        const material = plane === 'FG' ? this.fgMaterial : this.bgMaterial;
+
+        // Kill 是"立即清空"，不是"补完"：原版 scrFlash.FlashKill 把 colorStart/
+        // colorEnd 都设成 clear → 直接变透明。
         if (flashStyle === 'Kill') {
             this.stop();
             return;
         }
+
+        // 原版 ffxFlashPlus.DoFlash 的第一步：DOTween.Kill(material, complete: true)。
+        // 新的 Flash 到来时，先把本 plane 上仍在进行的旧补间【瞬间补完】——材质落到
+        // 它的 endColor/endOpacity —— 再终止旧过渡，然后才由新闪屏接管。
+        this.completeTransition(transition, material);
+
         if (flashStyle === 'StayBlack') {
-            const transition = plane === 'FG' ? this.fgTransition : this.bgTransition;
             transition.active = true;
             transition.hold = false;
             transition.startTime = currentTime;
@@ -151,51 +160,35 @@ export class FlashEffect {
             transition.ease = 'Linear';
             transition.flashStyle = 'StayBlack';
 
-            const material = plane === 'FG' ? this.fgMaterial : this.bgMaterial;
             material.color.set(0, 0, 0);
             material.opacity = 1;
             return;
         }
 
-        let startColorStr = event.startColor || event.color || 'ffffff';
-        let endColorStr = event.endColor || event.colorTo || 'ffffff';
-        let startOpacity: number;
-        let endOpacity: number;
-        let ease = event.ease || event.easing || 'Linear';
-        let duration = event.duration ?? 1;
+        // 颜色是 #RRGGBBAA（也可能只有 #RGB / #RRGGBB）：alpha 要单独取出，
+        // 因为 THREE.Color 只吃 RGB，透明度只能走 material.opacity。
+        // 初始值 = startColor（含 alpha），末值 = endColor（含 alpha）；
+        // 未给末色时，末值 = 起始色但全透明（经典的闪一下）。
+        // 显式 startOpacity/endOpacity（0..100）优先于颜色里带的 alpha。
+        const start = this.parseColor(event.startColor ?? event.color ?? 'ffffff');
+        const endProvided = event.endColor !== undefined || event.colorTo !== undefined;
+        const end = endProvided
+            ? this.parseColor(event.endColor ?? event.colorTo)
+            : { hex: start.hex, alpha: 0 };
 
-        if (flashStyle === 'Reverse') {
-            // Start from current color/opacity, end at target
-            const material = plane === 'FG' ? this.fgMaterial : this.bgMaterial;
-            startColorStr = this.colorToHex(material.color);
-            startOpacity = material.opacity;
-            endColorStr = event.color || 'ffffff';
-            endOpacity = event.opacity !== undefined ? event.opacity / 100 : 1;
-        } else if (flashStyle === 'FlashEx') {
-            // Explicit start/end
-            startColorStr = event.color || 'ffffff';
-            endColorStr = event.colorTo || 'ffffff';
-            startOpacity = (event.opacity !== undefined ? event.opacity : 100) / 100;
-            endOpacity = 0;
-        } else {
-            // Standard Flash: same as legacy Flash
-            startOpacity = event.startOpacity !== undefined
-                ? event.startOpacity / 100
-                : (event.opacity !== undefined ? event.opacity / 100 : 1);
-            endOpacity = event.endOpacity !== undefined
-                ? event.endOpacity / 100
-                : 0;
-        }
-
-        const transition = plane === 'FG' ? this.fgTransition : this.bgTransition;
-        const material = plane === 'FG' ? this.fgMaterial : this.bgMaterial;
+        const startOpacity = event.startOpacity !== undefined
+            ? event.startOpacity / 100
+            : (event.opacity !== undefined ? event.opacity / 100 : start.alpha);
+        const endOpacity = event.endOpacity !== undefined ? event.endOpacity / 100 : end.alpha;
+        const ease = event.ease || event.easing || 'Linear';
+        const duration = event.duration ?? 1;
 
         transition.active = true;
         transition.hold = false;
         transition.startTime = currentTime;
         transition.duration = duration;
-        transition.startColor.set(this.normalizeHexColor(startColorStr));
-        transition.endColor.set(this.normalizeHexColor(endColorStr));
+        transition.startColor.set(start.hex);
+        transition.endColor.set(end.hex);
         transition.startOpacity = startOpacity;
         transition.endOpacity = endOpacity;
         transition.ease = ease;
@@ -205,30 +198,62 @@ export class FlashEffect {
         material.opacity = transition.startOpacity;
     }
 
-    private colorToHex(color: Color): string {
-        const r = Math.round(color.r * 255).toString(16).padStart(2, '0');
-        const g = Math.round(color.g * 255).toString(16).padStart(2, '0');
-        const b = Math.round(color.b * 255).toString(16).padStart(2, '0');
-        return r + g + b;
+    /**
+     * 原版 ffxFlashPlus.DoFlash 的第一步：DOTween.Kill(material, complete: true)。
+     * 新闪屏到来时，把该 plane 上仍在进行的旧补间【瞬间补完】——材质落到它的
+     * endColor/endOpacity —— 然后终止旧过渡，再接管新的。
+     */
+    private completeTransition(transition: FlashTransition, material: MeshBasicMaterial): void {
+        if (!transition.active) return;
+        material.color.copy(transition.endColor);
+        material.opacity = transition.endOpacity;
+        transition.active = false;
+        transition.hold = false;
     }
 
-    private normalizeHexColor(value: any): string {
-        // 颜色可能是 hex 字符串、数字、[r,g,b] 或 { r,g,b }（关卡文件两种写法都有）。
+    /**
+     * 解析颜色 → { hex: '#RRGGBB', alpha: 0..1 }。
+     * 支持 #RGB / #RRGGBB / #RRGGBBAA（关卡文件也可能写数字 / [r,g,b(,a)] / {r,g,b(,a)}）。
+     * alpha 单独返回给 material.opacity，绝不丢弃。
+     */
+    private parseColor(value: any): { hex: string; alpha: number } {
+        const clamp01 = (v: any) => Math.min(1, Math.max(0, Number(v)));
+        const toHex = (v: any) =>
+            Math.round(clamp01(v) * 255).toString(16).padStart(2, '0');
+
         if (typeof value === 'number') {
-            return '#' + (value >>> 0).toString(16).padStart(6, '0').slice(-6);
+            const n = value >>> 0;
+            if (n > 0xffffff) {
+                return {
+                    hex: '#' + ((n >>> 16) & 0xff).toString(16).padStart(2, '0')
+                        + ((n >>> 8) & 0xff).toString(16).padStart(2, '0')
+                        + (n & 0xff).toString(16).padStart(2, '0'),
+                    alpha: ((n >>> 24) & 0xff) / 255,
+                };
+            }
+            return { hex: '#' + n.toString(16).padStart(6, '0').slice(-6), alpha: 1 };
         }
         if (Array.isArray(value)) {
-            return '#' + value.slice(0, 3).map(v =>
-                Math.round(Math.min(1, Math.max(0, Number(v))) * 255).toString(16).padStart(2, '0')).join('');
+            return {
+                hex: '#' + toHex(value[0]) + toHex(value[1]) + toHex(value[2]),
+                alpha: typeof value[3] === 'number' ? clamp01(value[3]) : 1,
+            };
         }
         if (value && typeof value === 'object' && typeof value.r === 'number') {
-            return '#' + [value.r, value.g, value.b].map(v =>
-                Math.round(Math.min(1, Math.max(0, Number(v))) * 255).toString(16).padStart(2, '0')).join('');
+            return {
+                hex: '#' + toHex(value.r) + toHex(value.g) + toHex(value.b),
+                alpha: typeof value.a === 'number' ? clamp01(value.a) : 1,
+            };
         }
-        if (typeof value !== 'string' || value.length === 0) return '#ffffff';
-        let result = value.startsWith('#') ? value.slice(1) : value;
-        if (result.length === 8) result = result.slice(0, 6);
-        return '#' + result;
+        if (typeof value !== 'string' || value.length === 0) return { hex: '#ffffff', alpha: 1 };
+
+        let raw = value.startsWith('#') ? value.slice(1) : value;
+        if (raw.length === 3) raw = raw[0] + raw[0] + raw[1] + raw[1] + raw[2] + raw[2];
+        if (raw.length === 4) raw = raw[0] + raw[0] + raw[1] + raw[1] + raw[2] + raw[2] + raw[3] + raw[3];
+        if (raw.length >= 8) {
+            return { hex: '#' + raw.slice(0, 6), alpha: parseInt(raw.slice(6, 8), 16) / 255 };
+        }
+        return { hex: '#' + raw.slice(0, 6).padEnd(6, '0'), alpha: 1 };
     }
 
     private updateTransition(
