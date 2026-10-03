@@ -2736,6 +2736,16 @@ export class DecorationManager {
                 worldScale: [d.container.scale.x, d.container.scale.y],
                 baseSize: [d.baseSizeX, d.baseSizeY],
                 opacity: d.currentOpacity,
+                // 颜色（tint）：背景色块渲染成"白块/亮块"时，对比这里与期望色即可判定
+                color: '#' + d.currentColor.getHexString(),
+                materialColor: (() => {
+                    const m: any = (d as any).mesh?.material ?? (d as any).sprite?.material;
+                    return m?.color ? '#' + m.color.getHexString() : null;
+                })(),
+                materialOpacity: (() => {
+                    const m: any = (d as any).mesh?.material ?? (d as any).sprite?.material;
+                    return typeof m?.opacity === 'number' ? m.opacity : null;
+                })(),
                 configVisible: d.config.visible,
                 effVisible,
                 depth: d.config.depth,
