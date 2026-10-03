@@ -128,8 +128,12 @@ function getBlendMode(mode: DecorationBlendMode): number {
             return AdditiveBlending;
         case DecorationBlendMode.Multiply: return MultiplyBlending;
         case DecorationBlendMode.Screen:
+            return CustomBlending;
         case DecorationBlendMode.Overlay:
         case DecorationBlendMode.SoftLight:
+            // 与 mesh 路径一致：背景带用加色近似（精确实现需要抓屏，见 applyDecoBlendMode）。
+            // 这样也避开了"多种模式都映射到 CustomBlending → 批次键相同但自定义参数不同"的串味。
+            return AdditiveBlending;
         case DecorationBlendMode.Difference:
         case DecorationBlendMode.Subtract:
         case DecorationBlendMode.Divide:
@@ -143,7 +147,10 @@ function isBatchableBlendMode(mode: DecorationBlendMode): boolean {
     return mode === DecorationBlendMode.None
         || mode === DecorationBlendMode.Multiply
         || mode === DecorationBlendMode.LinearDodge
-        || mode === DecorationBlendMode.Additive;
+        || mode === DecorationBlendMode.Additive
+        // Overlay / SoftLight 在背景带用加色近似（见 getBlendMode）→ 可入批次
+        || mode === DecorationBlendMode.Overlay
+        || mode === DecorationBlendMode.SoftLight;
 }
 
 /**
@@ -184,6 +191,12 @@ function applyDecoBlendMode(mat: any, mode: DecorationBlendMode): void {
             break;
         case DecorationBlendMode.Overlay:
         case DecorationBlendMode.SoftLight:
+            // 官方是"抓屏取底再混合"，只有**前景**（depth<0）能走 backdrop 精确实现
+            // （见 setupVisual 的 bdNoTex 分支）。背景带的这类装饰如果退化成 Normal
+            // 就会变成不透明色块、把背景整个挡住（实测：Bingsu For Alice 的体积光）。
+            // 这里统一退成**加色**：不会遮挡、观感最接近"光叠加"。
+            mat.blending = AdditiveBlending;
+            break;
         default:
             mat.blending = NormalBlending;
             break;
