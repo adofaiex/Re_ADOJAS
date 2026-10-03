@@ -2072,8 +2072,26 @@ export class DecorationManager {
     }
 
 
+    /**
+     * 每个**源事件对象**只允许创建一次装饰。
+     *
+     * `collectDecoSources()` 会把 `_materializeIndex` 重置为 0；如果它被调用第二次
+     * （编辑器重新收集 / 二次初始化），materialize 会拿同一批源对象再建一遍 →
+     * 同一块装饰被创建两次（叠在一起双重混合、看起来更亮/更实）。
+     * 实测：Bingsu For Alice 的 `tag 26` phone 在文件里只有一条 AddDecoration，
+     * 却出现了两个实例（dec_AddDecoration_231_l06m / _8f8d）。
+     *
+     * 只在 `clear()`（整关拆掉）时重置，重新 collect 不重置 —— 源对象是同一批。
+     */
+    private _materializedSources = new WeakSet<object>();
+
     private tryCreateDecoration(event: any): DecorationInstance | null {
         if (!isEventActive(event)) return null;
+        // 幂等：同一源事件只建一次
+        if (event && typeof event === 'object') {
+            if (this._materializedSources.has(event)) return null;
+            this._materializedSources.add(event);
+        }
         // 粒子装饰暂时禁用：直接跳过（返回 null 但不再 push 到 pending，避免反复重试）
         if (!PARTICLES_ENABLED && event.eventType === 'AddParticle') return null;
         const deco = this.createDecoration(event);
@@ -3520,6 +3538,8 @@ export class DecorationManager {
         this.decorationEventsTimeline = [];
         this._decoSources = [];
         this._materializeIndex = 0;
+        // 整关拆掉后才允许用同一批源事件重建（重新 collect 不重置，见 _materializedSources）
+        this._materializedSources = new WeakSet();
         this.pendingDecorationEvents = [];
         this._tilePositions.clear();
         this.instancedRenderer.clear();
