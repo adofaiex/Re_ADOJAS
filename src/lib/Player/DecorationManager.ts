@@ -2801,6 +2801,11 @@ export class DecorationManager {
                 blend: d.config.blendMode,
                 masking: d.config.maskingType,
                 hasTimeline: d.hasTimeline,
+                // 透明度的完整关键帧（字符串）：判定"该隐藏却没隐藏"时看这里
+                // —— 若缺少那条 duration=0 的 opacity 0 关键帧，就是时间轴构建的问题。
+                opacityTimeline: d.config.id && this._timelineManager
+                    ? this._timelineManager.debugKeyframes(`deco:${d.config.id}`)
+                    : null,
                 inBatch: !!d.objTpl,
             });
             if (out.length >= limit) break;
