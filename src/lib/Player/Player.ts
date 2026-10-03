@@ -562,8 +562,7 @@ export class Player implements IPlayer {
         };
     };
     // 贴图预算查询：__adojasTexBudget() → 本关装饰贴图的最大边长（<2048 说明被降采样，
-    // 高对比剪影的边缘会出现锯齿；锯齿程度随该值变小而变明显）。
-    (window as any).__adojasTexBudget = () => {
+    // 高对比剪影的边缘会出现锯齿；锯齿程度随该值变小而变明显）。    (window as any).__adojasTexBudget = () => {
         const store = (this.decorationManager as any)?.textures;
         return {
             maxDim: store?.maxDim ?? null,
@@ -571,6 +570,9 @@ export class Player implements IPlayer {
             note: 'maxDim < 2048 表示贴图被降采样（保显存）。预算常量在 src/lib/Player/DecorationTextures.ts。',
         };
     };
+    // Flash 探针：__adojasFlash() → 两条 plane（FG/BG）的过渡状态与材质实际色/透明度。
+    // 判定"屏幕全白"：看 bg.active/材料 opacity 是否停在起始的 100% 白。
+    (window as any).__adojasFlash = () => this.flashEffect?.debugSnapshot?.() ?? null;
     if (opts?.deferDecorations) {
       // 装饰物分帧/异步创建（加载界面显示进度）——见 buildDecorationsAsync()
       this.decorationManager.collectDecoSources();

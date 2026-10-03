@@ -357,6 +357,30 @@ export class FlashEffect {
         return this.bgMaterial.opacity;
     }
 
+    /** 诊断快照：两条 plane 的过渡状态（透明度探针用）。 */
+    debugSnapshot(): any {
+        const dump = (t: FlashTransition, mat: MeshBasicMaterial) => ({
+            active: t.active,
+            hold: t.hold,
+            startTime: t.startTime,
+            duration: t.duration,
+            startColor: '#' + t.startColor.getHexString(),
+            endColor: '#' + t.endColor.getHexString(),
+            startOpacity: t.startOpacity,
+            endOpacity: t.endOpacity,
+            ease: t.ease,
+            style: t.flashStyle,
+            materialColor: '#' + mat.color.getHexString(),
+            materialOpacity: mat.opacity,
+        });
+        return {
+            fg: dump(this.fgTransition, this.fgMaterial),
+            bg: dump(this.bgTransition, this.bgMaterial),
+            bgQuadVisible: this.bgQuad.visible,
+            bgQuadZ: this.bgQuad.position.z,
+        };
+    }
+
     stop(): void {
         this.fgTransition.active = false;
         this.bgTransition.active = false;
