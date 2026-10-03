@@ -4069,6 +4069,11 @@ export class Player implements IPlayer {
     const fadeDur = evDurBeats > 0 ? evDurBeats * 60 / bpm : 0;
 
     for (let i = minIdx; i <= maxIdx; i += (gap + 1)) {
+        // 打断语义（官方 ffxRecolorFloorPlus）：新颜色 tween 开始前先把旧的
+        // Color tween `Kill(complete:true)` —— 旧动画**跳到它的目标色**，
+        // 新动画再从那个颜色缓动到新目标。所以要先取"应用前"的状态。
+        const prevFade = this.tileColorManager.getColorFade(i);
+        const prevColor = this.tileColorManager.getTileColor(i);
         this.tileColorManager.setTileRecolorConfig(i, config);
         const rendered = this.tileColorManager.getTileRenderer(i, this.elapsedTime / 1000, config, this.music.amplitude);
         this.applyTileColor(i, rendered.color, rendered.bgcolor, rendered.opacity);
@@ -4103,14 +4108,17 @@ export class Player implements IPlayer {
             }
         }
 
-        // RecolorFloor: Single/Stripes ease from the CURRENT color
-        // to the target over the event duration (TweenColor); start AFTER applying.
+        // RecolorFloor: Single/Stripes ease to the target over the event duration
+        // (TweenColor). 起始色 = 旧 fade 的目标色（Kill complete:true 的语义），
+        // 没有旧 fade 时才用当前颜色 —— 之前这里在 applyTileColor 之后取"当前色"，
+        // 取到的已经是新目标色 → 渐变退化成"瞬切"。
         if (fadeDur > 0 && (config.trackColorType === 'Single' || config.trackColorType === 'Stripes')) {
-            const cur = this.tileColorManager.getTileColor(i);
+            const fromColor = prevFade ? prevFade.toColor : (prevColor?.color ?? rendered.color);
+            const fromBg = prevFade ? prevFade.toBg : (prevColor?.secondaryColor ?? rendered.bgcolor);
             this.tileColorManager.startColorFade(
                 i,
-                cur?.color ?? rendered.color,
-                cur?.secondaryColor ?? rendered.bgcolor,
+                fromColor,
+                fromBg,
                 rendered.color,
                 rendered.bgcolor,
                 this.elapsedTime / 1000,

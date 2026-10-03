@@ -482,6 +482,14 @@ export function useFileHandlers({
           }
         })
 
+        // MoveDecorations 能在播放中换图（decorationImage）—— 这类图不会出现在
+        // decorations 数组里（例：Rainbowanderer 的 1-text-2..5.png）。
+        // 漏掉它们 → 换图时找不到图 → 透明兜底 → 表现为"换图后装饰消失"。
+        ;(loadedLevel.actions || []).forEach((ev: any) => {
+          const img = ev?.decorationImage
+          if (typeof img === 'string' && img) decorationImages.add(img)
+        })
+
         console.log('[ZIP] Decoration images needed:', Array.from(decorationImages))
 
         // Load decoration images from ZIP

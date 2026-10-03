@@ -198,6 +198,26 @@ function applyDecoBlendMode(mat: any, mode: DecorationBlendMode): void {
  */
 const NO_TAG_MASK = 'NO TAG';
 
+/**
+ * 遮罩配对按**官方反编译代码**（scrVisualDecoration / SpriteAlphaMaskUtils）：
+ *   - mask.targetTag ∈ 被遮罩装饰的 tag 并集；
+ *   - NO TAG（maskingTarget 为空）的 mask 直接失效；
+ *   - mask 必须可见；`useMaskingDepth` 的区间筛选被遮罩装饰的 depth；
+ *   - 没命中 mask 时：VisibleInsideMask → 全隐，VisibleOutsideMask → 全显。
+ * 关掉则回退到旧的"按 maskingTarget 直接配对 / NO TAG 当真实分组"。
+ */
+const MASKING_OFFICIAL_PAIRING = true;
+
+/** 官方 stencil key：`useMaskingDepth ? `${target}:${front}:${back}` : target`（front/back 取 min/max）。
+ *  target 为空 = 官方 Unity `SpriteMask` 路径：**纯邻近 + 深度区间**分组（tag 不参与）。 */
+function maskRangeKey(target: string, d: { useMaskingDepth?: boolean; maskingFrontDepth?: number; maskingBackDepth?: number }): string {
+    const t = (target || '').trim();
+    if (!d.useMaskingDepth) return t || 'all';
+    const f = Math.min(d.maskingFrontDepth ?? 0, d.maskingBackDepth ?? 0);
+    const b = Math.max(d.maskingFrontDepth ?? 0, d.maskingBackDepth ?? 0);
+    return (t ? t + ':' : '') + f + ':' + b;
+}
+
 export enum DecorationType {
     Image = 'Image',
     Text = 'Text',
@@ -727,29 +747,31 @@ class DecorationInstance {
                 });
                 // DecorationBlendMode → 固定管线可实现的部分（详见 applyDecoBlendMode）
                 applyDecoBlendMode(mat, this.config.blendMode);
-                // maskingTarget 为空时取 "NO TAG"（未打 tag 的那一组），不是"没有遮罩"。
-                // → 空目标等价于 "NO TAG"（即"没有 tag 的装饰"这一组），不是"没有遮罩"。
-                // 遮罩是否命中由 stencil（Mask 装饰写 ref、被遮罩的测 ref）决定：
-                // 若该组里没有 Mask 装饰，测试永远失败 → 整张被裁掉（空 alpha mask 同理）。
-                // stencil ref：按 key（目标名 + 深度范围）顺序分配（对齐 WAD）
+                // 官方遮罩（v15）只在"命中 mask"时才做 alpha 遮罩：
+                //   - 命中 → stencil 测试（Mask 写 ref、Inside 测 Equal、Outside 测 NotEqual）；
+                //   - 没命中 → 不做任何测试：Inside 由 maskVisibilityOk() 整块隐藏，
+                //     Outside 保持原样全显（相当于原图直通）。
                 const stencilRef = this.maskStencilRef();
-                if (this.config.maskingType === MaskingType.Mask) {
+                if (stencilRef > 0 && this.config.maskingType === MaskingType.Mask) {
                     mat.colorWrite = false;
                     mat.depthWrite = false;
                     mat.stencilWrite = true;
                     mat.stencilRef = stencilRef;
                     mat.stencilFunc = AlwaysStencilFunc;
                     mat.stencilZPass = ReplaceStencilOp;
-                } else if (this.config.maskingType === MaskingType.VisibleInsideMask) {
+                } else if (stencilRef > 0 && this.config.maskingType === MaskingType.VisibleInsideMask) {
                     mat.stencilWrite = true;
                     mat.stencilRef = stencilRef;
                     mat.stencilFunc = EqualStencilFunc;
                     mat.stencilZPass = KeepStencilOp;
-                } else if (this.config.maskingType === MaskingType.VisibleOutsideMask) {
+                } else if (stencilRef > 0 && this.config.maskingType === MaskingType.VisibleOutsideMask) {
                     mat.stencilWrite = true;
                     mat.stencilRef = stencilRef;
                     mat.stencilFunc = NotEqualStencilFunc;
                     mat.stencilZPass = KeepStencilOp;
+                } else if (this.config.maskingType === MaskingType.Mask) {
+                    // 官方：NO TAG 的 mask 不遮任何东西；但它自身仍然正常绘制（maskInteraction 0）
+                    mat.stencilWrite = false;
                 }
                 const mesh = new Mesh(new PlaneGeometry(1, 1), mat);
                 mesh.scale.set(this.baseSizeX, this.baseSizeY, 1);
@@ -800,25 +822,47 @@ class DecorationInstance {
      *  The ±0.08 rank span inside each step (updateZRank) never crosses a neighbouring
      *  depth step (gap 0.02). */
     /**
-     * 遮罩 stencil key = 目标名。
+     * 遮罩 stencil key = **深度区间分组**（官方 Unity `SpriteMask` 路径）。
      *
-     * 注意**不能**把"深度范围"拼进来：`useMaskingDepth / maskingFrontDepth /
-     * maskingBackDepth` 是写在**遮罩(Mask)装饰**身上的，而被遮罩的装饰只有
-     * `maskingTarget` —— 拼进范围会让两边 key 不同 → ref 不同 → 遮罩直接对不上，
-     * 所有用 useMaskingDepth 的关卡整体失效。
-     *
-     * 原版的"按深度范围挑选生效的那个遮罩"需要一个 mask 注册表（按 target 收集
-     * 所有 Mask 及其范围，再按被遮罩装饰的 depth 选一个 ref）—— 那是独立一步，
-     * 先把配对修对。
+     * 关键事实（scrVisualDecoration.SetMaskingType 547-568 + SetMaskingDepth 421-455）：
+     *   - 实际遮罩是 Unity 内置 `SpriteMask` + `spriteRenderer.maskInteraction`：
+     *     **按 OBB 邻近生效，与 tag 无关**；`spriteMask.isCustomRangeActive` +
+     *     front/back sorting order 决定"哪些 depth 的目标会被这个 mask 影响"。
+     *   - `maskingTarget`/tag 那套（SpriteAlphaMaskUtils）只在 v15 的 alpha-RT 分支
+     *     （精灵有滤镜 shader 时）才参与，且实测两张谱的 `maskingTarget` 全为空 ——
+     *     所以**不能**把空 target 当成"失效"。
+     *   - 因此同一深度区间里的所有 mask 共用一个 ref，stencil 自然把它们取并集
+     *     （等价官方把多个 mask 的 stencil bit 取 OR / 把多张 mask 合成一张 RT）。
      */
     private maskStencilKey(): string {
-        return (this.config.maskingTarget || NO_TAG_MASK).trim() || NO_TAG_MASK;
+        if (this.config.maskingType === MaskingType.Mask) {
+            return maskRangeKey(this.config.maskingTarget || '', this.config);
+        }
+        return this._manager?.resolveMaskKeyFor?.(this) ?? '';
     }
 
-    /** 该装饰的 stencil ref（0 = 不参与遮罩）。 */
+    /** 该装饰的 stencil ref（0 = 不参与遮罩 / 没有命中任何 mask）。 */
     private maskStencilRef(): number {
         if (this.config.maskingType === MaskingType.None) return 0;
-        return this._manager?.stencilRefFor?.(this.maskStencilKey()) ?? 0;
+        const key = this.maskStencilKey();
+        if (!key) return 0;
+        return this._manager?.stencilRefFor?.(key) ?? 0;
+    }
+
+    /** 官方 activeSelf：mask 必须可见（visible 且 opacity > 0）才生效。 */
+    public isMaskActive(): boolean {
+        return this.config.visible !== false && this.currentOpacity > 0.001;
+    }
+
+    /**
+     * 官方"没命中 mask"的显隐规则（scrVisualDecoration.ApplyAlphaMaskToRT）：
+     *   - `VisibleInsideMask` 且 list.Count == 0 → `rt.Clear()` → **完全不可见**；
+     *   - `VisibleOutsideMask` 且 list.Count == 0 → `Blit(pre → rt)` → **完全可见**。
+     */
+    private maskVisibilityOk(): boolean {
+        if (!MASKING_OFFICIAL_PAIRING) return true;
+        if (this.config.maskingType !== MaskingType.VisibleInsideMask) return true;
+        return this.maskStencilRef() > 0;
     }
 
     /**
@@ -1092,7 +1136,10 @@ class DecorationInstance {
 
     public setCulledVisible(vis: boolean): void {
         this._culledVisible = vis;
-        const effective = vis && (this.config.visible !== false) && this.currentOpacity > 0.001;
+        // 官方遮罩显隐：VisibleInsideMask 没有命中任何 mask 时整块不可见
+        // （ApplyAlphaMaskToRT 在 list.Count==0 时 rt.Clear()）；Outside 则保持可见。
+        const effective = vis && (this.config.visible !== false) && this.currentOpacity > 0.001
+            && this.maskVisibilityOk();
         if (this._instVisible !== effective) {
             this._instVisible = effective;
             this.container.visible = effective;
@@ -1363,7 +1410,10 @@ class DecorationInstance {
         if (typeof mUd === 'boolean' && mUd !== this.config.useMaskingDepth) { this.config.useMaskingDepth = mUd; maskDirty = true; }
         if (typeof mFd === 'number' && mFd !== this.config.maskingFrontDepth) { this.config.maskingFrontDepth = mFd; maskDirty = true; }
         if (typeof mBd === 'number' && mBd !== this.config.maskingBackDepth) { this.config.maskingBackDepth = mBd; maskDirty = true; }
-        if (maskDirty && this._manager) this._manager.applyMaskTo(this);
+        if (maskDirty && this._manager) {
+            this._manager.markMaskRegistryDirty();
+            this._manager.applyMaskTo(this);
+        }
 
         // SetText / SetObject 离散属性
         const txt = sampleAnyDiscrete('text');
@@ -2592,6 +2642,8 @@ export class DecorationManager {
         deco._manager = this;
         this.decorations.set(deco.config.id!, deco);
         this.decoList.push(deco);
+        // 遮罩注册表：新装饰可能是 Mask（或改了 maskingType），下一帧重建
+        this.markMaskRegistryDirty();
         // Keep logical container for position tracking; instanced visuals live on InstancedMesh
         this.container.add(deco.container);
         if (deco.isStaticWorld) {
@@ -2698,6 +2750,56 @@ export class DecorationManager {
         const ref = (this.maskStencilRefs.size % 254) + 1;
         this.maskStencilRefs.set(k, ref);
         return ref;
+    }
+
+    // ── 遮罩注册表（官方 SpriteAlphaMaskUtils.RefreshMaskCache 的等价物） ──
+    /** 当前所有 `maskingType === Mask` 的装饰。 */
+    private _maskDecos: DecorationInstance[] = [];
+    private _maskRegistryDirty = true;
+
+    /** 装饰创建/销毁/改 maskingType 后调用，下一帧解析时重建。 */
+    public markMaskRegistryDirty(): void { this._maskRegistryDirty = true; }
+
+    private ensureMaskRegistry(): void {
+        if (!this._maskRegistryDirty) return;
+        this._maskRegistryDirty = false;
+        this._maskDecos = this.decoList.filter(d => d.config.maskingType === MaskingType.Mask);
+    }
+
+    /**
+     * 被遮罩装饰所属的 mask 组 key —— 官方 Unity `SpriteMask` 语义：
+     * 遍历所有 Mask 装饰，取第一个满足下面条件的：
+     *   - mask 自身可见（官方 `activeSelf`）；
+     *   - mask 的 `useMaskingDepth` 区间（front/back 取 min/max）包含该装饰的 depth
+     *     （官方换算成 sorting order 区间 `frontSortingOrder = -frontDepth+1`、
+     *      `backSortingOrder = -backDepth`，被遮罩精灵按自己的 sorting order 落在区间内才受影响）；
+     *   - 若 mask 填了 `maskingTarget`（v15 alpha-RT 分支），还要它的 tag ∈ 该装饰自己的 tag 列表。
+     * **邻近（OBB 相交）由 stencil 本身保证**：mask 只在自己覆盖到的屏幕区域写入 ref。
+     * 找不到返回 ''（→ ref 0 → 官方语义：Inside 全隐 / Outside 全显）。
+     */
+    public resolveMaskKeyFor(deco: DecorationInstance): string {
+        if (!MASKING_OFFICIAL_PAIRING) {
+            const legacy = (deco.config.maskingTarget || NO_TAG_MASK).trim() || NO_TAG_MASK;
+            return legacy;
+        }
+        const dep = deco.config.depth ?? 0;
+        this.ensureMaskRegistry();
+        for (const m of this._maskDecos) {
+            if (m === deco) continue;
+            if (!m.isMaskActive()) continue;                 // 官方：activeSelf
+            if (m.config.useMaskingDepth) {                  // 官方：sorting order 区间
+                const f = Math.min(m.config.maskingFrontDepth ?? 0, m.config.maskingBackDepth ?? 0);
+                const b = Math.max(m.config.maskingFrontDepth ?? 0, m.config.maskingBackDepth ?? 0);
+                if (dep < f || dep > b) continue;
+            }
+            const target = (m.config.maskingTarget || '').trim();
+            if (target) {                                    // 仅 v15 alpha-RT 分支才按 tag 收窄
+                const tags = (deco.config.tag || '').split(/\s+/).filter(Boolean);
+                if (!tags.includes(target)) continue;
+            }
+            return maskRangeKey(target, m.config);
+        }
+        return '';
     }
 
     /** 是否存在可见、需要背景混合的装饰。 */

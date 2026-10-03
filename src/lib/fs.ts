@@ -276,6 +276,14 @@ function collectDecImages(level: any): Set<string> {
       for (const d of tile.addDecorations) { if (d.decorationImage) s.add(d.decorationImage) }
     }
   }
+
+  // MoveDecorations 能在播放中换图（decorationImage）—— 这类图**不会**出现在
+  // decorations 数组里（例：Rainbowanderer 的 1-text-2..5.png 只被 MoveDecorations 引用）。
+  // 漏掉它们 → 换图时 findImageUrl 落空 → 退到透明兜底 → 装饰表现为"换图后消失"。
+  for (const a of (level.actions || [])) {
+    const img = a?.decorationImage
+    if (typeof img === 'string' && img) s.add(img)
+  }
   return s
 }
 
