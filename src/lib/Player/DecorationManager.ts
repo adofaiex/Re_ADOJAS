@@ -664,7 +664,14 @@ class DecorationInstance {
             ? backdropBlendModeOf(this.config.blendMode)
             : BackdropBlendMode.None;
         if (bdNoTex !== BackdropBlendMode.None) {
-            const map = texture ?? this._manager?.getPlaceholderTexture() ?? null;
+            // 缺贴图时区分两种情况：
+            //   - 装饰**有** decorationImage 但没加载出来（没导入图片 / 加载失败）→ 用**全透明**兜底，
+            //     否则 1×1 白色占位会被 Overlay/SoftLight 铺成一整屏白，把轨道和背景全糊掉
+            //     （Rainy Gate 未加载图片时的"屏幕全白、只剩判定"就是这个）。
+            //   - 装饰本来就没有图（纯色滤镜，官方 uUseMap==0 分支）→ 用白色占位，颜色才出得来。
+            const noImage = !this.config.decorationImage;
+            const transparentTex = (this._manager as any)?.textures?.transparent ?? null;
+            const map = texture ?? (noImage ? this._manager?.getPlaceholderTexture() : transparentTex) ?? null;
             this.backdropMode = bdNoTex;
             const mat = createBackdropBlendMaterial(map as Texture, bdNoTex);
             (mat.uniforms.uColor.value as any).set(
