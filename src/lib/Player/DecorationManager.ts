@@ -202,6 +202,17 @@ const NO_TAG_MASK = 'NO TAG';
 const IMAGE_PREFETCH_AHEAD = 8;
 
 /**
+ * 官方 `ffxMoveDecorationsPlus.Decode` 把 `positionOffset` / `pivotOffset` /
+ * `parallaxOffset` **一律**乘 `tileSize`（第 503/518/521/524 行），与 `relativeTo` 无关；
+ * 而创建时 Camera / CameraAspect 的 `position`/`pivotOffset` 是**不乘** `tileSize` 的
+ * （自定义屏幕单位：`UpdateScreenClamp` 里 /20 × 视口）。
+ * 也就是官方这两处单位本来就不一致（cam 装饰上差 tileSize 倍）。之前我们为了
+ * "让关键帧与创建用同一套系数"给 cam 用了 1，结果与官方差 ≈1.71 倍。
+ * 关掉可回退到旧行为。
+ */
+const OFFICIAL_UNIFORM_TILE_SIZE_OFFSETS = true;
+
+/**
  * 遮罩配对按**官方反编译代码**（scrVisualDecoration / SpriteAlphaMaskUtils）：
  *   - mask.targetTag ∈ 被遮罩装饰的 tag 并集；
  *   - NO TAG（maskingTarget 为空）的 mask 直接失效；
@@ -1774,7 +1785,7 @@ export class DecorationManager {
             // cam 还会 /ts。关键帧必须用同一套系数，否则做位置/支点动画时会整体放大 ts 倍。
             const isCamPlacement = deco.config.relativeTo === DecPlacementType.Camera
                 || deco.config.relativeTo === DecPlacementType.CameraAspect;
-            const offScale = isCamPlacement ? 1 : ts;
+            const offScale = OFFICIAL_UNIFORM_TILE_SIZE_OFFSETS ? ts : (isCamPlacement ? 1 : ts);
             const basePosX = deco.startPos.x;
             const basePosY = deco.startPos.y;
             // Events trigger chronologically at runtime: once a SetPlacementType
