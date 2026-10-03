@@ -198,6 +198,9 @@ function applyDecoBlendMode(mat: any, mode: DecorationBlendMode): void {
  */
 const NO_TAG_MASK = 'NO TAG';
 
+/** 逐帧贴图序列预取：播放头之后提前请求的帧数（逐帧动画按需加载会掉帧）。 */
+const IMAGE_PREFETCH_AHEAD = 8;
+
 /**
  * 遮罩配对按**官方反编译代码**（scrVisualDecoration / SpriteAlphaMaskUtils）：
  *   - mask.targetTag ∈ 被遮罩装饰的 tag 并集；
@@ -1339,6 +1342,8 @@ class DecorationInstance {
                 this._manager.applyImageTo(this, img);
             }
         }
+        // 逐帧贴图序列：提前把后面几帧的贴图预热，避免按需加载导致掉帧
+        if (has('image') && this._manager) this._manager.prefetchImageSequence(this, now);
         const dpt = sampleAnyDiscrete('depth');
         if (typeof dpt === 'number' && dpt !== this.config.depth) {
             this.config.depth = dpt;
@@ -3256,9 +3261,34 @@ export class DecorationManager {
         }
     }
 
+    /**
+     * 逐帧贴图序列预取。官方加载期把装饰图全部进 TextureManager，逐帧播放不掉帧；
+     * 我们是按需加载，6fps 级别的逐帧（如 Rainbowanderer 的 3-1video-0001..0299）
+     * 会因此滞后。这里把播放头之后 IMAGE_PREFETCH_AHEAD 帧的贴图提前请求，
+     * 只预热缓存（空回调），真正的切换仍由 loadDecoTexture 负责。
+     */
+    public prefetchImageSequence(deco: DecorationInstance, now: number): void {
+        if (!this._timelineManager || !deco.config.id) return;
+        const kfs = this._timelineManager.getDiscreteKeyframes(`deco:${deco.config.id}`, 'image');
+        if (!kfs || kfs.length <= 1) return;
+        let idx = -1;
+        for (let i = 0; i < kfs.length; i++) {
+            if (kfs[i].time <= now) idx = i; else break;
+        }
+        const from = Math.max(0, idx);
+        const to = Math.min(kfs.length - 1, idx + IMAGE_PREFETCH_AHEAD);
+        for (let i = from; i <= to; i++) {
+            const fn = String(kfs[i].value ?? '');
+            if (!fn) continue;
+            const key = this.decoTextureKey(deco, fn);
+            if (this.textures.has(key)) continue;
+            const url = this.findImageUrl(fn);
+            if (url) this.textures.request(key, url, () => { /* 仅预热 */ });
+        }
+    }
+
     /** MoveDecorations 可在播放中切换 stencil 角色，需从实例批次迁移到独立 sprite。 */
-    public applyMaskTo(deco: DecorationInstance): void {
-        if (deco.config.decorationType !== DecorationType.Image && deco.config.decorationType !== DecorationType.Text) return;
+    public applyMaskTo(deco: DecorationInstance): void {        if (deco.config.decorationType !== DecorationType.Image && deco.config.decorationType !== DecorationType.Text) return;
         const texture = this.textures.get(this.decoTextureKey(deco, deco.config.decorationImage));
         if (texture) { this.configureTextureRepeat(texture, deco); deco.setupVisual(texture); }
     }

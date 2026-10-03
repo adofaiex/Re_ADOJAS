@@ -658,6 +658,14 @@ export class TimelineManager {
         return !!this.discreteTimelines.get(entity)?.has(property);
     }
 
+    /**
+     * 取某离散通道的全部关键帧（只读）。逐帧贴图序列预取用：
+     * 播放头之后若干帧的贴图要提前请求，否则 6fps 级别的逐帧动画会因按需加载掉帧。
+     */
+    public getDiscreteKeyframes(entity: string, property: string): ReadonlyArray<{ time: number; value: string | boolean | number }> | undefined {
+        return this.discreteTimelines.get(entity)?.get(property);
+    }
+
     public samplePosition(entity: string, time: number): { x: number; y: number } | null {
         const x = this.sample(entity, 'positionX', time);
         const y = this.sample(entity, 'positionY', time);
