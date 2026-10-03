@@ -561,6 +561,16 @@ export class Player implements IPlayer {
             color: this.bloomColor,
         };
     };
+    // 贴图预算查询：__adojasTexBudget() → 本关装饰贴图的最大边长（<2048 说明被降采样，
+    // 高对比剪影的边缘会出现锯齿；锯齿程度随该值变小而变明显）。
+    (window as any).__adojasTexBudget = () => {
+        const store = (this.decorationManager as any)?.textures;
+        return {
+            maxDim: store?.maxDim ?? null,
+            maxAllowed: 2048,
+            note: 'maxDim < 2048 表示贴图被降采样（保显存）。预算常量在 src/lib/Player/DecorationTextures.ts。',
+        };
+    };
     if (opts?.deferDecorations) {
       // 装饰物分帧/异步创建（加载界面显示进度）——见 buildDecorationsAsync()
       this.decorationManager.collectDecoSources();
