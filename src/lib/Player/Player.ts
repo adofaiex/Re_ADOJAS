@@ -3499,8 +3499,17 @@ export class Player implements IPlayer {
       
       // Update background color
       if (event.color !== undefined) {
-          const bgColor = this.formatHexColor(event.color);
-          this.scene.background = new Color(bgColor);
+          // 官方 `backgroundSettings["color"]` 是**带 alpha 的颜色**：8 位色的后两位是
+          // "叠加强度"，不是被忽略的装饰。`ffffff22` = 13% 白叠在旧背景上（几乎是黑的）。
+          // 之前用 formatHexColor 把 alpha 剥掉 → 变成**不透明的纯白**，
+          // 于是 Rainy Gate 在 f73（color=ffffff22）开始整屏白 ✗。
+          const bgHex = this.formatHexColor(event.color);
+          const bgAlpha = parseHexAlpha(event.color);
+          const target = new Color(bgHex);
+          const prev = this.scene.background instanceof Color
+              ? this.scene.background.clone()
+              : new Color(0x000000);
+          this.scene.background = prev.lerp(target, bgAlpha);
       }
       
       // Update custom background image

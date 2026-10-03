@@ -534,6 +534,9 @@ class DecorationInstance {
     // 每帧算出的填充/描边（实例属性）
     public objFill: Color = new Color(1, 1, 1);
     public objStroke: Color = new Color(1, 1, 1);
+    /** Object(Floor) 的 trackColor **alpha**（trackColor 8 位色的后两位）。
+     *  tile 侧走 `trackColorOpacity`；Object(Floor) 之前把它丢掉了（恒为 1）→ 半透明轨道失效。 */
+    public objColorOpacity: number = 1;
     public objColor1: Color = new Color(1, 1, 1);
     public objColor2: Color = new Color(1, 1, 1);
     public objColorType: string = 'Single';
@@ -3321,7 +3324,8 @@ export class DecorationManager {
             matrixWorld: node.matrixWorld,
             fill: deco.objFill,
             stroke: deco.objStroke,
-            opacity: deco.currentOpacity,
+            // 与普通砖一致：装饰自身透明度 × trackColor 的 alpha
+            opacity: deco.currentOpacity * deco.objColorOpacity,
         });
     }
 
@@ -3426,6 +3430,9 @@ export class DecorationManager {
             const rendered = tcm.getTileRenderer(floor, this.currentTime || 0, cfg);
             fill = new Color(parseDecoColor(rendered.color, 'ffffff')[0]);
             stroke = new Color(parseDecoColor(rendered.bgcolor, 'ffffff')[0]);
+            // trackColor 的 alpha（RGBcolor.convert 取的后两位）→ 物体轨道的整体透明度。
+            // 之前这一路被丢掉（固定 trackOpacity: 1），半透明轨道色不生效。
+            deco.objColorOpacity = rendered.opacity;
         }
 
         if (deco.objTpl) {
