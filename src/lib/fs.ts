@@ -270,10 +270,19 @@ function collectDecImages(level: any): Set<string> {
   const rootDec = level.decorations || level.__decorations || []
   for (const d of rootDec) { if (d.decorationImage) s.add(d.decorationImage) }
 
-  const tiles = level.tiles || []
-  for (const tile of tiles) {
-    if (tile.addDecorations) {
-      for (const d of tile.addDecorations) { if (d.decorationImage) s.add(d.decorationImage) }
+  const tiles = level.tiles
+  if (tiles) {
+    if (tiles.decorationsByFloor && typeof tiles.decorationsByFloor.forEach === 'function') {
+      // 紧凑存储：装饰是稀疏 Map（没有逐砖对象）
+      for (const [, decos] of tiles.decorationsByFloor) {
+        for (const d of decos) { if (d.decorationImage) s.add(d.decorationImage) }
+      }
+    } else {
+      for (const tile of tiles) {
+        if (tile.addDecorations) {
+          for (const d of tile.addDecorations) { if (d.decorationImage) s.add(d.decorationImage) }
+        }
+      }
     }
   }
 

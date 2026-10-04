@@ -3,6 +3,7 @@ import {WebGPURenderer} from 'three/webgpu';
 import { IPlayer, ILevelData, IMusic, TargetFramerateType, RenderScaleType, InputMethodType, InputQueue } from './types';
 import { Planet } from './Planet';
 import { HitsoundManager, HitsoundType, TimestampGroup, HitsoundSynthStatus } from './HitsoundManager';
+import { isCompactTiles, tileCount as tileCountOf, tileAngle, tileAngleOr, tileDirection, tileTwirl, tileActions, TilePositions } from './TileAccess';
 import { BloomEffect } from './BloomEffect';
 import { FlashEffect } from './FlashEffect';
 import { BlitPass } from './BackdropBlend';
@@ -57,6 +58,8 @@ export class Player implements IPlayer {
   private showTrail: boolean = false;
   /** 拖尾采样率模式（见 setTrailSampleMode）。 */
   private trailSampleMode: 'fixed' | 'bpm' = 'fixed';
+  /** 逐砖坐标（取代每砖一个 [x, y] 小数组；紧凑模式下是唯一的坐标来源）。 */
+  private readonly tilePositions: TilePositions = new TilePositions(0);
   private targetFramerate: TargetFramerateType = 'auto';
   private renderScale: RenderScaleType = '1.5';
 
@@ -341,7 +344,7 @@ export class Player implements IPlayer {
     this.convertPathDataToTiles();
 
     // Initialize camera from settings
-    this.cameraController = new CameraController(levelData, [], []);
+    this.cameraController = new CameraController(levelData, [], [], this.tilePositions);
     this.cameraController.resetCameraState();
     
     // Initialize tile color manager
@@ -444,7 +447,10 @@ export class Player implements IPlayer {
     // Update levelData.tiles with final positions (including PositionTrack offsets).
     // 紧凑版：结果在 typed array 里，原地写回 tile.position，避免 100 万级 Map/Vector。
     this.positionTrackManager.computeTransforms(this.isEditorMode);
-    this.positionTrackManager.applyPositionsToTiles(this.levelData.tiles);
+    this.positionTrackManager.copyTo(this.tilePositions);
+    if (!isCompactTiles(this.levelData.tiles)) {
+      this.positionTrackManager.applyPositionsToTiles(this.levelData.tiles);
+    }
 
     // Initialize tile colors from settings (now after appendExtraTile)
     this.tileColorManager.initTileColors();
@@ -479,7 +485,7 @@ export class Player implements IPlayer {
     );
 
     // Update camera controller with calculated values
-    this.cameraController = new CameraController(levelData, this.tileStartTimes, this.tileBPM);
+    this.cameraController = new CameraController(levelData, this.tileStartTimes, this.tileBPM, this.tilePositions);
     this.cameraController.resetCameraState();
     
     // Build Camera Timeline from repeat-expanded events
@@ -494,7 +500,8 @@ export class Player implements IPlayer {
       this.scene,
       this.levelData,
       this.tileStartTimes,
-      this.tileBPM
+      this.tileBPM,
+      this.tilePositions
     );
     // Object(Floor) 装饰的颜色类型/脉冲复用主 TileColorManager 的颜色模型
     this.decorationManager.tileColorManager = this.tileColorManager;
@@ -1201,14 +1208,14 @@ export class Player implements IPlayer {
     // 吸收窗口：midspin 前一个砖块的 perfectTime = 球到 midspin 时刻，玩家预判按键可能提前
     // ~100ms（人类反应误差），此时按键仍应判给 midspin。
     const curPerfectTime = (this.tileStartTimes[tileIndex] || 0) + (this.tileDurations[tileIndex] || 0);
-    const nextIsMidspin = tileIndex + 1 < n && (this.levelData.tiles[tileIndex + 1]?.direction === 999);
+    const nextIsMidspin = tileIndex + 1 < n && (tileDirection(this.levelData.tiles, tileIndex + 1) === 999);
     if (nextIsMidspin && timeInLevel >= curPerfectTime - 0.1) {
       tileIndex = tileIndex + 1;
     }
 
     // midspin（direction===999，angleData '!'）：midspinInfiniteMargin——任意时刻按键都命中，
     // 判定显示 Perfect（无限 margin），同时判定 midspin 与其后一个砖块（后者自动完美 Auto，无需再按）。
-    const isMidspin = (this.levelData.tiles[tileIndex]?.direction === 999);
+    const isMidspin = (tileDirection(this.levelData.tiles, tileIndex) === 999);
     if (isMidspin || nextIsMidspin) {
       console.log('[judge][midspin] pressT=', timeInLevel.toFixed(4), 'curIdx=', this.currentTileIndex, 'judgeIdx=', tileIndex, 'curPerfect=', curPerfectTime.toFixed(4), 'nextIsMidspin=', nextIsMidspin);
     }
@@ -1308,7 +1315,7 @@ export class Player implements IPlayer {
 
       if (this.noFail) {
         // midspin：矫正时落在其后一个砖块（+1），该砖块自动完美（Auto）
-        const isMidspin = (this.levelData.tiles[tileIndex]?.direction === 999);
+        const isMidspin = (tileDirection(this.levelData.tiles, tileIndex) === 999);
         if (isMidspin) {
           console.log('[tooLate][midspin] corrected tile', tileIndex, 'at t=', timeInLevel.toFixed(4), 'perfect=', perfectTime.toFixed(4));
         }
@@ -1554,7 +1561,7 @@ export class Player implements IPlayer {
           case 'Rabbit': return 'Speed+';
           case 'DoubleRabbit': return 'Speed+'; // 无 double-rabbit 素材 → 退化为单兔
           case 'Swirl': {
-              const tileAngle = this.levelData.tiles?.[index]?.angle ?? 180;
+              const tileAngle = tileAngleOr(this.levelData.tiles, index, 180);
               const dir = this.tileIsCW[index] ? 1 : -1;
               return getTwirlTexture(tileAngle, dir);
           }
@@ -1568,7 +1575,7 @@ export class Player implements IPlayer {
    * getFloorIconAngle），这样对象装饰上的旋转图标朝向和普通轨道一致。
    */
   public getTileTwirlIconInfo(index: number): { texture: IconType; angle: number } {
-    const tileAngle = this.levelData.tiles?.[index]?.angle ?? 180;
+    const tileAngle = tileAngleOr(this.levelData.tiles, index, 180);
     const dir = this.tileIsCW[index] ? 1 : -1;
     return {
       texture: getTwirlTexture(tileAngle, dir),
@@ -1631,8 +1638,8 @@ export class Player implements IPlayer {
     // Process each tile
     for (let i = 1; i < this.tileStartTimes.length; i++) {
       const t = this.tileStartTimes[i];
-      const tile = this.levelData.tiles[i];
-      if (tile && tile.angle !== 0) {
+      const tileAngleVal = tileAngle(this.levelData.tiles, i);
+      if (i < tileCountOf(this.levelData.tiles) && tileAngleVal !== 0) {
         const override = this.tileHitsounds[i];
         if (override) {
           const key = `${override.type}_${override.volume}`;
@@ -1716,8 +1723,8 @@ export class Player implements IPlayer {
 
     for (let i = 1; i < this.tileStartTimes.length; i++) {
       const t = this.tileStartTimes[i];
-      const tile = this.levelData.tiles[i];
-      if (tile && tile.angle !== 0) {
+      const tileAngleVal = tileAngle(this.levelData.tiles, i);
+      if (i < tileCountOf(this.levelData.tiles) && tileAngleVal !== 0) {
         const override = this.tileHitsounds[i];
         if (override) {
           const key = `${override.type}_${override.volume}`;
@@ -1774,10 +1781,10 @@ export class Player implements IPlayer {
     if (!tiles) return;
     
     const gridSize = this.spatialGridSize;
-    for (let i = 0; i < tiles.length; i++) {
-      const pos = tiles[i].position;
-      const cellX = Math.floor(pos[0] / gridSize);
-      const cellY = Math.floor(pos[1] / gridSize);
+    const n = tileCountOf(tiles);
+    for (let i = 0; i < n; i++) {
+      const cellX = Math.floor(this.tilePositions.getX(i) / gridSize);
+      const cellY = Math.floor(this.tilePositions.getY(i) / gridSize);
       const key = cellX * 100000 + cellY; 
       
       let list = this.spatialGrid.get(key);
@@ -1791,18 +1798,15 @@ export class Player implements IPlayer {
   
   private appendExtraTile(): void {
     const tiles = this.levelData.tiles;
-    if (!tiles || tiles.length === 0) return;
+    const n0 = tiles ? tiles.length : 0;
+    if (n0 === 0) return;
 
-    const lastTile = tiles[tiles.length - 1];
-    
     // Determine length from last segment if possible
-    let length = 1.0; 
-    if (tiles.length > 1) {
-       for (let i = tiles.length - 1; i > 0; i--) {
-           const cur = tiles[i];
-           const prev = tiles[i-1];
-           const dx = cur.position[0] - prev.position[0];
-           const dy = cur.position[1] - prev.position[1];
+    let length = 1.0;
+    if (n0 > 1) {
+       for (let i = n0 - 1; i > 0; i--) {
+           const dx = this.tilePositions.getX(i) - this.tilePositions.getX(i - 1);
+           const dy = this.tilePositions.getY(i) - this.tilePositions.getY(i - 1);
            const dist = Math.sqrt(dx*dx + dy*dy);
            if (dist > 0.01) {
                length = dist;
@@ -1810,22 +1814,26 @@ export class Player implements IPlayer {
            }
        }
     }
-    
+
     // Direction (absolute angle in degrees)
-    const direction = lastTile.direction !== undefined ? lastTile.direction : 0;
+    const direction = tileDirection(tiles, n0 - 1);
     const rad = (direction * Math.PI) / 180;
-    const newX = lastTile.position[0] + Math.cos(rad) * length;
-    const newY = lastTile.position[1] + Math.sin(rad) * length;
-    
-    const newTile = {
-        ...lastTile,
-        position: [newX, newY],
-        angle: 180,
-        direction: direction,
-        index: tiles.length
-    };
-    
-    tiles.push(newTile);
+    const newX = this.tilePositions.getX(n0 - 1) + Math.cos(rad) * length;
+    const newY = this.tilePositions.getY(n0 - 1) + Math.sin(rad) * length;
+
+    if (isCompactTiles(tiles)) {
+        tiles.appendTile(direction, 180, direction, tileTwirl(tiles, n0 - 1));
+    } else {
+        const lastTile = tiles[n0 - 1];
+        tiles.push({
+            ...lastTile,
+            position: [newX, newY],
+            angle: 180,
+            direction: direction,
+            index: n0
+        });
+    }
+    this.tilePositions.set(n0, newX, newY);
   }
 
   private calculateCumulativeRotations(): void {
@@ -1905,32 +1913,35 @@ export class Player implements IPlayer {
         this.tileIsCW[i] = isCW ? 1 : 0;
         this.tileBPM[i] = currentBPM;
         
-        const pivot = tiles[i];
-        const next = tiles[i + 1];
+        const pivotX = this.tilePositions.getX(i);
+        const pivotY = this.tilePositions.getY(i);
+        const nextX = this.tilePositions.getX(i + 1);
+        const nextY = this.tilePositions.getY(i + 1);
 
         let startAngle = 0;
         if (i === 0) {
             startAngle = ((this.levelData.settings.rotation || 0) + 180) * Math.PI / 180;
         } else {
-            const prev = tiles[i - 1];
-            startAngle = Math.atan2(prev.position[1] - pivot.position[1], prev.position[0] - pivot.position[0]);
+            const prevX = this.tilePositions.getX(i - 1);
+            const prevY = this.tilePositions.getY(i - 1);
+            startAngle = Math.atan2(prevY - pivotY, prevX - pivotX);
         }
 
         // tile0：floor0.angleLength = (countdownTicks-1)×π + GetAngleMoved(270°, exitangle, cw)
         // exitangle = (90 - angle)°，GetAngleMoved = (180 + angle) mod 360（mpe: angle=180 → 0°）。
         // 倒计时自转 (countdownTicks-1)×180° 并入：progress<0 球反向转，[0,1] 走完自转+弧到 tile1。
         // midspin（direction===999）：angleLength = 0（即时砖块，无弧）。
-        const isMidspinTile = pivot.direction === 999;
+        const isMidspinTile = tileDirection(tiles, i) === 999;
         let totalAngle: number;
         if (i === 0) {
             const cdTicks = this.levelData.settings.countdownTicks || 4;
-            const angleDeg = (pivot.angle !== undefined) ? pivot.angle : 180;
+            const angleDeg = tileAngleOr(tiles, i, 180);
             const movedDeg = ((180 + angleDeg) % 360 + 360) % 360;
             totalAngle = ((cdTicks - 1) * 180 + movedDeg) * Math.PI / 180;
         } else if (isMidspinTile) {
             totalAngle = 0;
         } else {
-            const relativeAngle = (pivot.angle !== undefined) ? pivot.angle : 180;
+            const relativeAngle = tileAngleOr(tiles, i, 180);
             totalAngle = (relativeAngle * Math.PI) / 180;
         }
         if (isCW) totalAngle = -totalAngle;
@@ -1949,15 +1960,16 @@ export class Player implements IPlayer {
         
         let startDist = 1.0;
         if (i > 0) {
-            const prev = tiles[i - 1];
-            const pdx = prev.position[0] - pivot.position[0];
-            const pdy = prev.position[1] - pivot.position[1];
+            const prevX = this.tilePositions.getX(i - 1);
+            const prevY = this.tilePositions.getY(i - 1);
+            const pdx = prevX - pivotX;
+            const pdy = prevY - pivotY;
             startDist = Math.sqrt(pdx*pdx + pdy*pdy);
         }
         this.tileStartDist[i] = startDist;
         
-        const edx = next.position[0] - pivot.position[0];
-        const edy = next.position[1] - pivot.position[1];
+        const edx = nextX - pivotX;
+        const edy = nextY - pivotY;
         this.tileEndDist[i] = Math.sqrt(edx*edx + edy*edy);
 
         this.cumulativeRotations[i+1] = totalRotation;
@@ -2512,9 +2524,8 @@ export class Player implements IPlayer {
   }
 
   private moveCameraToTile(index: number): void {
-    const tile = this.levelData.tiles?.[index];
-    if (!tile?.position) return;
-    this._targetCamPos = new Vector3(tile.position[0], tile.position[1], 0);
+    if (index < 0 || index >= tileCountOf(this.levelData.tiles)) return;
+    this._targetCamPos = new Vector3(this.tilePositions.getX(index), this.tilePositions.getY(index), 0);
   }
 
   private onWheel(event: WheelEvent): void {
@@ -3959,18 +3970,18 @@ export class Player implements IPlayer {
       // During paused seek, update pivot (planet position) before camera seek
       if (this.isPaused) {
         const seekIdx = this.getTileIndexAtTime(this.elapsedTime);
-        const seekTile = this.levelData.tiles?.[seekIdx];
-        console.log('[seekTo] pause planet', { seekIdx, pos: seekTile?.position, elapsed: this.elapsedTime });
-        if (seekTile?.position) {
+        const px = this.tilePositions.getX(seekIdx);
+        const py = this.tilePositions.getY(seekIdx);
+        console.log('[seekTo] pause planet', { seekIdx, pos: [px, py], elapsed: this.elapsedTime });
+        {
           this.currentTileIndex = seekIdx;
-          this.currentPivotPosition.x = seekTile.position[0];
-          this.currentPivotPosition.y = seekTile.position[1];
+          this.currentPivotPosition.x = px;
+          this.currentPivotPosition.y = py;
           if (this.planetRed) {
-            this.planetRed.position.set(seekTile.position[0], seekTile.position[1], 1.0);
-            console.log('[seekTo] planetRed moved to', seekTile.position);
+            this.planetRed.position.set(px, py, 1.0);
           }
           if (this.planetBlue) {
-            this.planetBlue.position.set(seekTile.position[0], seekTile.position[1], 1.0);
+            this.planetBlue.position.set(px, py, 1.0);
           }
           // Reset trail history to prevent stale trail positions
           this.resetTrailHistory();
@@ -3982,10 +3993,7 @@ export class Player implements IPlayer {
         ? this.currentPivotPosition
         : (() => {
             const seekIdx = this.getTileIndexAtTime(this.elapsedTime);
-            const seekTile = this.levelData.tiles?.[seekIdx];
-            return seekTile?.position
-              ? { x: seekTile.position[0], y: seekTile.position[1] }
-              : this.currentPivotPosition;
+            return { x: this.tilePositions.getX(seekIdx), y: this.tilePositions.getY(seekIdx) };
           })();
       const seekTileIdx = this.getTileIndexAtTime(this.elapsedTime);
       this.cameraController.seek(timeInLevel, seekPivot, seekTileIdx, this.songPitch);
@@ -4044,11 +4052,8 @@ export class Player implements IPlayer {
   private applyBaseStateToAllTiles(): void {
     for (const [tileId, mesh] of this.tiles) {
       const idx = parseInt(tileId, 10);
-      const tile = this.levelData.tiles[idx];
-      if (!tile) continue;
-      const pos = tile.position;
-      mesh.position.x = pos[0];
-      mesh.position.y = pos[1];
+      mesh.position.x = this.tilePositions.getX(idx);
+      mesh.position.y = this.tilePositions.getY(idx);
       mesh.rotation.z = 0;
       mesh.scale.set(1, 1, 1);
       mesh.userData.opacity = 1;
@@ -4181,7 +4186,7 @@ export class Player implements IPlayer {
                 const prevResolved = i > 0 ? this.getResolvedTileDirection(i - 1) : 0;
                 const pred = i > 0 ? (prevResolved || 0) - 180 : -180;
                 const currentDirection = resolved || 0;
-                const is999 = this.levelData.tiles[i]?.direction === 999;
+                const is999 = tileDirection(this.levelData.tiles, i) === 999;
                 const newShapeKey = `${pred}_${currentDirection}_${is999}_${newTrackStyle}`;
 
                 this.instancedMeshManager.updateTile(
@@ -4419,13 +4424,9 @@ export class Player implements IPlayer {
     this.planetRed.render(this.scene);
     this.planetBlue.render(this.scene);
     
-    if (this.levelData.tiles && this.levelData.tiles.length > 1) {
-      const t0 = this.levelData.tiles[0];
-      const t1 = this.levelData.tiles[1];
-      if (t0 && t1) {
-        this.planetRed.position.set(t0.position[0], t0.position[1], 1.0);
-        this.planetBlue.position.set(t1.position[0], t1.position[1], 1.0);
-      }
+    if (tileCountOf(this.levelData.tiles) > 1) {
+      this.planetRed.position.set(this.tilePositions.getX(0), this.tilePositions.getY(0), 1.0);
+      this.planetBlue.position.set(this.tilePositions.getX(1), this.tilePositions.getY(1), 1.0);
     }
   }
 
@@ -4438,7 +4439,7 @@ export class Player implements IPlayer {
   private computePositionsAtTime(timeInLevel: number, idx: number,
     redOut: Float64Array, blueOut: Float64Array, offset: number): void {
     const tiles = this.levelData.tiles;
-    const n = tiles.length;
+    const n = tileCountOf(tiles);
 
     let tileIndex = idx;
     if (tileIndex < 0) tileIndex = 0;
@@ -4452,18 +4453,18 @@ export class Player implements IPlayer {
         const p = this.moveTrackManager.getTilePositionAtTime(ti, t);
         if (p) return p;
       }
-      return { x: tiles[ti].position[0], y: tiles[ti].position[1] };
+      return { x: this.tilePositions.getX(ti), y: this.tilePositions.getY(ti) };
     };
 
     if (tileIndex >= n - 1) {
       // 末尾砖：与实况一致 —— pivot 停在基准砖心，移动球自由自转
       const lastIndex = n - 1;
-      const lastP = tiles[lastIndex];
-      px = lastP.position[0]; py = lastP.position[1];
+      px = this.tilePositions.getX(lastIndex); py = this.tilePositions.getY(lastIndex);
 
       if (lastIndex > 0) {
-        const prev = tiles[lastIndex - 1];
-        const startAngle = Math.atan2(prev.position[1] - py, prev.position[0] - px);
+        const prevX = this.tilePositions.getX(lastIndex - 1);
+        const prevY = this.tilePositions.getY(lastIndex - 1);
+        const startAngle = Math.atan2(prevY - py, prevX - px);
         const extraTime = timeInLevel - (this.tileStartTimes[lastIndex] || 0);
         const bpm = this.tileBPM[lastIndex] || 100;
         const totalAngle = extraTime * (bpm / 60) * Math.PI;
@@ -4481,8 +4482,8 @@ export class Player implements IPlayer {
         const p = tilePosAt(tileIndex, timeInLevel);
         px = p.x; py = p.y;
       } else {
-        px = tiles[tileIndex].position[0];
-        py = tiles[tileIndex].position[1];
+        px = this.tilePositions.getX(tileIndex);
+        py = this.tilePositions.getY(tileIndex);
       }
 
       const st = this.tileStartTimes[tileIndex];
@@ -4881,10 +4882,11 @@ export class Player implements IPlayer {
     const id = index.toString();
     if (this.tiles.has(id)) return this.tiles.get(id)!;
 
-    const tile = this.levelData.tiles[index];
-    if (!tile) return null;
+    const tiles = this.levelData.tiles;
+    if (index < 0 || index >= tileCountOf(tiles)) return null;
     
-    const [x, y] = tile.position;
+    const x = this.tilePositions.getX(index);
+    const y = this.tilePositions.getY(index);
     
     // Resolve absolute directions for mesh geometry.
     // tile.direction contains raw angleData values (0, 999, etc.)
@@ -4896,7 +4898,7 @@ export class Player implements IPlayer {
     // pred = incoming segment direction (prev tile's resolved direction - 180)
     const pred = index > 0 ? (prevResolved || 0) - 180 : -180;
     const currentDirection = resolved || 0;
-    const is999 = (tile.direction === 999);
+    const is999 = (tileDirection(this.levelData.tiles, index) === 999);
     
     // Get track style from tile color config
     const tileConfig = this.tileColorManager.getTileRecolorConfig(index);
@@ -5056,7 +5058,7 @@ export class Player implements IPlayer {
     } else if (index === tileCount - 1) {
         iconTypeIdx = getIconTypeIndex('End');
     } else if (hasTwirl) {
-        const tileAngle = this.levelData.tiles?.[index]?.angle ?? 180;
+        const tileAngle = tileAngleOr(this.levelData.tiles, index, 180);
         const dir = this.tileIsCW[index] ? 1 : -1;
         iconTypeIdx = getIconTypeIndex(getTwirlTexture(tileAngle, dir));
     } else if (hasSetSpeed) {
@@ -5162,25 +5164,26 @@ export class Player implements IPlayer {
     const tileIndex = this.currentTileIndex;
     
     // Check if we are past the last tile (Infinite Rotation)
-    if (tileIndex >= this.levelData.tiles.length - 1) {
-        const lastIndex = this.levelData.tiles.length - 1;
-        const lastTile = this.levelData.tiles[lastIndex];
-        
-        if (lastTile) {
+    if (tileIndex >= tileCountOf(this.levelData.tiles) - 1) {
+        const lastIndex = tileCountOf(this.levelData.tiles) - 1;
+
+        {
              const isRedPivot = (lastIndex % 2 === 0);
              const pivotPlanet = isRedPivot ? this.planetRed : this.planetBlue;
              const movingPlanet = isRedPivot ? this.planetBlue : this.planetRed;
              
-             const pivotPos = lastTile.position;
-             this.currentPivotPosition.x = pivotPos[0];
-             this.currentPivotPosition.y = pivotPos[1];
-             pivotPlanet.position.set(pivotPos[0], pivotPos[1], 1.0);
+             const pivotX = this.tilePositions.getX(lastIndex);
+             const pivotY = this.tilePositions.getY(lastIndex);
+             this.currentPivotPosition.x = pivotX;
+             this.currentPivotPosition.y = pivotY;
+             pivotPlanet.position.set(pivotX, pivotY, 1.0);
              
              let startAngle = 0;
              if (lastIndex > 0) {
-                 const prevTile = this.levelData.tiles[lastIndex - 1];
-                 const pdx = prevTile.position[0] - pivotPos[0];
-                 const pdy = prevTile.position[1] - pivotPos[1];
+                 const prevX = this.tilePositions.getX(lastIndex - 1);
+                 const prevY = this.tilePositions.getY(lastIndex - 1);
+                 const pdx = prevX - pivotX;
+                 const pdy = prevY - pivotY;
                  startAngle = Math.atan2(pdy, pdx);
              }
              
@@ -5195,8 +5198,8 @@ export class Player implements IPlayer {
              
              const dist = 1.0;
              movingPlanet.position.set(
-                 pivotPos[0] + Math.cos(currentAngle) * dist,
-                 pivotPos[1] + Math.sin(currentAngle) * dist,
+                 pivotX + Math.cos(currentAngle) * dist,
+                 pivotY + Math.sin(currentAngle) * dist,
                  1.0
              );
              
@@ -5209,9 +5212,7 @@ export class Player implements IPlayer {
     }
 
     // Normal Rotation Logic
-    const pivot = this.levelData.tiles[tileIndex];
-
-    if (pivot) {
+    if (tileIndex >= 0 && tileIndex < tileCountOf(this.levelData.tiles)) {
         const isRedPivot = (tileIndex % 2 === 0);
         const pivotPlanet = isRedPivot ? this.planetRed : this.planetBlue;
         const movingPlanet = isRedPivot ? this.planetBlue : this.planetRed;
@@ -5221,7 +5222,6 @@ export class Player implements IPlayer {
         // If stickToFloors is true, use actual mesh position (planet follows tile movement)
         const tileId = tileIndex.toString();
         const tileMesh = this.tiles.get(tileId);
-        const tileData = this.levelData.tiles[tileIndex];
         const useStickToFloor = this.tileStickToFloors[tileIndex] !== 0;
         
         let pivotPos: Vector3;
@@ -5230,7 +5230,7 @@ export class Player implements IPlayer {
             pivotPos = tileMesh.position.clone();
         } else {
             // Use original tile position (planet doesn't follow tile movement)
-            pivotPos = new Vector3(tileData.position[0], tileData.position[1], tileMesh ? tileMesh.position.z : 0);
+            pivotPos = new Vector3(this.tilePositions.getX(tileIndex), this.tilePositions.getY(tileIndex), tileMesh ? tileMesh.position.z : 0);
         }
 
         this.currentPivotPosition.x = pivotPos.x;
@@ -5252,7 +5252,7 @@ export class Player implements IPlayer {
 
         if (useStickToFloor) {
             const prevMesh = tileIndex > 0 ? this.tiles.get((tileIndex - 1).toString()) : null;
-            const nextMesh = tileIndex + 1 < this.levelData.tiles.length
+            const nextMesh = tileIndex + 1 < tileCountOf(this.levelData.tiles)
                 ? this.tiles.get((tileIndex + 1).toString()) : null;
 
             if (prevMesh && tileIndex > 0) {
@@ -5673,24 +5673,26 @@ export class Player implements IPlayer {
   private calculateBasicTilePositions(): void {
     const tiles = this.levelData.tiles;
     const angleData = this.levelData.angleData || [];
-    
+    const n = tiles ? tiles.length : 0;
+    this.tilePositions.ensure(n);
+    const compactTiles = isCompactTiles(tiles);
+
     // Start from (0, 0)
     let currentPos = new Vector2(0, 0);
-    
+
     // Pre-calculate all angles
-    const floats = new Array(tiles.length);
-    for (let i = 0; i < tiles.length; i++) {
+    const floats = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
       floats[i] = angleData[i] === 999 ? (floats[i - 1] || 0) + 180 : angleData[i];
     }
-    
+
     // Calculate positions
-    for (let i = 0; i < tiles.length; i++) {
+    for (let i = 0; i < n; i++) {
       const angle = floats[i];
-      
-      // Save current position for this tile
-      tiles[i].position = [currentPos.x, currentPos.y];
-      
-      // Calculate next position based on angle
+      this.tilePositions.x[i] = currentPos.x;
+      this.tilePositions.y[i] = currentPos.y;
+      // 对象模式：同时保留 tile.position（其余读取点仍在迁移中）
+      if (!compactTiles && tiles[i]) tiles[i].position = [currentPos.x, currentPos.y];
       const rad = angle * Math.PI / 180;
       currentPos.x += Math.cos(rad);
       currentPos.y += Math.sin(rad);

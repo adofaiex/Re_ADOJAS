@@ -1,5 +1,6 @@
 import { EasingFunctions } from './Easing';
 import { isEventActive, isFieldEnabled } from './EventUtils';
+import type { TilePositions } from './TileAccess';
 
 // ──── 类型定义 ──────────────────────────────────────────────────────────────
 
@@ -25,9 +26,9 @@ function parseMovementType(raw: any): CamMovementType | undefined {
     return undefined;
 }
 
-function getTilePosition(levelData: any, floorIndex: number): { x: number; y: number } {
-    const tile = levelData?.tiles?.[floorIndex];
-    return tile?.position ? { x: tile.position[0], y: tile.position[1] } : { x: 0, y: 0 };
+function getTilePosition(positions: TilePositions | null, floorIndex: number): { x: number; y: number } {
+    if (!positions) return { x: 0, y: 0 };
+    return { x: positions.getX(floorIndex), y: positions.getY(floorIndex) };
 }
 
 function clamp01(v: number): number {
@@ -132,8 +133,11 @@ export class CameraController {
     private levelData: any;
     private tileStartTimes: ArrayLike<number>;
     private tileBPM: ArrayLike<number>;
+    /** 逐砖坐标（紧凑模式唯一位置来源；对象模式同样由 Player 传入）。 */
+    private positions: TilePositions | null = null;
 
-    constructor(levelData: any, tileStartTimes: ArrayLike<number>, tileBPM: ArrayLike<number>) {
+    constructor(levelData: any, tileStartTimes: ArrayLike<number>, tileBPM: ArrayLike<number>, positions?: TilePositions) {
+        this.positions = positions ?? null;
         this.levelData = levelData;
         this.tileStartTimes = tileStartTimes;
         this.tileBPM = tileBPM;
@@ -258,7 +262,7 @@ export class CameraController {
             synthetic,
             0,
             0,
-            getTilePosition(this.levelData, 0),
+            getTilePosition(this.positions, 0),
             { x: 0, y: 0 },
             this.tileBPM?.[0] || 100,
             1,
@@ -296,7 +300,7 @@ export class CameraController {
                 entry.event,
                 floor,
                 entry.time,
-                getTilePosition(this.levelData, floor),
+                getTilePosition(this.positions, floor),
                 planetWorldPos,
                 this.tileBPM?.[floor] || 100,
                 pitch,
@@ -347,7 +351,7 @@ export class CameraController {
                 entry.event,
                 floor,
                 entry.time,
-                getTilePosition(this.levelData, floor),
+                getTilePosition(this.positions, floor),
                 planetWorldPos,
                 this.tileBPM?.[floor] || bpm,
                 pitch,

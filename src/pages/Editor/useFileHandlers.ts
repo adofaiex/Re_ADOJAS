@@ -15,6 +15,13 @@ type ParseProgressEvent = Structure.ParseProgressEvent;
 const StringParser = Parsers.StringParser
 const parser = new StringParser()
 
+/**
+ * 砖数超过该阈值时，上游库自动切换紧凑砖块存储（CompactTileStore）：
+ * 百万砖谱面从"每砖一个对象"（数 GB）变为 typed array + 稀疏事件（数百 MB）。
+ * 普通谱面仍走对象模式，行为不变。
+ */
+const COMPACT_TILES_THRESHOLD = 200_000
+
 // 大文件阈值 - V8 字符串限制约为 512MB，我们设置安全阈值
 const LARGE_FILE_THRESHOLD = 400 * 1024 * 1024 // 400MB
 
@@ -138,7 +145,7 @@ export function useFileHandlers({
       })
 
       // 使用解析后的数据创建 Level
-      const level = new ADOFAI.Level(parsedData, undefined)
+      const level = new ADOFAI.Level(parsedData, undefined, { compactTiles: COMPACT_TILES_THRESHOLD })
 
       // 监听进度事件
       level.on("parse:progress", (progressEvent: ParseProgressEvent): void => {
@@ -178,7 +185,7 @@ export function useFileHandlers({
 
   // Synchronous loading (blocks UI) - for small files
   const loadSync = (content: string): void => {
-    const level = new ADOFAI.Level(content, parser)
+    const level = new ADOFAI.Level(content, parser, { compactTiles: COMPACT_TILES_THRESHOLD })
 
     // 监听进度事件
     level.on("parse:progress", (progressEvent: ParseProgressEvent): void => {
@@ -239,7 +246,7 @@ export function useFileHandlers({
 
   // Asynchronous loading (non-blocking)
   const loadAsync = async (content: string): Promise<void> => {
-    const level = new ADOFAI.Level(content, parser)
+    const level = new ADOFAI.Level(content, parser, { compactTiles: COMPACT_TILES_THRESHOLD })
 
     // 监听进度事件
     level.on("parse:progress", (progressEvent: ParseProgressEvent): void => {
@@ -330,7 +337,7 @@ export function useFileHandlers({
       }
 
       // Parse the level
-      const level = new ADOFAI.Level(adofaiContent, parser)
+      const level = new ADOFAI.Level(adofaiContent, parser, { compactTiles: COMPACT_TILES_THRESHOLD })
 
       level.on("parse:progress", (progressEvent: ParseProgressEvent): void => {
         setLoadingProgress(10 + Math.round(progressEvent.percent * 0.5))
@@ -399,16 +406,27 @@ export function useFileHandlers({
         })
 
         // Check tile decorations
-        const tiles = loadedLevel.tiles || []
-        tiles.forEach((tile: any) => {
-          if (tile.addDecorations) {
-            tile.addDecorations.forEach((dec: any) => {
-              if (dec.decorationImage) {
-                decorationImages.add(dec.decorationImage)
+        const tiles = loadedLevel.tiles
+        if (tiles) {
+          if (tiles.decorationsByFloor && typeof tiles.decorationsByFloor.forEach === 'function') {
+            // 紧凑存储：装饰稀疏 Map
+            for (const [, decos] of tiles.decorationsByFloor) {
+              for (const dec of decos) {
+                if (dec.decorationImage) decorationImages.add(dec.decorationImage)
+              }
+            }
+          } else {
+            tiles.forEach((tile: any) => {
+              if (tile.addDecorations) {
+                tile.addDecorations.forEach((dec: any) => {
+                  if (dec.decorationImage) {
+                    decorationImages.add(dec.decorationImage)
+                  }
+                })
               }
             })
           }
-        })
+        }
 
         // MoveDecorations 能在播放中换图（decorationImage）—— 这类图不会出现在
         // decorations 数组里（例：Rainbowanderer 的 1-text-2..5.png）。

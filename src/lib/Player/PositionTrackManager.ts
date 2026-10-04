@@ -300,6 +300,18 @@ export class PositionTrackManager {
         if (!this.computed) this.computeTransforms(false);
     }
 
+    /** 把最终坐标拷贝到外部位置存储（紧凑模式用；不建对象）。 */
+    public copyTo(pos: { x: Float64Array; y: Float64Array }): void {
+        this.ensureComputed();
+        const wx = this.workX, wy = this.workY;
+        if (!wx || !wy) return;
+        const n = Math.min(pos.x.length, wx.length);
+        for (let i = 0; i < n; i++) {
+            pos.x[i] = wx[i];
+            pos.y[i] = wy[i];
+        }
+    }
+
     /** 把最终位置写回 tiles[i].position（存在数组则原地写，避免再造 100 万个数组）。 */
     public applyPositionsToTiles(tiles: any[]): void {
         this.ensureComputed();

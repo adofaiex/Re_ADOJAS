@@ -4,6 +4,7 @@ import createTrackMesh, { DECO_SIZE_SCALE, DECO_POSITION_SCALE } from '../Geo/me
 import { isEventActive, isEnabled } from './EventUtils';
 import { getIconTexture, getIconTextureForCustomFloor, createIconSprite, getPlanetTexture, planetPresetColor, configurePlanetTexture, applyPlanetFrame } from './IconLoader';
 import type { IconType } from './IconLoader';
+import type { TilePositions } from './TileAccess';
 import { debugLog } from './DebugLog';
 import { DecorationInstancedRenderer, DecoInstanceSlot } from './DecorationInstancedRenderer';
 import { ParticleDecorationSystem } from './ParticleDecoration';
@@ -1589,6 +1590,8 @@ export class DecorationManager {
     private levelData: any;
     private tileStartTimes: ArrayLike<number>;
     private tileBPM: ArrayLike<number>;
+    /** 逐砖坐标（紧凑模式下 tile.position 不存在）。 */
+    private tilePositions: TilePositions | null = null;
     private decorations: Map<string, DecorationInstance> = new Map();
     private decoList: DecorationInstance[] = [];
     /**
@@ -1673,7 +1676,8 @@ export class DecorationManager {
         if (need > this._staticQueryPad) this._staticQueryPad = need;
     }
 
-    constructor(scene: Scene, levelData: any, tileStartTimes: ArrayLike<number>, tileBPM: ArrayLike<number>) {
+    constructor(scene: Scene, levelData: any, tileStartTimes: ArrayLike<number>, tileBPM: ArrayLike<number>, positions?: TilePositions) {
+        this.tilePositions = positions ?? null;
         this.scene = scene;
         this.levelData = levelData;
         this.tileStartTimes = tileStartTimes;
@@ -1707,17 +1711,28 @@ export class DecorationManager {
         this._decoSources = [];
         this._materializeIndex = 0;
         const rootDecos = this.levelData.decorations || (this.levelData as any).__decorations || [];
-        const tiles = this.levelData.tiles || [];
+        const tiles = this.levelData.tiles;
 
         for (const dec of rootDecos) {
             if (DecorationManager.isDecoEvent(dec)) this._decoSources.push(dec);
         }
-        for (const tile of tiles) {
-            if (tile.addDecorations) {
-                const floor = tile.seqID ?? tiles.indexOf(tile);
-                for (const dec of tile.addDecorations) {
+        if (tiles && (tiles as any).decorationsByFloor && typeof (tiles as any).decorationsByFloor.forEach === 'function') {
+            // 紧凑存储：装饰是稀疏 Map（逐砖对象不存在）
+            for (const [floor, decos] of (tiles as any).decorationsByFloor as Map<number, any[]>) {
+                for (const dec of decos) {
                     if (DecorationManager.isDecoEvent(dec)) {
                         this._decoSources.push({ ...dec, floor: dec.floor ?? floor });
+                    }
+                }
+            }
+        } else {
+            for (const tile of (tiles as any[])) {
+                if (tile.addDecorations) {
+                    const floor = tile.seqID ?? (tiles as any[]).indexOf(tile);
+                    for (const dec of tile.addDecorations) {
+                        if (DecorationManager.isDecoEvent(dec)) {
+                            this._decoSources.push({ ...dec, floor: dec.floor ?? floor });
+                        }
                     }
                 }
             }
@@ -2123,14 +2138,13 @@ export class DecorationManager {
     }
 
     private computeStartPos(position: [number, number], relativeTo: DecPlacementType, floor?: number, liveTile?: { x: number; y: number } | null): Vector2 {
-        const tiles = this.levelData.tiles;
         const ts = this.tileSize;
         let pos = new Vector2(position[0] * ts, position[1] * ts);
         if (relativeTo === DecPlacementType.Tile && floor !== undefined) {
             // SetPlacementType 用 listFloors[floor].transform.position（运行期，含
             // MoveTrack/PositionTrack），不是关卡静态 position —— 有 liveTile 就用它。
             const tp = liveTile
-                ?? (tiles?.[floor]?.position ? { x: tiles[floor].position[0], y: tiles[floor].position[1] } : null);
+                ?? (this.tilePositions ? { x: this.tilePositions.getX(floor), y: this.tilePositions.getY(floor) } : null);
             if (tp) { pos.x += tp.x; pos.y += tp.y; }
         } else if (relativeTo === DecPlacementType.Camera || relativeTo === DecPlacementType.CameraAspect) {
             pos.x /= ts; pos.y /= ts;
@@ -3526,11 +3540,11 @@ export class DecorationManager {
             sprite.position.set(0, 0, 0.005);
             if (texType === 'TwirlB1') {
                 const floorIdx = deco.config.floor;
-                const tiles = this.levelData.tiles;
-                if (floorIdx !== undefined && tiles && floorIdx < tiles.length - 1) {
-                    const p = tiles[floorIdx];
-                    const n = tiles[floorIdx + 1];
-                    const exitAngle = Math.atan2(n.position[1] - p.position[1], n.position[0] - p.position[0]);
+                if (floorIdx !== undefined && this.tilePositions && floorIdx < this.tilePositions.x.length - 1) {
+                    const exitAngle = Math.atan2(
+                        this.tilePositions.getY(floorIdx + 1) - this.tilePositions.getY(floorIdx),
+                        this.tilePositions.getX(floorIdx + 1) - this.tilePositions.getX(floorIdx)
+                    );
                     (sprite.material as SpriteMaterial).rotation = exitAngle - Math.PI / 3;
                 }
             }
