@@ -582,6 +582,42 @@ export class Player implements IPlayer {
     // Flash 探针：__adojasFlash() → 两条 plane（FG/BG）的过渡状态与材质实际色/透明度。
     // 判定"屏幕全白"：看 bg.active/材料 opacity 是否停在起始的 100% 白。
     (window as any).__adojasFlash = () => this.flashEffect?.debugSnapshot?.() ?? null;
+    // 性能/泄漏探针：__adojasPerf() → 各阶段耗时（每秒平均）+ 场景/资源计数。
+    // 用法：刚开局跑一次，掉帧后再跑一次；**持续增长**的那个计数就是"越来越卡"的元凶。
+    (window as any).__adojasPerf = () => {
+        const n = this._perfSamples || 1;
+        const perf: Record<string, number> = {};
+        for (const k of Object.keys(this._perf)) perf[k] = +(this._perf[k] / n).toFixed(2);
+        const r: any = this.renderer;
+        const dm: any = this.decorationManager;
+        return {
+            perfAvgMs: perf,
+            sceneChildren: this.scene?.children.length ?? 0,
+            tiles: this.tiles?.size ?? 0,
+            visibleTiles: this.visibleTiles?.size ?? 0,
+            instancedShapes: this.instancedMeshManager ? (this.instancedMeshManager as any).instancedMeshes?.size ?? 0 : 0,
+            timelineAnimatedTiles: this.timelineManager?.getAnimatedTileIndices?.()?.size ?? 0,
+            moveTrackActive: (this.moveTrackManager as any)?.activeTileIndices?.size ?? 0,
+            decorations: dm?.decoList?.length ?? 0,
+            animatedDecorations: dm?._animatedDecos?.length ?? 0,
+            decoBatches: dm?.instancedRenderer?.batches?.size ?? 0,
+            decoTextures: dm?.textures?.cache?.size ?? 0,
+            decoStatic: dm?._staticDecos?.length ?? 0,
+            decoDynamic: dm?._dynamicDecos?.length ?? 0,
+            // three 的资源计数：纹理/几何只增不减就是泄漏
+            gpuGeometries: r?.info?.memory?.geometries ?? null,
+            gpuTextures: r?.info?.memory?.textures ?? null,
+            programs: r?.info?.programs?.length ?? null,
+            drawCalls: r?.info?.render?.calls ?? null,
+            triangles: r?.info?.render?.triangles ?? null,
+            video: this.videoElement ? {
+                currentTime: +this.videoElement.currentTime.toFixed(3),
+                paused: this.videoElement.paused,
+                playbackRate: this.videoElement.playbackRate,
+                readyState: this.videoElement.readyState,
+            } : null,
+        };
+    };
     // FG 平面层级现场切换：__adojasFlashPlane('behind') / ('front')。
     // 有些谱把 plane:Foreground 当背景幕布用（FG 白/黑会长期糊住轨道）→ 切 'behind' 即刻可判。
     (window as any).__adojasFlashPlane = (mode?: 'front' | 'behind') => {
