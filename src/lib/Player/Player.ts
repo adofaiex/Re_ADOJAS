@@ -374,6 +374,18 @@ export class Player implements IPlayer {
     // Parse actions if available
     if (this.levelData.actions) {
       this.twirlAt = new Uint8Array(this.levelData.tiles?.length ?? 0);
+      const compactTilesForTwirl = isCompactTiles(this.levelData.tiles);
+      if (compactTilesForTwirl) {
+        // 紧凑模式：库已把 Twirl 事件剥离（省几百 MB），方向信息在 store.twirl 差分里。
+        // bit0 = 该砖有 Twirl（显示图标）；bit1 = 净翻转奇数次（实际改变方向）。
+        const t = this.levelData.tiles;
+        for (let i = 0; i < this.twirlAt.length; i++) {
+          const cur = t.getTwirl(i);
+          const prev = i > 0 ? t.getTwirl(i - 1) : 0;
+          const delta = cur - prev;
+          if (delta > 0) this.twirlAt[i] = 1 | ((delta & 1) ? 2 : 0);
+        }
+      }
       this.levelData.actions.forEach(action => {
         const floor = action.floor;
         if (action.eventType === 'MoveCamera') {
@@ -382,8 +394,11 @@ export class Player implements IPlayer {
             }
             this.tileCameraEvents.get(floor)!.push(action);
         } else if (action.eventType === 'Twirl') {
-            // 只记位图，不进 tileEvents（见 twirlAt 字段注释）
-            if (floor >= 0 && floor < this.twirlAt.length) this.twirlAt[floor] = 1;
+            // 对象模式：每个 Twirl 事件翻转一次方向（bit1 异或），并标记图标。
+            // 紧凑模式的事件已被库剥离，这里跳过（上面差分已填好）。
+            if (!compactTilesForTwirl && floor >= 0 && floor < this.twirlAt.length) {
+                this.twirlAt[floor] = (this.twirlAt[floor] | 1) ^ 2;
+            }
         } else if (action.eventType === 'MoveTrack') {
             // handled by TimelineManager during build
         } else if (action.eventType === 'SetHitsound') {
@@ -1896,8 +1911,8 @@ export class Player implements IPlayer {
 
     // We iterate through tiles to calculate the rotation/time to reach the NEXT tile.
     for (let i = 0; i < n - 1; i++) {
-        // Twirl 位图：先在当前砖翻转方向（等价于原事件序里的 Twirl）
-        if (this.twirlAt[i]) isCW = !isCW;
+        // Twirl 位图：先在当前砖翻转方向（等价于原事件序里的 Twirl；bit1 = 净翻转奇数次）
+        if (this.twirlAt[i] & 2) isCW = !isCW;
         // Process events for current tile
         let extraRotation = 0;
         const events = this.tileEvents.get(i);
@@ -2001,7 +2016,7 @@ export class Player implements IPlayer {
     // Handle the last tile
     if (n > 0) {
         const lastIndex = n - 1;
-        if (this.twirlAt[lastIndex]) isCW = !isCW;
+        if (this.twirlAt[lastIndex] & 2) isCW = !isCW;
         let extraRotation = 0;
         const events = this.tileEvents.get(lastIndex);
         if (events) {
@@ -5065,8 +5080,8 @@ export class Player implements IPlayer {
     // Add event icons (Twirl, SetSpeed, End) using PNG sprites
     const decoZ = 0.002;
     const initialOpacity = (tileMesh.userData.opacity ?? 1) * (tileMesh.userData.trackColorOpacity ?? 1);
-    // Twirl 图标：直接查位图（Twirl 不再进 tileEvents）
-    const hasTwirl = this.twirlAt[index] === 1;
+    // Twirl 图标：bit0 = 有 Twirl 事件（Twirl 不进 tileEvents）
+    const hasTwirl = (this.twirlAt[index] & 1) === 1;
     let hasSetSpeed = false;
 
     if (this.tileEvents.has(index)) {
