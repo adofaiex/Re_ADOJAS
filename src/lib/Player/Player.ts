@@ -4773,18 +4773,33 @@ export class Player implements IPlayer {
     return { ids, pivotPos: Math.max(0, Math.min(ids.length - 1, raw)) };
   }
 
+  /** 官方 scrPlanet.Update_RefreshAngles 1625-1631：移动星起始角偏移 = dir·inverse(N)；
+   *  若前一砖是 midspin 且 N>2，再减 dir_prev·inverse(N_prev)（中旋后一砖偏移归零）。 */
+  private getMultiPlanetAngleOffset(tileIndex: number): number {
+    const info = this.getTilePlanetInfo(tileIndex);
+    const n = info.ids.length;
+    if (n <= 2) return 0;
+    let offset = (this.tileIsCW[tileIndex] ? -1 : 1) * (Math.PI * (n - 2) / n);
+    if (tileIndex > 0 && tileDirection(this.levelData.tiles, tileIndex - 1) === 999) {
+      const prevN = this.getTilePlanetInfo(tileIndex - 1).ids.length;
+      if (prevN > 2) {
+        offset -= (this.tileIsCW[tileIndex - 1] ? -1 : 1) * (Math.PI * (prevN - 2) / prevN);
+      }
+    }
+    return offset;
+  }
+
   /**
    * 多行星布局（官方 scrPlanet.UpdatePlanet 的稳态，endingTween=0）：
    *   枢轴星停在砖心 P；移动星 = P + vector(num)·r；
    *   其余行星落在正 N 边形上：半径 R = r/(2 sin(π/N))，中心 = P + vector(num4)·R，
    *   num4 = num − s·inverse(N)/2；沿列表 next 方向第 j 颗的角度 = num4 + s·2π(−(j+1) − N/2)/N；
-   *   其中 num = 移动角 + s·inverse(N)（官方 snappedLastAngle 的固定偏移；移动角本身
-   *   已按官方 angleLength（含 mod 回绕与 turnaround 整圈）扫动）。
+   *   其中 num = 移动角 + angleOffset（官方 snappedLastAngle 的固定偏移，含 midspin 修正）。
    * N=2 时严格退化为原来的枢轴 + 移动球。
    */
   private applyMultiPlanetLayout(
     tileIndex: number, pivotX: number, pivotY: number,
-    movingAngle: number, movingDist: number, dirSign: number
+    movingAngle: number, movingDist: number, dirSign: number, angleOffset: number
   ): void {
     const info = this.getTilePlanetInfo(tileIndex);
     const ids = info.ids;
@@ -4802,7 +4817,7 @@ export class Player implements IPlayer {
     }
 
     const inverse = Math.PI * (n - 2) / n;
-    const num = movingAngle + dirSign * inverse;
+    const num = movingAngle + angleOffset;
     this._layoutX[moverId] = pivotX + Math.cos(num) * movingDist;
     this._layoutY[moverId] = pivotY + Math.sin(num) * movingDist;
 
@@ -5620,25 +5635,11 @@ export class Player implements IPlayer {
     }
     
     // Playing Phase
-    // 手动模式：currentTileIndex 只由判定命中推进，不由时间自动推进
+    // 手动模式：currentTileIndex 只由判定命中推进，不由时间自动推进。
+    // 自动模式：每帧直接按时间轴二分定位（O(log n)）——不再逐砖 while 推进，
+    // 超高 BPM 下一帧跨几千砖也不会退化，且 seek/回退天然正确。
     if (!this.manualMode && this.tileStartTimes.length > 0) {
-        if (timeInLevel < this.tileStartTimes[this.currentTileIndex]) {
-            let low = 0, high = this.tileStartTimes.length - 1;
-            while (low <= high) {
-                const mid = Math.floor((low + high) / 2);
-                if (this.tileStartTimes[mid] <= timeInLevel) {
-                    this.currentTileIndex = mid;
-                    low = mid + 1;
-                } else {
-                    high = mid - 1;
-                }
-            }
-        } else {
-            while (this.currentTileIndex + 1 < this.tileStartTimes.length && 
-                   this.tileStartTimes[this.currentTileIndex + 1] <= timeInLevel) {
-                this.currentTileIndex++;
-            }
-        }
+        this.currentTileIndex = this.getTileIndexAtLevelTime(timeInLevel);
         // 自动播放：球落到的新砖块展示"完美！"判定（autoplay 显示 Perfect）
         if (this.currentTileIndex !== this._lastAutoJudgedTile && this.currentTileIndex > 0) {
             this._lastAutoJudgedTile = this.currentTileIndex;
@@ -5682,7 +5683,7 @@ export class Player implements IPlayer {
              const currentAngle = isCW ? (startAngle - totalAngle) : (startAngle + totalAngle);
              
              const dist = 1.0;
-             this.applyMultiPlanetLayout(lastIndex, pivotX, pivotY, currentAngle, dist, this.tileIsCW[lastIndex] ? -1 : 1);
+             this.applyMultiPlanetLayout(lastIndex, pivotX, pivotY, currentAngle, dist, this.tileIsCW[lastIndex] ? -1 : 1, this.getMultiPlanetAngleOffset(lastIndex));
              this.syncActivePlanets(lastIndex);
              
      	    // 枢轴星位置已由 applyMultiPlanetLayout 设置
@@ -5776,8 +5777,8 @@ export class Player implements IPlayer {
         const clampedProgress = Math.max(0, Math.min(1, progress));
         const currentDist = startDist + (endDist - startDist) * clampedProgress;
 
-        // 官方多行星布局；角进方向 s = isCW ? −1 : +1
-        this.applyMultiPlanetLayout(tileIndex, pivotPos.x, pivotPos.y, currentAngle, currentDist, this.tileIsCW[tileIndex] ? -1 : 1);
+        // 官方多行星布局；角进方向 s = isCW ? −1 : +1，偏移含 midspin 修正
+        this.applyMultiPlanetLayout(tileIndex, pivotPos.x, pivotPos.y, currentAngle, currentDist, this.tileIsCW[tileIndex] ? -1 : 1, this.getMultiPlanetAngleOffset(tileIndex));
         this.syncActivePlanets(tileIndex);
     }
     
