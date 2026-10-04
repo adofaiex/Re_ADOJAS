@@ -195,95 +195,124 @@ export class PositionTrackManager {
             return;
         }
 
-        const workX = new Float64Array(baseX);
-        const workY = new Float64Array(baseY);
+        const workX = new Float64Array(tileCount);
+        const workY = new Float64Array(tileCount);
         const workRot = new Float32Array(tileCount);
-        const workScale = new Float32Array(tileCount).fill(1);
-        const workOpacity = new Float32Array(tileCount).fill(1);
-        const workStick = new Uint8Array(tileCount).fill(defaultStick ? 1 : 0);
+        const workScale = new Float32Array(tileCount);
+        const workOpacity = new Float32Array(tileCount);
+        const workStick = new Uint8Array(tileCount);
+
+        // ── 位置（加法型）：Fenwick 树"后缀加法 + 点查询" ────────────────
+        // 旧实现对每个 non-justThisTile 事件都循环 [floor, tileCount) 逐砖调整，
+        // 复杂度 O(事件 × 砖数)：本谱 23,604 个 PositionTrack 事件 × 677 万砖
+        // ≈ 千亿次操作 → 加载直接挂死。BIT 后每事件 O(log n)。
+        const bitSize = tileCount + 1;
+        const bitX = new Float64Array(bitSize);
+        const bitY = new Float64Array(bitSize);
+        const pointX = new Float64Array(tileCount);
+        const pointY = new Float64Array(tileCount);
+        const bitAdd = (idx: number, dx: number, dy: number): void => {
+            for (let i = idx + 1; i < bitSize; i += i & -i) { bitX[i] += dx; bitY[i] += dy; }
+        };
+        const bitSumX = (idx: number): number => {
+            let s = 0;
+            for (let i = idx + 1; i > 0; i -= i & -i) s += bitX[i];
+            return s;
+        };
+        const bitSumY = (idx: number): number => {
+            let s = 0;
+            for (let i = idx + 1; i > 0; i -= i & -i) s += bitY[i];
+            return s;
+        };
 
         // ADOFAI's `vector`: accumulated non-justThisTile offset, used for relativeTo
         let vectorX = 0, vectorY = 0;
 
+        // 持续状态（对应旧实现里"fill 到结尾"的效果）
+        let curScale = 1, curRot = 0, curOpacity = 1, curStick = defaultStick ? 1 : 0;
+
         for (let floor = 0; floor < tileCount; floor++) {
             const events = this.positionTrackEvents.get(floor);
-            if (!events) continue;
+            let tileScale: number | null = null;
+            let tileRot: number | null = null;
+            let tileOpacity: number | null = null;
+            let tileStick: number | null = null;
 
-            for (const event of events) {
-                if (event.editorOnly && !isEditorMode) continue;
+            if (events) {
+                for (const event of events) {
+                    if (event.editorOnly && !isEditorMode) continue;
 
-                // ── positionOffset + relativeTo ─────────────────────
-                if (!this.isDisabled(event, 'positionOffset')) {
-                    let changeX = 0, changeY = 0;
+                    // ── positionOffset + relativeTo ─────────────────────
+                    if (!this.isDisabled(event, 'positionOffset')) {
+                        let changeX = 0, changeY = 0;
 
-                    let targetTileId = floor;
-                    if (event.relativeTo) {
-                        targetTileId = this.IDFromTile(event.relativeTo, floor);
-                    }
-
-                    if (event.positionOffset) {
-                        const pos = this.normalizeVec2(event.positionOffset);
-                        changeX += pos[0] * TILE_SIZE;
-                        changeY += pos[1] * TILE_SIZE;
-                    }
-
-                    if (targetTileId !== floor && targetTileId < tileCount) {
-                        changeX += workX[targetTileId] - (baseX[floor] + vectorX);
-                        changeY += workY[targetTileId] - (baseY[floor] + vectorY);
-                    }
-
-                    if (event.justThisTile) {
-                        workX[floor] += changeX;
-                        workY[floor] += changeY;
-                    } else {
-                        for (let j = floor; j < tileCount; j++) {
-                            workX[j] += changeX;
-                            workY[j] += changeY;
+                        let targetTileId = floor;
+                        if (event.relativeTo) {
+                            targetTileId = this.IDFromTile(event.relativeTo, floor);
                         }
-                        vectorX = workX[floor] - baseX[floor];
-                        vectorY = workY[floor] - baseY[floor];
-                    }
-                }
 
-                // ── scale ───────────────────────────────────────────
-                if (event.scale !== undefined && event.scale !== null && !this.isDisabled(event, 'scale')) {
-                    const s = event.scale / 100;
-                    if (event.justThisTile) {
-                        workScale[floor] = s;
-                    } else {
-                        for (let j = floor; j < tileCount; j++) workScale[j] = s;
-                    }
-                }
+                        if (event.positionOffset) {
+                            const pos = this.normalizeVec2(event.positionOffset);
+                            changeX += pos[0] * TILE_SIZE;
+                            changeY += pos[1] * TILE_SIZE;
+                        }
 
-                // ── rotation ────────────────────────────────────────
-                if (event.rotation !== undefined && event.rotation !== null && !this.isDisabled(event, 'rotation')) {
-                    if (event.justThisTile) {
-                        workRot[floor] = event.rotation;
-                    } else {
-                        for (let j = floor; j < tileCount; j++) workRot[j] = event.rotation;
-                    }
-                }
+                        if (targetTileId !== floor && targetTileId < tileCount) {
+                            const targetX = baseX[targetTileId] + bitSumX(targetTileId) + pointX[targetTileId];
+                            const targetY = baseY[targetTileId] + bitSumY(targetTileId) + pointY[targetTileId];
+                            changeX += targetX - (baseX[floor] + vectorX);
+                            changeY += targetY - (baseY[floor] + vectorY);
+                        }
 
-                // ── opacity ─────────────────────────────────────────
-                if (event.opacity !== undefined && event.opacity !== null && !this.isDisabled(event, 'opacity')) {
-                    const o = event.opacity / 100;
-                    if (event.justThisTile) {
-                        workOpacity[floor] = o;
-                    } else {
-                        for (let j = floor; j < tileCount; j++) workOpacity[j] = o;
+                        if (event.justThisTile) {
+                            pointX[floor] += changeX;
+                            pointY[floor] += changeY;
+                        } else {
+                            bitAdd(floor, changeX, changeY);
+                            vectorX = bitSumX(floor) + pointX[floor];
+                            vectorY = bitSumY(floor) + pointY[floor];
+                        }
                     }
-                }
 
-                // ── stickToFloors ───────────────────────────────────
-                if (event.stickToFloors !== undefined && !this.isDisabled(event, 'stickToFloors')) {
-                    const st = this.parseStickToFloors(event.stickToFloors);
-                    if (event.justThisTile) {
-                        workStick[floor] = st ? 1 : 0;
-                    } else {
-                        for (let j = floor; j < tileCount; j++) workStick[j] = st ? 1 : 0;
+                    // ── scale ───────────────────────────────────────────
+                    if (event.scale !== undefined && event.scale !== null && !this.isDisabled(event, 'scale')) {
+                        const s = event.scale / 100;
+                        tileScale = s;
+                        if (!event.justThisTile) curScale = s;
+                    }
+
+                    // ── rotation ────────────────────────────────────────
+                    if (event.rotation !== undefined && event.rotation !== null && !this.isDisabled(event, 'rotation')) {
+                        tileRot = event.rotation;
+                        if (!event.justThisTile) curRot = event.rotation;
+                    }
+
+                    // ── opacity ─────────────────────────────────────────
+                    if (event.opacity !== undefined && event.opacity !== null && !this.isDisabled(event, 'opacity')) {
+                        const o = event.opacity / 100;
+                        tileOpacity = o;
+                        if (!event.justThisTile) curOpacity = o;
+                    }
+
+                    // ── stickToFloors ───────────────────────────────────
+                    if (event.stickToFloors !== undefined && !this.isDisabled(event, 'stickToFloors')) {
+                        const v = this.parseStickToFloors(event.stickToFloors) ? 1 : 0;
+                        tileStick = v;
+                        if (!event.justThisTile) curStick = v;
                     }
                 }
             }
+
+            // 当前砖的值：事件直接赋值优先（同 floor 后写覆盖），否则用持续状态
+            workScale[floor] = tileScale !== null ? tileScale : curScale;
+            workRot[floor] = tileRot !== null ? tileRot : curRot;
+            workOpacity[floor] = tileOpacity !== null ? tileOpacity : curOpacity;
+            workStick[floor] = tileStick !== null ? tileStick : curStick;
+        }
+
+        for (let i = 0; i < tileCount; i++) {
+            workX[i] = baseX[i] + bitSumX(i) + pointX[i];
+            workY[i] = baseY[i] + bitSumY(i) + pointY[i];
         }
 
         this.workX = workX;
