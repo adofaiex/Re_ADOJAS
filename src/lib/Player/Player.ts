@@ -1845,6 +1845,25 @@ export class Player implements IPlayer {
       groups.push(group);
     }
 
+    // MultiPlanet 变化音（官方 scrConductor 532-536）：落到与前一砖 numPlanets 不同的砖时，
+    // 在该砖命中时刻追加 VehiclePositive（增星）/ VehicleNegative（减星），音量 ×0.6。
+    const vehiclePositive: number[] = [];
+    const vehicleNegative: number[] = [];
+    for (let i = 1; i < this.tileStartTimes.length; i++) {
+      const prevN = this.tileNumPlanets[i - 1] || 2;
+      const curN = this.tileNumPlanets[i] || 2;
+      if (curN === prevN) continue;
+      const t = this.tileStartTimes[i];
+      if (curN > prevN) vehiclePositive.push(t);
+      else vehicleNegative.push(t);
+    }
+    if (vehiclePositive.length > 0) {
+      groups.push({ type: 'VehiclePositive', volume: defaultVolume * 0.6, timestamps: vehiclePositive });
+    }
+    if (vehicleNegative.length > 0) {
+      groups.push({ type: 'VehicleNegative', volume: defaultVolume * 0.6, timestamps: vehicleNegative });
+    }
+
     console.log(`[Player] preSynthesizeHitsoundsWithProgress: ${groups.length} groups, ${defaultTimestamps.length} default hits, ${overrideGroups.size} override groups`);
     await this.hitsoundManager.preSynthesize(groups, totalDuration, onProgress, onWorkerStatus);
   }
