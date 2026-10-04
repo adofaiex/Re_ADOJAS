@@ -697,6 +697,36 @@ export class Player implements IPlayer {
         y: Math.round(planet.position.y * 100) / 100,
       };
     });
+    // Twirl 探针：__adojasTwirl(from, to) → 区间内 twirlAt 换向数 vs 紧凑存储差分换向数 + 末尾方向状态。
+    // 若 flips === storeFlips（且尾部状态在变），说明 Player 已拿到全部旋转数据，问题只可能在渲染/观感。
+    (window as any).__adojasTwirl = (from: number = 0, to: number = 20) => {
+      const n = this.twirlAt.length;
+      const a = Math.max(0, Math.min(Math.floor(from), n));
+      const b = Math.max(a, Math.min(Math.floor(to), n));
+      let flips = 0;
+      for (let i = a; i < b; i++) if (this.twirlAt[i] & 2) flips++;
+      const tiles: any = this.levelData.tiles;
+      let storeFlips = 0;
+      if (tiles && typeof tiles.getTwirl === 'function') {
+        let prev = a > 0 ? (tiles.getTwirl(a - 1) ?? 0) : 0;
+        for (let i = a; i < b; i++) {
+          const cur = tiles.getTwirl(i) ?? 0;
+          if (cur !== prev) storeFlips += ((cur - prev) & 1);
+          prev = cur;
+        }
+      }
+      const tailStart = Math.max(0, n - 20);
+      const tail: any[] = [];
+      for (let i = tailStart; i < n; i++) {
+        tail.push({
+          i,
+          hasTwirl: (this.twirlAt[i] & 1) === 1,
+          flipsDir: (this.twirlAt[i] & 2) === 2,
+          cw: this.tileIsCW[i] ? 1 : 0,
+        });
+      }
+      return { totalTiles: n, from: a, to: b, flips, storeFlips, tail };
+    };
     // 性能/泄漏探针：__adojasPerf() → 各阶段耗时（每秒平均）+ 场景/资源计数。
     // 用法：刚开局跑一次，掉帧后再跑一次；**持续增长**的那个计数就是"越来越卡"的元凶。
     (window as any).__adojasPerf = () => {
