@@ -358,6 +358,9 @@ export class HitsoundManager {
       // 播放开始时已有现成块可用（不再有首帧合成卡顿）。
       await this.warmUpChunks(onProgress);
       this.emitWorkerStatus(true);
+      // 加载完成后断开 UI 回调：播放期的按需调度绝不能再触发 React setState
+      //（否则每泵一次 = 一次整页重渲染）。
+      this.onWorkerStatus = null;
       if (onProgress) onProgress(100);
       return;
     }
@@ -551,6 +554,10 @@ export class HitsoundManager {
     const st = this._schedState;
     if (!st || !this.chunkMode) return;
     st.playheadChunk = Math.floor(timeInLevelSec / HitsoundManager.CHUNK_SEC);
+    // 已领先于前瞻：什么都不做（否则每帧空跑 pump → 每帧 emitWorkerStatus →
+    // 加载窗口的 setLoadingWorkers 会在播放期每帧触发一次整页 React 重渲染）。
+    const limit = Math.min(st.totalChunks, st.playheadChunk + HitsoundManager.SCHEDULE_LOOKAHEAD_CHUNKS);
+    if (st.nextChunk > limit) return;
     if (!this._schedActive) {
       void this.pumpChunkScheduling();
     }
@@ -568,9 +575,11 @@ export class HitsoundManager {
     this._schedActive = true;
     try {
       const useWorkers = await this.ensureWorkers();
+      let didWork = false;
       while (this._schedState === st && st.gen === this.chunkGeneration) {
         const limit = Math.min(st.totalChunks, st.playheadChunk + HitsoundManager.SCHEDULE_LOOKAHEAD_CHUNKS);
         if (st.nextChunk > limit) break;
+        didWork = true;
         const k = st.nextChunk;
         let buf: AudioBuffer | null = this.chunkCache.get(k) ?? null;
         if (!buf) {
@@ -590,7 +599,7 @@ export class HitsoundManager {
         // 让出主线程，避免连续合成造成长阻塞（worker 路径的 await 已让出）
         await new Promise(resolve => setTimeout(resolve, 0));
       }
-      this.emitWorkerStatus(true);
+      if (didWork) this.emitWorkerStatus(true);
     } finally {
       this._schedActive = false;
     }
