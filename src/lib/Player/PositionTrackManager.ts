@@ -1,6 +1,7 @@
 import { Vector3 } from 'three';
 import { isEventActive, isEnabled } from './EventUtils';
 import { Level } from 'adofai';
+import type { TileBases } from './TileBases';
 
 export interface PositionTrackEvent {
     positionOffset?: [number, number] | { x: number; y: number };
@@ -57,6 +58,8 @@ export class PositionTrackManager {
     private tileCount: number = 0;
     /** getTileTransform 的复用对象（调用方均立即读取，不持有引用）。 */
     private _tmpTransform: TileTransform | null = null;
+    /** getBases 缓存的访问器（computeTransforms 重算时失效）。 */
+    private _bases: TileBases | null = null;
 
     constructor(levelData: Level) {
         this.levelData = levelData;
@@ -144,6 +147,7 @@ export class PositionTrackManager {
         // 退出播放的 reapplyPositionTrackTransforms）直接复用，避免百万砖重算 + 36MB
         // typed array 重新分配。setEditorMode 切换模式时才真正重算。
         if (this.computed && this.computedEditorMode === isEditorMode) return;
+        this._bases = null;
         const tiles = this.levelData.tiles || [];
         const tileCount = tiles.length;
         const rawAngleData = this.levelData.angleData || [];
@@ -377,6 +381,31 @@ export class PositionTrackManager {
         return t;
     }
 
+    /**
+     * 只读"基础值"访问器：位置直接引用 work Float64Array，旋转/缩放/透明度按需读取。
+     * 取代以前按砖构造的 Vector2[] base 数组（百万砖下省数百 MB）。
+     */
+    public getBases(): TileBases {
+        this.ensureComputed();
+        if (!this._bases) {
+            const wx = this.workX!;
+            const wy = this.workY!;
+            const wr = this.workRot;
+            const ws = this.workScale;
+            const wo = this.workOpacity;
+            this._bases = {
+                count: this.tileCount,
+                posX: wx,
+                posY: wy,
+                rotRad: (i: number) => (wr ? wr[i] : 0) * Math.PI / 180,
+                scaleX: (i: number) => (ws ? ws[i] : 1),
+                scaleY: (i: number) => (ws ? ws[i] : 1),
+                opacity: (i: number) => (wo ? wo[i] : 1),
+            };
+        }
+        return this._bases;
+    }
+
     public dispose(): void {
         this.positionTrackEvents.clear();
         this.baseX = this.baseY = null;
@@ -384,5 +413,6 @@ export class PositionTrackManager {
         this.workRot = this.workScale = this.workOpacity = null;
         this.workStick = null;
         this.computed = false;
+        this._bases = null;
     }
 }

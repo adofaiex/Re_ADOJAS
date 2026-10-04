@@ -1,7 +1,8 @@
-import { Vector2, Vector3, Euler, Mesh, ShaderMaterial } from 'three';
+import { Vector3, Euler, Mesh, ShaderMaterial } from 'three';
 import { getEasingFunction } from './WasmEasing';
 import { isEventActive, isFieldEnabled } from './EventUtils';
 import { debugLog } from './DebugLog';
+import type { TileBases } from './TileBases';
 
 export interface Keyframe {
     time: number;
@@ -105,25 +106,19 @@ export class TimelineManager {
         actions: any[],
         tileStartTimes: ArrayLike<number>,
         tileBPM: ArrayLike<number>,
-        basePositions: Vector2[],
-        baseRotations: number[],
-        baseScales: Vector2[],
-        baseOpacities: number[],
+        bases: TileBases,
         totalTiles: number,
         settings?: any,
     ) {
         this.tileStartTimes = tileStartTimes;
         this.tileBPM = tileBPM;
         this.totalTiles = totalTiles;
-        this.build(actions, basePositions, baseRotations, baseScales, baseOpacities, settings);
+        this.build(actions, bases, settings);
     }
 
     private build(
         actions: any[],
-        basePositions: Vector2[],
-        baseRotations: number[],
-        baseScales: Vector2[],
-        baseOpacities: number[],
+        bases: TileBases,
         settings?: any,
     ): void {
         const perTileMoveTrack: Map<number, {
@@ -325,11 +320,11 @@ export class TimelineManager {
                 if (a.floor !== b.floor) return a.floor - b.floor;
                 return (a.event.id ?? Infinity) - (b.event.id ?? Infinity);
             });
-            this.buildTileMoveTrack(tileIdx, events, basePositions, baseRotations, baseScales, baseOpacities, tileIdx < this.tileStartTimes.length ? this.tileStartTimes[tileIdx] : 0);
+            this.buildTileMoveTrack(tileIdx, events, bases, tileIdx < this.tileStartTimes.length ? this.tileStartTimes[tileIdx] : 0);
         }
 
         // Build Appear/Disappear keyframes AFTER MoveTrack so AnimateTrack wins on conflicts.
-        this.buildAnimateTrackKeyframes(actions, basePositions, baseRotations, baseScales, baseOpacities, settings, pitch);
+        this.buildAnimateTrackKeyframes(actions, bases, settings, pitch);
 
         this._animatedTileIndices = this.computeAnimatedTileIndices();
         this.buildTileRanges();
@@ -446,18 +441,16 @@ export class TimelineManager {
     private buildTileMoveTrack(
         tileIdx: number,
         events: { time: number; duration: number; event: any; floor: number }[],
-        basePositions: Vector2[],
-        baseRotations: number[],
-        baseScales: Vector2[],
-        baseOpacities: number[],
+        bases: TileBases,
         tileStartTime: number,
     ): void {
-        const baseX = tileIdx >= 0 && tileIdx < basePositions.length ? basePositions[tileIdx].x : 0;
-        const baseY = tileIdx >= 0 && tileIdx < basePositions.length ? basePositions[tileIdx].y : 0;
-        const baseRot = tileIdx >= 0 && tileIdx < baseRotations.length ? baseRotations[tileIdx] : 0;
-        const baseSX = tileIdx >= 0 && tileIdx < baseScales.length ? baseScales[tileIdx].x : 1;
-        const baseSY = tileIdx >= 0 && tileIdx < baseScales.length ? baseScales[tileIdx].y : 1;
-        const baseOp = tileIdx >= 0 && tileIdx < baseOpacities.length ? baseOpacities[tileIdx] : 1;
+        const inRange = tileIdx >= 0 && tileIdx < bases.count;
+        const baseX = inRange ? (bases.posX[tileIdx] as number) : 0;
+        const baseY = inRange ? (bases.posY[tileIdx] as number) : 0;
+        const baseRot = inRange ? bases.rotRad(tileIdx) : 0;
+        const baseSX = inRange ? bases.scaleX(tileIdx) : 1;
+        const baseSY = inRange ? bases.scaleY(tileIdx) : 1;
+        const baseOp = inRange ? bases.opacity(tileIdx) : 1;
 
         // base keyframes 在 time 0（songposition 0 = countdown 开始）。
         // 负时间（countdown 期间）事件会 removeAfter 删除它们，startVal 归零渐现。
@@ -1026,10 +1019,7 @@ export class TimelineManager {
 
     private buildAnimateTrackKeyframes(
         actions: any[],
-        basePositions: Vector2[],
-        baseRotations: number[],
-        baseScales: Vector2[],
-        baseOpacities: number[],
+        bases: TileBases,
         settings: any,
         pitch: number,
     ): void {
@@ -1110,11 +1100,11 @@ export class TimelineManager {
             const scaledBeatsBehind = beatsBehind * speedRatio;
 
             if (appearType !== 'None' && scaledBeatsAhead > 0) {
-                this.buildAppearKeyframes(floor, appearType, scaledBeatsAhead, basePositions, baseRotations, baseScales, baseOpacities, pitch);
+                this.buildAppearKeyframes(floor, appearType, scaledBeatsAhead, bases, pitch);
             }
             if (disappearType !== 'None' && scaledBeatsBehind > 0 && floor < this.totalTiles - 1) {
                 const nextEntryTime = this.tileStartTimes[floor + 1] ?? 0;
-                this.buildDisappearKeyframes(floor, disappearType, scaledBeatsBehind, nextEntryTime, basePositions, baseRotations, baseScales, baseOpacities, pitch);
+                this.buildDisappearKeyframes(floor, disappearType, scaledBeatsBehind, nextEntryTime, bases, pitch);
             }
         }
     }
@@ -1123,10 +1113,7 @@ export class TimelineManager {
         floor: number,
         animType: string,
         beatsAhead: number,
-        basePositions: Vector2[],
-        baseRotations: number[],
-        baseScales: Vector2[],
-        baseOpacities: number[],
+        bases: TileBases,
         pitch: number,
     ): void {
         const entryTime = this.tileStartTimes[floor] || 0;
@@ -1145,20 +1132,20 @@ export class TimelineManager {
             : Math.min((secPerBeat * 0.5) / pitch, 0.5);
         const appearEndTime = appearStartTime + appearDuration;
 
-        const baseX = basePositions[floor]?.x ?? 0;
-        const baseY = basePositions[floor]?.y ?? 0;
-        const baseRot = baseRotations[floor] ?? 0;
-        const baseSX = baseScales[floor]?.x ?? 1;
-        const baseSY = baseScales[floor]?.y ?? 1;
-        const baseOp = baseOpacities[floor] ?? 1;
+        const baseX = bases.posX[floor] ?? 0;
+        const baseY = bases.posY[floor] ?? 0;
+        const baseRot = bases.rotRad(floor);
+        const baseSX = bases.scaleX(floor);
+        const baseSY = bases.scaleY(floor);
+        const baseOp = bases.opacity(floor);
 
         const entity = `tile:${floor}`;
         const ease = isDropOrRise ? 'Linear.easeNone' : 'Quad.easeOut';
 
         switch (animType) {
             case 'Extend': {
-                const prevX = floor > 0 ? (basePositions[floor - 1]?.x ?? baseX) : baseX;
-                const prevY = floor > 0 ? (basePositions[floor - 1]?.y ?? baseY) : baseY;
+                const prevX = floor > 0 ? (bases.posX[floor - 1] ?? baseX) : baseX;
+                const prevY = floor > 0 ? (bases.posY[floor - 1] ?? baseY) : baseY;
                 // Set initial state at time 0 and appearStartTime without removing
                 // subsequent keyframes — MoveTrack keyframes after the appear
                 // animation must be preserved (was: instantKeyframe + addTween
@@ -1257,10 +1244,7 @@ export class TimelineManager {
         animType: string,
         beatsBehind: number,
         nextEntryTime: number,
-        basePositions: Vector2[],
-        baseRotations: number[],
-        baseScales: Vector2[],
-        baseOpacities: number[],
+        bases: TileBases,
         pitch: number,
     ): void {
         const bpm = this.tileBPM[floor] || 100;
@@ -1270,12 +1254,12 @@ export class TimelineManager {
         const disappearDuration = Math.min((secPerBeat * 0.5) / pitch, 0.5);
         const disappearEndTime = disappearStartTime + disappearDuration;
 
-        const baseX = basePositions[floor]?.x ?? 0;
-        const baseY = basePositions[floor]?.y ?? 0;
-        const baseRot = baseRotations[floor] ?? 0;
-        const baseSX = baseScales[floor]?.x ?? 1;
-        const baseSY = baseScales[floor]?.y ?? 1;
-        const baseOp = baseOpacities[floor] ?? 1;
+        const baseX = bases.posX[floor] ?? 0;
+        const baseY = bases.posY[floor] ?? 0;
+        const baseRot = bases.rotRad(floor);
+        const baseSX = bases.scaleX(floor);
+        const baseSY = bases.scaleY(floor);
+        const baseOp = bases.opacity(floor);
 
         const entity = `tile:${floor}`;
         const ease = 'Quad.easeOut';
@@ -1294,8 +1278,8 @@ export class TimelineManager {
                 break;
             }
             case 'Retract': {
-                const nextX = basePositions[floor + 1]?.x ?? baseX;
-                const nextY = basePositions[floor + 1]?.y ?? baseY;
+                const nextX = bases.posX[floor + 1] ?? baseX;
+                const nextY = bases.posY[floor + 1] ?? baseY;
                 this.pushTween(entity, 'positionX', disappearStartTime, disappearEndTime, nextX, ease, baseX);
                 this.pushTween(entity, 'positionY', disappearStartTime, disappearEndTime, nextY, ease, baseY);
                 this.pushTween(entity, 'scaleX', disappearStartTime, disappearEndTime, 0, ease, baseSX);

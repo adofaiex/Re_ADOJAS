@@ -452,20 +452,9 @@ export class Player implements IPlayer {
     // Calculate cumulative rotations
     this.calculateCumulativeRotations();
 
-    // Precomputed tile positions/rotations as base for MoveTrack computation
-    const tileCountNow = this.levelData.tiles.length;
-    const basePositions: Vector2[] = new Array(tileCountNow);
-    const baseRotations: number[] = new Array(tileCountNow);
-    const baseScales: Vector2[] = new Array(tileCountNow);
-    const baseOpacities: number[] = new Array(tileCountNow);
-    for (let i = 0; i < tileCountNow; i++) {
-        const t = this.levelData.tiles[i];
-        basePositions[i] = new Vector2(t.position[0], t.position[1]);
-        baseRotations[i] = this.positionTrackManager ? this.positionTrackManager.getRotationDeg(i) * Math.PI / 180 : 0;
-        const s = this.positionTrackManager ? this.positionTrackManager.getScale(i) : 1;
-        baseScales[i] = new Vector2(s, s);
-        baseOpacities[i] = this.positionTrackManager ? this.positionTrackManager.getOpacity(i) : 1;
-    }
+    // 基础值访问器：位置直接引用 PositionTrackManager 的 typed array；
+    // 旋转/缩放/透明度按需读取 —— 不再按砖构造 Vector2[] base 数组。
+    const bases = this.positionTrackManager.getBases();
 
     // Initialize Timeline Manager (unified timelines for all event types)
     // 事件时间轴与判定/打拍音/球共用 tileStartTimes（timeInLevel 时间线），完全同步：
@@ -474,10 +463,7 @@ export class Player implements IPlayer {
       this.levelData.actions || [],
       this.tileStartTimes,
       this.tileBPM,
-      basePositions,
-      baseRotations,
-      baseScales,
-      baseOpacities,
+      bases,
       this.levelData.tiles.length,
       this.levelData.settings,
     );
@@ -637,8 +623,7 @@ export class Player implements IPlayer {
     // Initialize MoveTrack Manager with TimelineManager
     this.moveTrackManager = new MoveTrackManager(this.timelineManager);
     this.moveTrackManager.setTilesReference(this.tiles);
-    this.moveTrackManager.setBasePositions(basePositions);
-    this.moveTrackManager.setBaseRotations(baseRotations);
+    this.moveTrackManager.setBases(bases);
 
     // Sync MoveTrack animations to InstancedMeshManager (when instanced rendering is active,
     // individual tile meshes are hidden and only the InstancedMesh is visible)

@@ -1,13 +1,13 @@
-import { Vector3, Euler, Mesh, Vector2 } from 'three';
+import { Vector3, Euler, Mesh } from 'three';
 import { debugLog } from './DebugLog';
 import { TimelineManager } from './TimelineManager';
+import type { TileBases } from './TileBases';
 
 export class MoveTrackManager {
     private timelineManager: TimelineManager;
     private tiles: Map<string, Mesh> | null = null;
 
-    private basePositions: Vector2[] = [];
-    private baseRotations: number[] = [];
+    private bases: TileBases | null = null;
 
     public tileTransformChanged?: (
         tileIndex: number,
@@ -32,12 +32,8 @@ export class MoveTrackManager {
         this.tiles = tiles;
     }
 
-    public setBasePositions(positions: Vector2[]): void {
-        this.basePositions = positions;
-    }
-
-    public setBaseRotations(rotations: number[]): void {
-        this.baseRotations = rotations;
+    public setBases(bases: TileBases): void {
+        this.bases = bases;
     }
 
     public registerTileInitial(index: number, tileMesh: Mesh): void {
@@ -47,9 +43,10 @@ export class MoveTrackManager {
         // Apply base state directly instead of sampling timeline at time 0.
         // Timeline at time 0 has appear animation initial state (invisible),
         // but tiles should be fully visible in preview mode at load time.
-        const baseX = index < this.basePositions.length ? this.basePositions[index].x : 0;
-        const baseY = index < this.basePositions.length ? this.basePositions[index].y : 0;
-        const baseRot = index < this.baseRotations.length ? this.baseRotations[index] : 0;
+        const inRange = !!this.bases && index >= 0 && index < this.bases.count;
+        const baseX = inRange ? (this.bases!.posX[index] as number) : 0;
+        const baseY = inRange ? (this.bases!.posY[index] as number) : 0;
+        const baseRot = inRange ? this.bases!.rotRad(index) : 0;
         tileMesh.position.x = baseX;
         tileMesh.position.y = baseY;
         tileMesh.rotation.z = baseRot;
@@ -137,9 +134,10 @@ export class MoveTrackManager {
         const mesh = this.tiles?.get(tileIndex.toString());
         if (!mesh) return { x: 0, y: 0, rotation: 0 };
 
-        const baseX = tileIndex < this.basePositions.length ? this.basePositions[tileIndex].x : 0;
-        const baseY = tileIndex < this.basePositions.length ? this.basePositions[tileIndex].y : 0;
-        const baseRot = tileIndex < this.baseRotations.length ? this.baseRotations[tileIndex] : 0;
+        const inRange = !!this.bases && tileIndex >= 0 && tileIndex < this.bases.count;
+        const baseX = inRange ? (this.bases!.posX[tileIndex] as number) : 0;
+        const baseY = inRange ? (this.bases!.posY[tileIndex] as number) : 0;
+        const baseRot = inRange ? this.bases!.rotRad(tileIndex) : 0;
 
         return {
             x: mesh.position.x - baseX,
