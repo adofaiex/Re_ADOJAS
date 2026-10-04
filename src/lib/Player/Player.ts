@@ -4860,7 +4860,7 @@ export class Player implements IPlayer {
    * Writes [x, y] pairs into redOut/blueOut at the given offset.
    */
   private computePositionsAtTime(timeInLevel: number, idx: number,
-    redOut: Float64Array, blueOut: Float64Array, offset: number): void {
+    outById: (Float64Array | null)[], writtenById: Int32Array): void {
     const tiles = this.levelData.tiles;
     const n = tileCountOf(tiles);
 
@@ -4954,19 +4954,32 @@ export class Player implements IPlayer {
       my = py + Math.sin(ca) * cd;
     }
 
-    // 红蓝角色：tileIndex 偶 → 红球是 pivot（与实况一致）
-    if (tileIndex % 2 === 0) {
-      redOut[offset * 2] = px;     redOut[offset * 2 + 1] = py;
-      blueOut[offset * 2] = mx;    blueOut[offset * 2 + 1] = my;
-    } else {
-      redOut[offset * 2] = mx;     redOut[offset * 2 + 1] = my;
-      blueOut[offset * 2] = px;    blueOut[offset * 2 + 1] = py;
+    // 角色按该砖实际的行星列表分配（MultiPlanet 之后场上可能不是红蓝；
+    // pivot = 列表中的枢轴，mover = 下一个），拖尾因此始终跟对行星的颜色。
+    const info = this.getTilePlanetInfo(tileIndex);
+    const ids = info.ids;
+    const pivotId = ids[info.pivotPos % ids.length];
+    const moverId = ids[(info.pivotPos + 1) % ids.length];
+    const pivotOut = outById[pivotId];
+    if (pivotOut) {
+      const w = writtenById[pivotId];
+      pivotOut[w * 2] = px;
+      pivotOut[w * 2 + 1] = py;
+      writtenById[pivotId] = w + 1;
+    }
+    const moverOut = outById[moverId];
+    if (moverOut) {
+      const w = writtenById[moverId];
+      moverOut[w * 2] = mx;
+      moverOut[w * 2 + 1] = my;
+      writtenById[moverId] = w + 1;
     }
   }
 
   // Pre-allocated buffers for trail computation to avoid per-frame GC
-  private _trailRedArr: Float64Array | null = null;
-  private _trailBlueArr: Float64Array | null = null;
+  /** 每颗行星（按颜色 id）的采样缓冲；角色按砖的行星列表分配，不再假定红蓝。 */
+  private _trailArrById: (Float64Array | null)[] = new Array(8).fill(null);
+  private _trailWrittenById: Int32Array = new Int32Array(8);
   private _trailMaxSteps: number = 0;
 
   // Binary search tile index for a given timeInLevel (seconds). Avoids O(n) linear scans.
@@ -4996,19 +5009,22 @@ export class Player implements IPlayer {
    *   - 末端正好是当前时刻的球坐标 → 天然贴合球，无需头部对齐。
    */
   private computePlanetTrails(timeInLevel: number): void {
-    if (!this.showTrail || !this.planetRed?.trail || !this.planetBlue?.trail) return;
+    if (!this.showTrail) return;
     if (this.tileStartTimes.length < 2) return;
 
     // 记录本帧所有激活行星的真实坐标（MultiPlanet 段直接用它生成拖尾）
     this.recordTrailHistory(timeInLevel);
 
-    // MultiPlanet（N>2）：官方几何复杂，拖尾改用逐帧真实位置，保证轨迹贴住每颗行星
-    if (this.getTilePlanetInfo(this.currentTileIndex).ids.length > 2) {
+    const TRAIL_DURATION = 0.74;   // 拖尾寿命 yf = 74e4 µs
+    // MultiPlanet（N>2），或采样窗口跨进/跨出 N>2 段：官方几何复杂，
+    // 拖尾改用逐帧真实位置，保证轨迹贴住每颗行星
+    const curInfo = this.getTilePlanetInfo(this.currentTileIndex);
+    const winInfo = this.getTilePlanetInfo(this.getTileIndexAtLevelTime(timeInLevel - TRAIL_DURATION));
+    if (curInfo.ids.length > 2 || winInfo.ids.length > 2) {
       this.buildTrailFromHistory(timeInLevel);
       return;
     }
 
-    const TRAIL_DURATION = 0.74;   // 拖尾寿命 yf = 74e4 µs
     // 采样率（点/秒）：固定模式 100（10ms/点）；bpm 模式随当前有效 BPM 提高
     // 采样率（上限 666 → 1.5ms/点）。高 BPM 时一段弧只有几十毫秒，固定 10ms
     // 只采到几个点，连线就是折线；加密后按真实弧线取点，拖尾明显更平滑。
@@ -5021,39 +5037,46 @@ export class Player implements IPlayer {
     const startTime = timeInLevel - TRAIL_DURATION;
     const maxSteps = Math.ceil(TRAIL_DURATION * INV_INTERVAL) + 3;
 
-    if (!this._trailRedArr || this._trailMaxSteps < maxSteps) {
+    // 每颗行星独立缓冲；角色按各砖实际行星列表分配（MultiPlanet 后场上可能不是红蓝）
+    if (this._trailMaxSteps < maxSteps) {
       this._trailMaxSteps = maxSteps;
-      this._trailRedArr = new Float64Array(maxSteps * 2);
-      this._trailBlueArr = new Float64Array(maxSteps * 2);
+      for (let id = 0; id < this._trailArrById.length; id++) this._trailArrById[id] = null;
     }
-    const redArr = this._trailRedArr!;
-    const blueArr = this._trailBlueArr!;
+    for (const id of this.activePlanetIds) {
+      let buf = this._trailArrById[id];
+      if (!buf || buf.length < maxSteps * 2) {
+        buf = new Float64Array(maxSteps * 2);
+        this._trailArrById[id] = buf;
+      }
+    }
+    this._trailWrittenById.fill(0);
 
     let tileIndex = this.getTileIndexAtLevelTime(startTime);
-    let written = 0;
     for (let s = 0; s < maxSteps - 1; s++) {
       const t = startTime + s / INV_INTERVAL;
       if (t >= timeInLevel) break;
       while (tileIndex + 1 < this.tileStartTimes.length && t >= this.tileStartTimes[tileIndex + 1]) tileIndex++;
-      this.computePositionsAtTime(t, tileIndex, redArr, blueArr, written);
-      written++;
+      this.computePositionsAtTime(t, tileIndex, this._trailArrById, this._trailWrittenById);
     }
     // 末端精确取当前时刻：头部正好落在球上
-    if (written > 0) {
-      this.computePositionsAtTime(timeInLevel, this.getTileIndexAtLevelTime(timeInLevel), redArr, blueArr, written);
-      written++;
-    }
+    this.computePositionsAtTime(timeInLevel, this.getTileIndexAtLevelTime(timeInLevel), this._trailArrById, this._trailWrittenById);
 
-    if (written < 2) {
-      this.buildTrailFromHistory(timeInLevel);
-      return;
+    let anyWritten = false;
+    for (const id of this.activePlanetIds) {
+      const planet = this.planetsById[id];
+      if (!planet?.trail) continue;
+      const buf = this._trailArrById[id];
+      const n = this._trailWrittenById[id];
+      if (!buf || n < 2) {
+        planet.trail.clear();
+        continue;
+      }
+      planet.setTrailPoints(new Float64Array(buf.buffer, 0, n * 2));
+      // 点是世界坐标，网格本身不做偏移
+      planet.trail.mesh.position.set(0, 0, 0);
+      anyWritten = true;
     }
-
-    this.planetRed.setTrailPoints(new Float64Array(redArr.buffer, 0, written * 2));
-    this.planetBlue.setTrailPoints(new Float64Array(blueArr.buffer, 0, written * 2));
-    // 点是世界坐标，网格本身不做偏移
-    this.planetRed.trail.mesh.position.set(0, 0, 0);
-    this.planetBlue.trail.mesh.position.set(0, 0, 0);
+    if (!anyWritten) this.buildTrailFromHistory(timeInLevel);
   }
 
   /** 直接用逐帧记录的真实位置拼每颗激活行星的拖尾（含 MoveTrack / MultiPlanet）。 */
