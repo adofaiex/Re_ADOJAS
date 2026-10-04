@@ -56,6 +56,17 @@ export class Planet implements IPlanet {
     if (this.texture) applyPlanetFrame(this.texture, performance.now() * 0.001);
   }
 
+  /** 替换行星贴图（异步染色完成 / 运行时换色用）：同步 sprite sheet 配置与材质。 */
+  setTexture(texture: Texture): void {
+    const planetTex = configurePlanetTexture(texture);
+    this.texture = planetTex;
+    const material = this.mesh.material as unknown as MeshBasicMaterial;
+    material.map = planetTex;
+    material.color.set(0xffffff);
+    material.needsUpdate = true;
+    applyPlanetFrame(planetTex, performance.now() * 0.001);
+  }
+
   /** Feed computed trail positions (Float64Array of XY pairs) to the trail renderer */
   setTrailPoints(xy: Float64Array): void {
     if (this.trail) this.trail.setPoints(xy);

@@ -203,8 +203,15 @@ function buildTintedPlanetTexture(img: HTMLImageElement, colorHex: number): Text
     const r = (colorHex >> 16) & 0xff;
     const g = (colorHex >> 8) & 0xff;
     const b = colorHex & 0xff;
+    // 红图 R 通道饱和（≈255），明暗细节藏在 G/B：用归一化的 (G+B)/2 作亮度遮罩。
+    // （用 max(R,G,B) 会恒为 1，染出来是纯色圆片，看起来"没有贴图"。）
+    let maxDetail = 1;
     for (let p = 0; p < data.length; p += 4) {
-        const lum = Math.max(data[p], data[p + 1], data[p + 2]) / 255;
+        const d = (data[p + 1] + data[p + 2]) * 0.5;
+        if (d > maxDetail) maxDetail = d;
+    }
+    for (let p = 0; p < data.length; p += 4) {
+        const lum = Math.min(1, ((data[p + 1] + data[p + 2]) * 0.5) / maxDetail);
         data[p] = Math.round(r * lum);
         data[p + 1] = Math.round(g * lum);
         data[p + 2] = Math.round(b * lum);

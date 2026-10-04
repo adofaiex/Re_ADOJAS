@@ -4736,16 +4736,10 @@ export class Player implements IPlayer {
       this.planetsById[id] = planet;
       if (id === 0) this.planetRed = planet;
       if (id === 1) this.planetBlue = planet;
-      // 底图未解码时先用了红贴图：解码完成后换成彩色贴图
+      // 底图未解码时先用了红贴图：解码完成后换成彩色贴图（并让帧动画作用到新贴图上）
       if (!def.texture) {
         const target = planet;
-        void ensureTintedPlanetTexture(def.color).then(tex => {
-          const material = target.mesh.material as unknown as { map: unknown; needsUpdate: boolean };
-          if (material.map !== tex) {
-            material.map = tex;
-            material.needsUpdate = true;
-          }
-        });
+        void ensureTintedPlanetTexture(def.color).then(tex => target.setTexture(tex));
       }
     }
     return planet;
