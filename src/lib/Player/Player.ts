@@ -33,7 +33,7 @@ import {
 } from './Judge';
 import { JudgmentDisplay } from './JudgmentDisplay';
 import { HitErrorMeter } from './HitErrorMeter';
-import { getIconTypeIndex, getTwirlTexture, getSetSpeedTexture, IconType, buildIconAtlas, ICON_ATLAS_SIZE, getPlanetTexture, getTintedPlanetTexture } from './IconLoader';
+import { getIconTypeIndex, getTwirlTexture, getSetSpeedTexture, IconType, buildIconAtlas, ICON_ATLAS_SIZE, getPlanetTexture, getTintedPlanetTexture, ensureTintedPlanetTexture } from './IconLoader';
 import Stats from 'three/examples/jsm/libs/stats.module.js';
 import type { Bloom, Flash, RecolorTrack } from 'adofai/event';
 import { Level } from 'adofai';
@@ -302,8 +302,10 @@ export class Player implements IPlayer {
 
   // 逐帧球位置历史（环形缓冲）
   private static readonly TRAIL_HIST_MAX = 256;
-  private _trailHistRed: Float64Array = new Float64Array(Player.TRAIL_HIST_MAX * 2);
-  private _trailHistBlue: Float64Array = new Float64Array(Player.TRAIL_HIST_MAX * 2);
+  /** 每颗行星（按颜色 id）逐帧位置历史；MultiPlanet 段拖尾直接用真实轨迹。 */
+  private _trailHistById: (Float64Array | null)[] = new Array(8).fill(null);
+  /** 每颗行星开始记录历史的 head（-1 = 未激活）。 */
+  private _trailHistStart: number[] = new Array(8).fill(-1);
   private _trailHistTime: Float64Array = new Float64Array(Player.TRAIL_HIST_MAX);
   private _trailHistHead: number = 0;
   private _trailHistCount: number = 0;
@@ -681,6 +683,20 @@ export class Player implements IPlayer {
       events.sort((a, b) => a.floor - b.floor);
       return { totalTiles: this.tileNumPlanets.length, counts, multiPlanetEvents: events };
     };
+    // 行星状态探针：__adojasPlanets() → 每颗行星的存活/在场/贴图/拖尾/坐标
+    (window as any).__adojasPlanets = () => this.planetsById.map((planet, id) => {
+      if (!planet) return { id, exists: false };
+      const material = planet.mesh.material as unknown as { map?: unknown };
+      return {
+        id,
+        exists: true,
+        inScene: this.scene.children.includes(planet.mesh),
+        textured: !!material.map,
+        trail: !!planet.trail,
+        x: Math.round(planet.position.x * 100) / 100,
+        y: Math.round(planet.position.y * 100) / 100,
+      };
+    });
     // 性能/泄漏探针：__adojasPerf() → 各阶段耗时（每秒平均）+ 场景/资源计数。
     // 用法：刚开局跑一次，掉帧后再跑一次；**持续增长**的那个计数就是"越来越卡"的元凶。
     (window as any).__adojasPerf = () => {
@@ -2173,8 +2189,12 @@ export class Player implements IPlayer {
         if (i > 0 && !isMidspinTile && numPlanets > 2) {
             const inverseAngle = Math.PI * (numPlanets - 2) / numPlanets;
             const TAU = 2 * Math.PI;
-            sweepAngle = ((sweepAngle - inverseAngle) % TAU + TAU) % TAU;
-            if (sweepAngle <= 1e-6) sweepAngle = TAU;
+            // 官方 792-795：前一砖是 midspin 时 num3 还要减去 (2π+inverse)·dir，
+            // mod 2π 后恰好抵消 inverse 的扣除（sweep 保持原角）；否则 sweep = mod(角 − inverse, 2π)。
+            if (tileDirection(tiles, i - 1) !== 999) {
+                sweepAngle = ((sweepAngle - inverseAngle) % TAU + TAU) % TAU;
+            }
+            if (sweepAngle <= 1e-6) sweepAngle = TAU; // 官方 turnaround fallback（2 拍）
         }
 
         if (isCW) totalAngle -= extraRotation * 2 * Math.PI;
@@ -4710,6 +4730,17 @@ export class Player implements IPlayer {
       this.planetsById[id] = planet;
       if (id === 0) this.planetRed = planet;
       if (id === 1) this.planetBlue = planet;
+      // 底图未解码时先用了红贴图：解码完成后换成彩色贴图
+      if (!def.texture) {
+        const target = planet;
+        void ensureTintedPlanetTexture(def.color).then(tex => {
+          const material = target.mesh.material as unknown as { map: unknown; needsUpdate: boolean };
+          if (material.map !== tex) {
+            material.map = tex;
+            material.needsUpdate = true;
+          }
+        });
+      }
     }
     return planet;
   }
@@ -4723,11 +4754,13 @@ export class Player implements IPlayer {
       if (!planet) continue;
       const active = this.activePlanetIds.indexOf(id) >= 0;
       const inScene = this.scene.children.includes(planet.mesh);
-      if (active && !inScene) {
-        planet.render(this.scene);
-      } else if (!active && inScene) {
+      if (active) {
+        if (!inScene) planet.render(this.scene);
+        if (this._trailHistStart[id] < 0) this._trailHistStart[id] = this._trailHistHead;
+      } else if (inScene) {
         planet.removeFromScene(this.scene);
         planet.clearTrail();
+        this._trailHistStart[id] = -1;
       }
     }
   }
@@ -4966,8 +4999,14 @@ export class Player implements IPlayer {
     if (!this.showTrail || !this.planetRed?.trail || !this.planetBlue?.trail) return;
     if (this.tileStartTimes.length < 2) return;
 
-    // 兜底用：记录本帧两球真实坐标（正常情况下拖尾由下面的 seek 采样生成）
+    // 记录本帧所有激活行星的真实坐标（MultiPlanet 段直接用它生成拖尾）
     this.recordTrailHistory(timeInLevel);
+
+    // MultiPlanet（N>2）：官方几何复杂，拖尾改用逐帧真实位置，保证轨迹贴住每颗行星
+    if (this.getTilePlanetInfo(this.currentTileIndex).ids.length > 2) {
+      this.buildTrailFromHistory(timeInLevel);
+      return;
+    }
 
     const TRAIL_DURATION = 0.74;   // 拖尾寿命 yf = 74e4 µs
     // 采样率（点/秒）：固定模式 100（10ms/点）；bpm 模式随当前有效 BPM 提高
@@ -5017,49 +5056,57 @@ export class Player implements IPlayer {
     this.planetBlue.trail.mesh.position.set(0, 0, 0);
   }
 
-  /** 兜底：直接用逐帧记录的两球真实位置拼拖尾（含 MoveTrack）。 */
+  /** 直接用逐帧记录的真实位置拼每颗激活行星的拖尾（含 MoveTrack / MultiPlanet）。 */
   private buildTrailFromHistory(timeInLevel: number): void {
-    if (!this.planetRed?.trail || !this.planetBlue?.trail) return;
     const TRAIL_DURATION = 0.74;
     const minT = timeInLevel - TRAIL_DURATION;
     const maxPts = 120;
     const lastIdx = (this._trailHistHead - 1 + Player.TRAIL_HIST_MAX) % Player.TRAIL_HIST_MAX;
-    let n = 0;
-    for (let i = 0; i < this._trailHistCount && n < maxPts; i++) {
-      const idx = (lastIdx - i + Player.TRAIL_HIST_MAX) % Player.TRAIL_HIST_MAX;
-      if (this._trailHistTime[idx] < minT) break;
-      n++;
+    for (const id of this.activePlanetIds) {
+      const planet = this.planetsById[id];
+      if (!planet?.trail) continue;
+      const hist = this._trailHistById[id];
+      const start = this._trailHistStart[id];
+      let n = 0;
+      if (hist) {
+        for (let i = 0; i < this._trailHistCount && n < maxPts; i++) {
+          const idx = (lastIdx - i + Player.TRAIL_HIST_MAX) % Player.TRAIL_HIST_MAX;
+          if (this._trailHistTime[idx] < minT) break;
+          n++;
+          if (start >= 0 && idx === start) break; // 行星激活之前的历史不参与
+        }
+      }
+      if (!hist || n < 2) {
+        planet.trail.clear();
+        continue;
+      }
+      const arr = new Float64Array(n * 2);
+      for (let i = 0; i < n; i++) {
+        const idx = (lastIdx - i + Player.TRAIL_HIST_MAX) % Player.TRAIL_HIST_MAX;
+        const k = (n - 1 - i) * 2;
+        arr[k] = hist[idx * 2];
+        arr[k + 1] = hist[idx * 2 + 1];
+      }
+      planet.setTrailPoints(arr);
+      planet.trail.mesh.position.set(0, 0, 0);
     }
-    if (n < 2) {
-      this.planetRed.trail.clear();
-      this.planetBlue.trail.clear();
-      return;
-    }
-    const redArr = new Float64Array(n * 2);
-    const blueArr = new Float64Array(n * 2);
-    for (let i = 0; i < n; i++) {
-      const idx = (lastIdx - i + Player.TRAIL_HIST_MAX) % Player.TRAIL_HIST_MAX;
-      const k = (n - 1 - i) * 2;
-      redArr[k] = this._trailHistRed[idx * 2];
-      redArr[k + 1] = this._trailHistRed[idx * 2 + 1];
-      blueArr[k] = this._trailHistBlue[idx * 2];
-      blueArr[k + 1] = this._trailHistBlue[idx * 2 + 1];
-    }
-    this.planetRed.setTrailPoints(redArr);
-    this.planetBlue.setTrailPoints(blueArr);
-    // 点是世界坐标，无需偏移
-    this.planetRed.trail.mesh.position.set(0, 0, 0);
-    this.planetBlue.trail.mesh.position.set(0, 0, 0);
   }
 
-  /** 记录两球实际位置到环形历史。 */
+  /** 记录所有激活行星的实际位置到环形历史。 */
   private recordTrailHistory(timeInLevel: number): void {
-    if (!this.showTrail || !this.planetRed || !this.planetBlue) return;
+    if (!this.showTrail) return;
     const head = this._trailHistHead;
-    this._trailHistRed[head * 2] = this.planetRed.position.x;
-    this._trailHistRed[head * 2 + 1] = this.planetRed.position.y;
-    this._trailHistBlue[head * 2] = this.planetBlue.position.x;
-    this._trailHistBlue[head * 2 + 1] = this.planetBlue.position.y;
+    for (const id of this.activePlanetIds) {
+      const planet = this.planetsById[id];
+      if (!planet?.trail) continue;
+      let hist = this._trailHistById[id];
+      if (!hist) {
+        hist = new Float64Array(Player.TRAIL_HIST_MAX * 2);
+        this._trailHistById[id] = hist;
+      }
+      hist[head * 2] = planet.position.x;
+      hist[head * 2 + 1] = planet.position.y;
+    }
     this._trailHistTime[head] = timeInLevel;
     this._trailHistHead = (head + 1) % Player.TRAIL_HIST_MAX;
     if (this._trailHistCount < Player.TRAIL_HIST_MAX) this._trailHistCount++;
@@ -5069,6 +5116,9 @@ export class Player implements IPlayer {
   private resetTrailHistory(): void {
     this._trailHistHead = 0;
     this._trailHistCount = 0;
+    for (let id = 0; id < this._trailHistStart.length; id++) {
+      this._trailHistStart[id] = this.activePlanetIds.indexOf(id) >= 0 ? 0 : -1;
+    }
   }
 
   private removePlanets(): void {

@@ -187,27 +187,17 @@ export const PLANET_FRAME_COUNT = 11;
 export const PLANET_FPS = 12;
 
 const _tintedPlanetCache = new Map<string, Texture>();
+const _tintedPlanetPending = new Map<string, Promise<Texture>>();
 
-/**
- * MultiPlanet 追加行星的贴图：官方 `PlanetRenderer.SetColor` 用白色 sprite × planetColor，
- * 而我们手上的 planet_red.png 是红色预设。按"红/绿/蓝通道最大值 = 亮度遮罩"重映射成
- * 目标颜色，保留同一套 11 帧 sprite sheet 与明暗细节（比纯色方块贴近官方观感）。
- */
-export function getTintedPlanetTexture(colorHex: number): Texture {
-    const key = colorHex.toString(16);
-    const cached = _tintedPlanetCache.get(key);
-    if (cached) return cached;
-    const src = _planetRed();
-    const img = src.image as (HTMLImageElement | HTMLCanvasElement | undefined);
-    const width = img ? (((img as HTMLImageElement).naturalWidth) || (img as HTMLCanvasElement).width || 0) : 0;
-    if (!img || width === 0) return src; // 贴图尚未加载完成：退回红色贴图（不写入缓存）
-    const height = ((img as HTMLImageElement).naturalHeight) || (img as HTMLCanvasElement).height;
+/** 把红贴图（亮度遮罩 = RGB 通道最大值）重映射成目标颜色的同款 11 帧 sprite sheet。 */
+function buildTintedPlanetTexture(img: HTMLImageElement, colorHex: number): Texture {
+    const width = img.naturalWidth || img.width;
+    const height = img.naturalHeight || img.height;
     const canvas = document.createElement('canvas');
     canvas.width = width;
     canvas.height = height;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return src;
-    ctx.drawImage(img as CanvasImageSource, 0, 0);
+    const ctx = canvas.getContext('2d')!;
+    ctx.drawImage(img, 0, 0);
     const imageData = ctx.getImageData(0, 0, width, height);
     const data = imageData.data;
     const r = (colorHex >> 16) & 0xff;
@@ -225,8 +215,36 @@ export function getTintedPlanetTexture(colorHex: number): Texture {
     tex.minFilter = LinearFilter;
     tex.magFilter = LinearFilter;
     configurePlanetTexture(tex);
-    _tintedPlanetCache.set(key, tex);
+    _tintedPlanetCache.set(colorHex.toString(16), tex);
     return tex;
+}
+
+/**
+ * MultiPlanet 追加行星的贴图（同步版）：官方 `PlanetRenderer.SetColor` 用白色 sprite × planetColor；
+ * 这里把红色预设按亮度重映射成目标色。若底图尚未解码完成，先返回红色底图（不缓存），
+ * 调用方用 `ensureTintedPlanetTexture` 在解码完成后替换材质即可。
+ */
+export function getTintedPlanetTexture(colorHex: number): Texture {
+    const cached = _tintedPlanetCache.get(colorHex.toString(16));
+    if (cached) return cached;
+    const img = _planetRed().image as HTMLImageElement | undefined;
+    if (!img || !(img.naturalWidth > 0)) return _planetRed();
+    return buildTintedPlanetTexture(img, colorHex);
+}
+
+/** 异步确保彩色贴图可用（直接用 data URI 解码，不依赖 THREE 贴图对象的加载时机）。 */
+export function ensureTintedPlanetTexture(colorHex: number): Promise<Texture> {
+    const key = colorHex.toString(16);
+    const cached = _tintedPlanetCache.get(key);
+    if (cached) return Promise.resolve(cached);
+    let pending = _tintedPlanetPending.get(key);
+    if (!pending) {
+        pending = loadImage(planetRedUrl)
+            .then(img => buildTintedPlanetTexture(img, colorHex))
+            .catch(() => _planetRed());
+        _tintedPlanetPending.set(key, pending);
+    }
+    return pending;
 }
 
 /** 把行星贴图配成"单帧采样"（贴图是 11 帧横排，必须 repeat 1/11 + offset 选帧，
