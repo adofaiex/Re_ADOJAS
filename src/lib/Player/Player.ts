@@ -4168,6 +4168,12 @@ export class Player implements IPlayer {
     this.isPaused = false;
     const pauseDuration = performance.now() - this.pauseTime;
     this.startTime += pauseDuration;
+    // 音频时钟基准同样要补偿：elapsedTime 走 AudioContext.currentTime，
+    // 它不受暂停影响；不补偿的话恢复瞬间会前进一个"暂停时长"→ 球瞬移。
+    const ctx = getSharedAudioContext();
+    if (ctx) {
+      this.audioContextStartOffset = ctx.currentTime - this.elapsedTime / 1000;
+    }
     // 预启动倒计时期间：音乐保持暂停，GO 时由 updatePlayer 统一播放
     if (this.preStartHoldMs <= 0 && this.music && (this.music as any).hasAudio ? this.music.hasAudio : false) {
       this.music.resume();
@@ -4926,7 +4932,9 @@ export class Player implements IPlayer {
 
       const st = this.tileStartTimes[tileIndex];
       const dur = this.tileDurations[tileIndex];
-      const progress = dur > 0.0001 ? (timeInLevel - st) / dur : 1;
+      // 时长阈值只用于判断"零时长"（midspin/0°砖）；不能用 0.1ms 这类大阈值，
+      // 否则高 BPM（30M BPM 下普通砖仅 2µs）会把 progress 全判成 1，球贴在砖尾不跟谱。
+      const progress = dur > 1e-9 ? (timeInLevel - st) / dur : 1;
       const clampedProgress = Math.max(0, Math.min(1, progress));
 
       let startAngle: number;
@@ -5721,7 +5729,8 @@ export class Player implements IPlayer {
         // The pivot follows the current tile, and startDist/endDist adapt to neighbors.
         const startTime = this.tileStartTimes[tileIndex];
         const duration = this.tileDurations[tileIndex];
-        const progress = duration > 0.0001 ? (timeInLevel - startTime) / duration : 1;
+        // 同 computePositionsAtTime：仅把真正的零时长（midspin）视为瞬时
+        const progress = duration > 1e-9 ? (timeInLevel - startTime) / duration : 1;
 
         let startAngle: number;
         let startDist: number;
