@@ -89,9 +89,11 @@ export default function EditorPage() {
     t
   } = useEditorState()
 
-  // 诊断探针：编辑器页面重渲染累计次数（播放中两次采样求差即可得渲染频率）
+  // 诊断探针：编辑器页面重渲染累计次数 + 最近一次渲染的调用栈
   if (typeof window !== 'undefined') {
-    (window as any).__editorRenders = ((window as any).__editorRenders || 0) + 1
+    const w = window as any
+    w.__editorRenders = (w.__editorRenders || 0) + 1
+    w.__editorRenderStack = new Error('editor-render').stack
   }
 
   const [timelineOpen, setTimelineOpen] = useState(false)
