@@ -295,6 +295,10 @@ export class Player implements IPlayer {
   // Shared Renderer Resources
   private geometryCache: Map<string, BufferGeometry> = new Map();
   private maxCachedTiles: number = 2000; // Only keep this many meshes in memory
+  /** 上次执行砖缓存清理的时间戳（限流用；超高速段不必每帧清理）。 */
+  private _lastTileCacheCleanup: number = 0;
+  /** 实例化模式下所有砖共用的隐藏材质（砖 mesh 本身不渲染，只作状态载体/编辑器拾取）。 */
+  private instancedTileMaterial: MeshBasicMaterial | null = null;
 
   // Video Background
   private videoElement: HTMLVideoElement | null = null;
@@ -3022,13 +3026,21 @@ export class Player implements IPlayer {
     if (target === this._litThroughFloorIndex) return;
     const prev = this._litThroughFloorIndex;
     this._litThroughFloorIndex = target;
-    const total = this.levelData.tiles?.length ?? 0;
-    if (target > prev) {
-      for (let i = Math.max(0, prev + 1); i <= target && i < total; i++) {
-        this.instancedMeshManager!.setTileGlow(i, this.computeTileGlow(i, true));
-      }
-    } else {
-      for (let i = Math.max(0, target + 1); i <= prev && i < total; i++) {
+    // 只处理"当前有 mesh（= 有实例化 instance）的砖"：赫兹谱超高速段一次
+    // 可能跳过几千块砖，逐个 index 循环绝大多数是空转（setTileGlow 也要先查表）。
+    // 遍历砖缓存（上限 maxCachedTiles，量级有界）；还没创建的砖在创建时会用
+    // computeTileGlow(index, index <= _litThroughFloorIndex) 直接点亮。
+    const forward = target > prev;
+    // 只需要更新"当前可见"的砖：不可见的砖在重新进入视野时会走 dirtyTiles →
+    // syncInstancedTiles，用 computeTileGlow(index, index <= _litThroughFloorIndex)
+    // 补算；还没创建的砖在创建时同理。可见集合 = 屏幕砖数，量级有界。
+    for (const id of this.visibleTiles) {
+      const i = parseInt(id, 10);
+      if (forward) {
+        if (i > prev && i <= target) {
+          this.instancedMeshManager!.setTileGlow(i, this.computeTileGlow(i, true));
+        }
+      } else if (i > target && i <= prev) {
         this.instancedMeshManager!.setTileGlow(i, 0);
       }
     }
@@ -3116,10 +3128,14 @@ export class Player implements IPlayer {
         });
     }
 
-    // Only iterate animated-color tiles (avoids scanning all visible tiles)
+    // 只遍历当前可见的砖，再测试是否在动画集合里（集合可能包含整谱 10 万+ 砖，
+    // 例如全局 Glow/Rainbow；反转为遍历可见集合后每帧量级 = 屏幕砖数）。
+    // 不可见的砖重新进入视野时会在 getOrCreateTileMesh 里按当前时间取色，不会漏。
     if (this._tilesWithAnimatedColor && this._tilesWithAnimatedColor.size > 0) {
-        for (const index of this._tilesWithAnimatedColor) {
+        for (const id of this.visibleTiles) {
+            const index = parseInt(id, 10);
             if (!this.tileVisible[index]) continue;
+            if (!this._tilesWithAnimatedColor.has(index)) continue;
             const config = this.tileColorManager.getTileRecolorConfig(index);
             if (!config) continue;
 
@@ -4208,6 +4224,9 @@ export class Player implements IPlayer {
       (mesh.material as any).opacity = effectiveOpacity;
       (mesh.material as any).transparent = effectiveOpacity < 0.999;
     }
+    // 没有 mesh = 没有实例化 instance（大范围 RecolorTrack 会扫过整谱的砖）。
+    // 提前返回：否则 dirtyTiles 会被塞进 10 万级索引，syncInstancedTiles 每帧白遍历。
+    if (!mesh) return;
     this.updateTileMeshColor(index);
     this.dirtyTiles.add(index);
     // 砖块辉度依赖砖的 colorAlpha（trackColor 的 alpha），颜色变化后立即刷新辉光层。
@@ -4805,7 +4824,12 @@ export class Player implements IPlayer {
     }
 
     if (this.tiles.size > this.maxCachedTiles) {
-        this.cleanupTileCache();
+        // 限流：超高速段每帧都会新增大量砖，全量排序清理不必每帧跑。
+        const nowCleanup = performance.now();
+        if (nowCleanup - this._lastTileCacheCleanup >= 200) {
+            this._lastTileCacheCleanup = nowCleanup;
+            this.cleanupTileCache();
+        }
     }
   }
 
@@ -4829,7 +4853,7 @@ export class Player implements IPlayer {
             if (this.instancedMeshManager) {
                 this.instancedMeshManager.removeTile(parseInt(id));
             }
-            if (mesh.material instanceof Material) {
+            if (mesh.material instanceof Material && mesh.material !== this.instancedTileMaterial) {
                 mesh.material.dispose();
             }
             this.tiles.delete(id);
@@ -4885,37 +4909,58 @@ export class Player implements IPlayer {
     const color = colors?.color || '#ffffff';
     const bgcolor = colors?.secondaryColor || color;
 
-    // Clone geometry and bake actual vertex colors from the mask
-    const tileGeo = geometry.clone();
-    const sharedColorAttr = geometry.getAttribute('color') as BufferAttribute;
-    const colorAttr = tileGeo.getAttribute('color') as BufferAttribute;
-    const cFill = new Color(color);
-    const cBorder = new Color(bgcolor);
-    const colorArray = colorAttr.array;
-    const maskArray = sharedColorAttr.array;
-
-    for (let i = 0; i < colorArray.length; i += 3) {
-        if (maskArray[i] < 0.5) {
-            colorArray[i] = cBorder.r;
-            colorArray[i + 1] = cBorder.g;
-            colorArray[i + 2] = cBorder.b;
-        } else {
-            colorArray[i] = cFill.r;
-            colorArray[i + 1] = cFill.g;
-            colorArray[i + 2] = cFill.b;
+    // 实例化模式：砖的视觉完全由 InstancedMeshManager 绘制，这个 mesh 只是
+    // 变换/状态载体（以及编辑器拾取用的几何）。直接复用 geometryCache 里的共享
+    // 几何 + 一个共享隐藏材质，跳过 per-tile 的 geometry.clone()、顶点色烘焙和
+    // 新建材质 —— 赫兹谱（10 万砖）超高速段每帧要创建/回收大量砖，这是最大的一笔
+    // 每砖开销。拾取不受影响：共享几何带完整三角形，Raycaster 只用位置。
+    let tileGeo: BufferGeometry;
+    let material: MeshBasicMaterial;
+    if (this.instancedMeshManager) {
+        if (!this.instancedTileMaterial) {
+            this.instancedTileMaterial = new MeshBasicMaterial({
+                vertexColors: true,
+                side: DoubleSide,
+                transparent: true,
+                depthWrite: false,
+                visible: false
+            });
         }
+        tileGeo = geometry;
+        material = this.instancedTileMaterial;
+    } else {
+        // 非实例化回退路径：clone + 按 mask 烘焙顶点色 + 独立材质
+        tileGeo = geometry.clone();
+        const sharedColorAttr = geometry.getAttribute('color') as BufferAttribute;
+        const colorAttr = tileGeo.getAttribute('color') as BufferAttribute;
+        const cFill = new Color(color);
+        const cBorder = new Color(bgcolor);
+        const colorArray = colorAttr.array;
+        const maskArray = sharedColorAttr.array;
+
+        for (let i = 0; i < colorArray.length; i += 3) {
+            if (maskArray[i] < 0.5) {
+                colorArray[i] = cBorder.r;
+                colorArray[i + 1] = cBorder.g;
+                colorArray[i + 2] = cBorder.b;
+            } else {
+                colorArray[i] = cFill.r;
+                colorArray[i + 1] = cFill.g;
+                colorArray[i + 2] = cFill.b;
+            }
+        }
+        colorAttr.needsUpdate = true;
+
+        // Store mask reference for future color updates
+        tileGeo.userData.colorMask = sharedColorAttr;
+
+        material = new MeshBasicMaterial({
+            vertexColors: true,
+            side: DoubleSide,
+            transparent: true,
+            depthWrite: false
+        });
     }
-    colorAttr.needsUpdate = true;
-
-    // Store mask reference for future color updates
-    tileGeo.userData.colorMask = sharedColorAttr;
-
-    const material = new MeshBasicMaterial({
-        vertexColors: true,
-        side: DoubleSide,
-        transparent: true,
-        depthWrite: false
-    });
 
     const tileMesh = new Mesh(tileGeo, material);
 
