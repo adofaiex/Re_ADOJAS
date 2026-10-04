@@ -22,10 +22,7 @@ const parser = new StringParser()
  */
 const COMPACT_TILES_THRESHOLD = 200_000
 
-// 大文件阈值 - V8 字符串限制约为 512MB，我们设置安全阈值
-const LARGE_FILE_THRESHOLD = 400 * 1024 * 1024 // 400MB
-
-// 超大文件阈值 - 需要提前预合成 hitsound
+// 超大文件阈值 - 用于加载进度分段（>90MB 时装饰/打拍音预合成占用更多进度区间）
 const VERY_LARGE_FILE_THRESHOLD = 90 * 1024 * 1024 // 90MB
 
 // 获取加载阶段的显示文本
@@ -628,37 +625,33 @@ export function useFileHandlers({
             return
           }
 
-          // 判断是否为超大文件 (>90MB) 或大文件 (>400MB)
+          // 判断是否为超大文件 (>90MB)：仅用于进度分段
           const isVeryLargeFile = fileSize > VERY_LARGE_FILE_THRESHOLD
-          const isLargeFile = fileSize > LARGE_FILE_THRESHOLD
           console.log('[DEBUG] Is very large file:', isVeryLargeFile, '(threshold:', VERY_LARGE_FILE_THRESHOLD, ')')
-          console.log('[DEBUG] Is large file:', isLargeFile, '(threshold:', LARGE_FILE_THRESHOLD, ')')
 
-          if (isLargeFile) {
-            // 大文件：直接使用 ArrayBuffer 解析，不转换为字符串
-            console.log('[DEBUG] Using large file parser')
+          // 大谱面统一走 StringParser：LargeFileParser 会丢科学计数法角度
+          // （ADOFAI 极小角度写成 1.17e-38 这类形式），导致砖数缩短、后方 Twirl 越界丢失。
+          // 仅当字符串解码失败（超出 V8 字符串上限/内存不足）时才回退 LargeFileParser。
+          let content: string
+          try {
+            content = new TextDecoder('utf-8').decode(arrayBuffer)
+          } catch (error) {
+            console.warn('[DEBUG] String decode failed, falling back to LargeFileParser:', error)
             await loadLargeFile(arrayBuffer, isVeryLargeFile)
-          } else if (isVeryLargeFile) {
-            // 超大文件但不是极大文件：也使用 LargeFileParser
-            console.log('[DEBUG] Using large file parser for very large file')
-            await loadLargeFile(arrayBuffer, true)
-          } else {
-            // 小文件：转换为字符串后解析
-            const decoder = new TextDecoder('utf-8')
-            const content = decoder.decode(arrayBuffer)
-            console.log('[DEBUG] Content length:', content?.length)
+            return
+          }
+          console.log('[DEBUG] Content length:', content?.length)
 
-            // Choose loading method based on settings
-            if (settings.loadMethod === 'worker') {
-              console.log('[DEBUG] Using worker loading')
-              await loadWithWorker(content)
-            } else if (settings.loadMethod === 'async') {
-              console.log('[DEBUG] Using async loading')
-              await loadAsync(content)
-            } else {
-              console.log('[DEBUG] Using sync loading')
-              loadSync(content)
-            }
+          // Choose loading method based on settings
+          if (settings.loadMethod === 'worker') {
+            console.log('[DEBUG] Using worker loading')
+            await loadWithWorker(content)
+          } else if (settings.loadMethod === 'async') {
+            console.log('[DEBUG] Using async loading')
+            await loadAsync(content)
+          } else {
+            console.log('[DEBUG] Using sync loading')
+            loadSync(content)
           }
         } catch (error) {
           console.error('[DEBUG] Loading error:', error)

@@ -245,7 +245,10 @@ function parseNumberArrayIncremental(
         currentValue = '';
         lastWasComma = true;
         i++;
-      } else if ((byte >= 48 && byte <= 57) || byte === 45 || byte === 46) {
+      } else if ((byte >= 48 && byte <= 57) || byte === 45 /* - */ || byte === 46 /* . */ ||
+                 byte === 43 /* + */ || byte === 101 /* e */ || byte === 69 /* E */) {
+        // 科学计数法也要收：ADOFAI 极小角度会写成 1.1754943508222875e-38，
+        // 旧实现只认 0-9/-/.，会把这类数值整段丢掉 → 砖数缩短 → 后面的 Twirl 全部越界丢失。
         currentValue += String.fromCharCode(byte);
         lastWasComma = false;
         i++;
