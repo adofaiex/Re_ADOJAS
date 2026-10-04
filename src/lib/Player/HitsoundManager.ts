@@ -196,6 +196,8 @@ export class HitsoundManager {
   private static readonly CHUNK_MODE_DURATION_THRESHOLD = 900; // 15 分钟
   /** 加载期预合成并缓存的块数上限（10s/块 → 400s）。超出的块播放时按需合成。 */
   private static readonly CHUNK_CACHE_MAX = 40;
+  /** 按需调度前瞻块数：只合成/调度播放头前方这么多块（每块 10s）。 */
+  private static readonly SCHEDULE_LOOKAHEAD_CHUNKS = 3;
 
   // 分块合成的 worker 池：把逐采样混音移出主线程（每块 10s 窗口一个 job，
   // 最多 pool 个块并行合成）。初始化失败时降级为主线程同步合成。
@@ -219,6 +221,15 @@ export class HitsoundManager {
   private _syncFallbackUsed: boolean = false;
   private _syncChunksMixed: number = 0;
   private _schedActive: boolean = false;
+  /** 按需调度状态（startChunked 建立；stop/seek 置空）。 */
+  private _schedState: {
+    gen: number;
+    offset: number;
+    startWall: number;
+    nextChunk: number;
+    playheadChunk: number;
+    totalChunks: number;
+  } | null = null;
   /** 加载期预合成的块缓存（播放时直接取用；播放中按窗口淘汰）。 */
   private chunkCache: Map<number, AudioBuffer> = new Map();
   /** 最近若干块的峰值（诊断高 BPM 段是否被削平/异常）。 */
@@ -497,6 +508,7 @@ export class HitsoundManager {
   stop(): void {
     // 取消分块调度循环并停掉所有块音源
     this.chunkGeneration++;
+    this._schedState = null;
     if (this.chunkSources.length > 0) {
       for (const s of this.chunkSources) {
         try { s.stop(); s.disconnect(); } catch (e) { }
@@ -523,35 +535,64 @@ export class HitsoundManager {
     const gen = ++this.chunkGeneration;
     const startWall = ctx.currentTime + Math.max(0, delay);
     const firstChunk = Math.max(0, Math.floor(offset / HitsoundManager.CHUNK_SEC));
-    void this.scheduleChunksFrom(firstChunk, offset, startWall, gen);
+    this._schedState = {
+      gen,
+      offset,
+      startWall,
+      nextChunk: firstChunk,
+      playheadChunk: firstChunk,
+      totalChunks: Math.ceil(this.chunkDuration / HitsoundManager.CHUNK_SEC),
+    };
+    void this.pumpChunkScheduling();
   }
 
-  private async scheduleChunksFrom(firstChunk: number, offset: number, startWall: number, gen: number): Promise<void> {
+  /** 播放推进时调用（每帧）：把调度泵到 playhead + 前瞻块数。 */
+  public update(timeInLevelSec: number): void {
+    const st = this._schedState;
+    if (!st || !this.chunkMode) return;
+    st.playheadChunk = Math.floor(timeInLevelSec / HitsoundManager.CHUNK_SEC);
+    if (!this._schedActive) {
+      void this.pumpChunkScheduling();
+    }
+  }
+
+  /**
+   * 按需调度：只合成/调度播放头前方 SCHEDULE_LOOKAHEAD_CHUNKS 块。
+   * 旧实现从播放开始就把整首谱的块全部合成并创建音源（长谱 = 启动 CPU 爆发、
+   * 大量常驻 AudioBuffer、worker 长时间占满 CPU）；现在随播放推进逐块泵，
+   * 空闲时 worker 完全不工作。
+   */
+  private async pumpChunkScheduling(): Promise<void> {
+    const st = this._schedState;
+    if (!st || this._schedActive) return;
     this._schedActive = true;
     try {
-      // 优先使用 worker 池（混音不占主线程）；不可用时降级为同步合成。
-      if (await this.ensureWorkers()) {
-        if (gen !== this.chunkGeneration) return;
-        await this.scheduleChunksWorkers(firstChunk, offset, startWall, gen);
-        return;
-      }
-
-      const totalChunks = Math.ceil(this.chunkDuration / HitsoundManager.CHUNK_SEC);
-      for (let k = firstChunk; k <= totalChunks; k++) {
-        if (gen !== this.chunkGeneration) return;
-        // 同步降级路径（worker 池不可用）：主线程逐块混音，会明显抢占帧时间
-        this._syncFallbackUsed = true;
-        const buf = this.synthesizeChunk(k);
-        if (buf) {
-          this._syncChunksMixed++;
-          this.scheduleChunkSource(k, buf, offset, startWall);
+      const useWorkers = await this.ensureWorkers();
+      while (this._schedState === st && st.gen === this.chunkGeneration) {
+        const limit = Math.min(st.totalChunks, st.playheadChunk + HitsoundManager.SCHEDULE_LOOKAHEAD_CHUNKS);
+        if (st.nextChunk > limit) break;
+        const k = st.nextChunk;
+        let buf: AudioBuffer | null = this.chunkCache.get(k) ?? null;
+        if (!buf) {
+          if (useWorkers) {
+            buf = await this.synthesizeChunkWorker(k);
+          } else {
+            this._syncFallbackUsed = true;
+            buf = this.synthesizeChunk(k);
+            if (buf) this._syncChunksMixed++;
+          }
         }
-        // 让出主线程，避免一次性合成全部块造成长阻塞；合成速度通常远快于实时。
+        if (this._schedState !== st || st.gen !== this.chunkGeneration) break;
+        st.nextChunk = k + 1;
+        if (buf) this.scheduleChunkSource(k, buf, st.offset, st.startWall);
+        // 播放窗口外的旧块淘汰，限制内存
+        if (k >= 3) this.chunkCache.delete(k - 3);
+        // 让出主线程，避免连续合成造成长阻塞（worker 路径的 await 已让出）
         await new Promise(resolve => setTimeout(resolve, 0));
-        if (gen !== this.chunkGeneration) return;
       }
+      this.emitWorkerStatus(true);
     } finally {
-      if (gen === this.chunkGeneration) this._schedActive = false;
+      this._schedActive = false;
     }
   }
 
@@ -650,32 +691,6 @@ export class HitsoundManager {
       await inFlight.shift();
       launch();
     }
-  }
-
-  /** 并行调度：最多 pool 个块同时在 worker 里合成，按块序回到主线程排队播放。 */
-  private async scheduleChunksWorkers(firstChunk: number, offset: number, startWall: number, gen: number): Promise<void> {
-    const totalChunks = Math.ceil(this.chunkDuration / HitsoundManager.CHUNK_SEC);
-    const pool = Math.max(1, this.workers?.length ?? 1);
-    let nextToLaunch = firstChunk;
-    const inFlight: Promise<{ k: number; buf: AudioBuffer | null }>[] = [];
-    const launch = (): void => {
-      while (inFlight.length < pool && nextToLaunch <= totalChunks) {
-        const k = nextToLaunch++;
-        const cached = this.chunkCache.get(k);
-        inFlight.push((cached ? Promise.resolve(cached) : this.synthesizeChunkWorker(k)).then(buf => ({ k, buf })));
-      }
-    };
-    launch();
-    while (inFlight.length > 0) {
-      if (gen !== this.chunkGeneration) return;
-      const { k, buf } = await inFlight.shift()!;
-      if (gen !== this.chunkGeneration) return;
-      if (buf) this.scheduleChunkSource(k, buf, offset, startWall);
-      // 播放窗口外的旧块淘汰，限制内存
-      if (k >= 3) this.chunkCache.delete(k - 3);
-      launch();
-    }
-    this.emitWorkerStatus(true);
   }
 
   /** 节流上报 worker 池状态（~100ms，防止 React 每条进度消息重渲染）。 */

@@ -2955,6 +2955,9 @@ export class Player implements IPlayer {
     // Unified trigger event dispatch from TimelineManager
     const t0 = this.elapsedTime / 1000 - this.getTimeOrigin();
 
+    // 打拍音分块按需调度：只泵到播放头前方几块（worker 合成，不占帧时间）
+    this.hitsoundManager.update(t0);
+
     // Handle rewind side effects
     if (this.timelineManager.isRewound(t0)) {
       this.bloomEnabled = false;
