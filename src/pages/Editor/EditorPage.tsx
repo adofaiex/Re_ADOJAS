@@ -25,7 +25,6 @@ import ottoNervousOff from "@/assets/ui/otto_nervous_off.json"
 
 // 主编辑器页面
 export default function EditorPage() {
-  const editorState = useEditorState() as Record<string, any>
   const {
     // Refs
     containerRef,
@@ -88,31 +87,7 @@ export default function EditorPage() {
 
     // Translation
     t
-  } = editorState
-
-  // 诊断探针：编辑器页面重渲染累计次数 + 最近一次渲染的调用栈 +
-  // 每次渲染之间变化的 useEditorState 字段（__changedKeys）—— 定位 setState 源。
-  if (typeof window !== 'undefined') {
-    const w = window as any
-    w.__editorRenders = (w.__editorRenders || 0) + 1
-    w.__editorRenderStack = new Error('editor-render').stack
-    const prev = w.__prevEditorState as Record<string, unknown> | undefined
-    if (prev) {
-      const changed = w.__changedKeys || (w.__changedKeys = {})
-      const now: Record<string, unknown> = {}
-      for (const k of Object.keys(editorState)) {
-        const b = editorState[k]
-        now[k] = b
-        if (typeof b === 'function') continue
-        if (prev[k] !== b) changed[k] = (changed[k] || 0) + 1
-      }
-      w.__prevEditorState = now
-    } else {
-      const now: Record<string, unknown> = {}
-      for (const k of Object.keys(editorState)) now[k] = editorState[k]
-      w.__prevEditorState = now
-    }
-  }
+  } = useEditorState()
 
   const [timelineOpen, setTimelineOpen] = useState(false)
   const [sliderValue, setSliderValue] = useState(0)
@@ -213,19 +188,6 @@ export default function EditorPage() {
   const [petting, setPetting] = useState(false)
   const [petHappy, setPetHappy] = useState(false)
 
-  // 诊断探针（局部 state）：记录 sliderValue/timelineOpen/petting/petHappy 的变化次数
-  if (typeof window !== 'undefined') {
-    const w = window as any
-    const prevLocal = w.__prevLocalState as Record<string, unknown> | undefined
-    const local: Record<string, unknown> = { sliderValue, timelineOpen, petting, petHappy }
-    if (prevLocal) {
-      const changed = w.__changedKeys || (w.__changedKeys = {})
-      for (const k of Object.keys(local)) {
-        if (prevLocal[k] !== local[k]) changed[k] = (changed[k] || 0) + 1
-      }
-    }
-    w.__prevLocalState = local
-  }
   const petStartRef = useRef(0)
 
   const handleOttoPetEnter = useCallback((): void => {
