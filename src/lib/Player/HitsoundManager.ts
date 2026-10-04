@@ -212,6 +212,12 @@ export class HitsoundManager {
   private synthTotalChunks: number = 0;
   private synthCompletedChunks: number = 0;
   private lastWorkerStatusEmit: number = 0;
+  // 调度诊断计数（__adojasHitsound）
+  private _jobsPosted: number = 0;
+  private _jobsDone: number = 0;
+  private _scheduledSources: number = 0;
+  private _syncFallbackUsed: boolean = false;
+  private _syncChunksMixed: number = 0;
   /** 加载期预合成的块缓存（播放时直接取用；播放中按窗口淘汰）。 */
   private chunkCache: Map<number, AudioBuffer> = new Map();
   /** 最近若干块的峰值（诊断高 BPM 段是否被削平/异常）。 */
@@ -530,8 +536,11 @@ export class HitsoundManager {
     const totalChunks = Math.ceil(this.chunkDuration / HitsoundManager.CHUNK_SEC);
     for (let k = firstChunk; k <= totalChunks; k++) {
       if (gen !== this.chunkGeneration) return;
+      // 同步降级路径（worker 池不可用）：主线程逐块混音，会明显抢占帧时间
+      this._syncFallbackUsed = true;
       const buf = this.synthesizeChunk(k);
       if (buf) {
+        this._syncChunksMixed++;
         this.scheduleChunkSource(k, buf, offset, startWall);
       }
       // 让出主线程，避免一次性合成全部块造成长阻塞；合成速度通常远快于实时。
@@ -689,6 +698,7 @@ export class HitsoundManager {
     const src = ctx.createBufferSource();
     src.buffer = buf;
     src.connect(this.getGainNode());
+    this._scheduledSources++;
     src.onended = () => {
       try { src.disconnect(); } catch (e) { }
       const i = this.chunkSources.indexOf(src);
@@ -725,6 +735,7 @@ export class HitsoundManager {
     if (jobs.length === 0) return Promise.resolve(null);
 
     const bufferLength = Math.ceil((CHUNK + this.workerMaxHitDuration + 0.1) * this.workerSampleRate);
+    this._jobsPosted++;
     return new Promise<AudioBuffer | null>((resolve) => {
       const onMsg = (ev: MessageEvent): void => {
         if (ev.data?.chunkIndex !== chunkIndex) return;
@@ -748,6 +759,7 @@ export class HitsoundManager {
         this.synthCompletedChunks++;
         this.emitWorkerStatus(true);
         this.recordChunkPeak(chunkIndex, Number(ev.data.peak) || 0);
+        this._jobsDone++;
         try {
           const ctx = getSharedAudioContext();
           const out = ctx.createBuffer(2, bufferLength, this.workerSampleRate);
@@ -869,6 +881,12 @@ export class HitsoundManager {
       cachedChunks: this.chunkCache.size,
       activeSources: this.chunkSources.length,
       workers: this.workers?.length ?? 0,
+      workersReady: this.workersReady,
+      syncFallbackUsed: this._syncFallbackUsed,
+      syncChunksMixed: this._syncChunksMixed,
+      jobsPosted: this._jobsPosted,
+      jobsDone: this._jobsDone,
+      scheduledSources: this._scheduledSources,
       lastPeaks: this._chunkPeaks.slice(-16).map(p => `#${p.chunk}:${p.peak.toFixed(2)}`).join(' '),
     };
   }

@@ -85,11 +85,16 @@ export class Player implements IPlayer {
 
   // Lightweight per-frame timing breakdown (logged via debugLog every ~2s).
   private _perf: Record<string, number> = {};
+  /** 本窗口内各阶段的单帧最大值（区分持续慢 vs 周期卡顿）。 */
+  private _perfMax: Record<string, number> = {};
   private _perfSamples: number = 0;
   private _perfLastLog: number = 0;
   /** 上一帧 rAF 时间戳（frameGap 探针）。 */
   private _lastAnimateTime: number = 0;
-  private perfAdd(name: string, ms: number): void { this._perf[name] = (this._perf[name] ?? 0) + ms; }
+  private perfAdd(name: string, ms: number): void {
+    this._perf[name] = (this._perf[name] ?? 0) + ms;
+    if (ms > (this._perfMax[name] ?? 0)) this._perfMax[name] = ms;
+  }
   private perfTick(nowMs: number): void {
     this._perfSamples++;
     if (this._perfLastLog === 0) { this._perfLastLog = nowMs; return; }
@@ -97,6 +102,7 @@ export class Player implements IPlayer {
     // 只按 2 秒归零本窗口的累计值（快照由 __adojasPerf() 读取）；
     // 不再 debugLog 打印，避免刷屏。需要看数值时手动调 __adojasPerf()。
     this._perf = {};
+    this._perfMax = {};
     this._perfSamples = 0;
     this._perfLastLog = nowMs;
   }
@@ -615,10 +621,13 @@ export class Player implements IPlayer {
         const n = this._perfSamples || 1;
         const perf: Record<string, number> = {};
         for (const k of Object.keys(this._perf)) perf[k] = +(this._perf[k] / n).toFixed(2);
+        const perfMax: Record<string, number> = {};
+        for (const k of Object.keys(this._perfMax)) perfMax[k] = +this._perfMax[k].toFixed(1);
         const r: any = this.renderer;
         const dm: any = this.decorationManager;
         return {
             perfAvgMs: perf,
+            perfMaxMs: perfMax,
             sceneChildren: this.scene?.children.length ?? 0,
             tiles: this.tiles?.size ?? 0,
             visibleTiles: this.visibleTiles?.size ?? 0,
