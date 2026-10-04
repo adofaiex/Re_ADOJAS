@@ -113,7 +113,6 @@ export default function EditorPage() {
       w.__prevEditorState = now
     }
   }
-  }
 
   const [timelineOpen, setTimelineOpen] = useState(false)
   const [sliderValue, setSliderValue] = useState(0)
