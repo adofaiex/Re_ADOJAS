@@ -54,6 +54,8 @@ const GLOW_Z_OFFSET = 0.00015;
 
 /** setInstanceMatrix 用的临时矩阵，避免每帧分配。 */
 const _tmpGlowMatrix = new Matrix4();
+const _tmpTileColor = new Color();
+const _tmpTileBgColor = new Color();
 
 /**
  * Instance data for a single tile
@@ -85,7 +87,8 @@ interface ShapeInstancedMesh {
     instancedMesh: InstancedMesh;
     dummy: Object3D;
     instances: Map<number, number>; // tileIndex -> instanceIndex
-    tileIdsByPosition: number[]; // reverse lookup: bufferPosition -> tileIndex (avoids rebuilding Map on every insert)
+    /** 已释放、可复用的实例槽位（删除砖时 O(1) 回收，避免 count 无限增长）。 */
+    freeSlots: number[];
     maxInstances: number;
     instanceCount: number;
     minTileIndex: number; // lowest tile ID in this mesh → highest render priority
@@ -268,7 +271,7 @@ export class InstancedMeshManager {
             instancedMesh,
             dummy,
             instances: new Map(),
-            tileIdsByPosition: [],
+            freeSlots: [],
             maxInstances,
             instanceCount: 0,
             minTileIndex: Infinity, // will be set when first tile is added
@@ -348,7 +351,14 @@ export class InstancedMeshManager {
                     // Hide in old mesh
                     oldShapeData.instancedMesh.geometry.attributes.iOpacity!.setX(oldInstanceIndex, 0);
                     oldShapeData.instancedMesh.geometry.attributes.iOpacity!.needsUpdate = true;
+                    // 同时熄灭辉光并把槽位放回自由列表复用
+                    const oldGlowAttr = oldShapeData.glowMesh.geometry.attributes.iGlow;
+                    if (oldGlowAttr) {
+                        oldGlowAttr.setX(oldInstanceIndex, 0);
+                        oldGlowAttr.needsUpdate = true;
+                    }
                     oldShapeData.instances.delete(tileIndex);
+                    oldShapeData.freeSlots.push(oldInstanceIndex);
                 }
                 // 变更形状后旧形状可能已空：回收，避免残留空批。
                 if (oldShapeData.instances.size === 0) {
@@ -387,84 +397,22 @@ export class InstancedMeshManager {
         // Check if we need more instances
         let instanceIndex = shapeData.instances.get(tileIndex);
         if (instanceIndex === undefined) {
-            if (shapeData.instanceCount >= shapeData.maxInstances) {
-                this.expandInstancedMesh(shapeData);
+            // O(1)：优先复用已释放的槽位，否则追加到末尾。
+            // 旧实现按 tileId 降序二分插入：插一个实例要 memmove 之后所有实例的矩阵 +
+            // 7 组 InstancedBufferAttribute + 全扫 instances Map + 每条位移都 new Matrix4()。
+            // 高速段每帧新增几百砖时这是最大的一笔开销，而且删除的槽位永不回收、
+            // instanceCount 只增不减（死实例持续占用顶点处理）。绘制顺序不影响画面：
+            // 逐砖遮挡由 setTileLayer 的 z 偏移经深度缓冲解决，形状间顺序仍由
+            // minTileIndex/renderOrder 维持。
+            if (shapeData.freeSlots.length > 0) {
+                instanceIndex = shapeData.freeSlots.pop()!;
+            } else {
+                if (shapeData.instanceCount >= shapeData.maxInstances) {
+                    this.expandInstancedMesh(shapeData);
+                }
+                instanceIndex = shapeData.instanceCount++;
             }
-
-            const { instancedMesh } = shapeData;
-            const count = shapeData.instanceCount;
-            const idsByPos = shapeData.tileIdsByPosition;
-
-            // Find insertion position to maintain DESCENDING tile ID order using binary search
-            // tileIdsByPosition is sorted descending: [highestId, ..., lowestId]
-            // New tile with higher ID goes earlier (lower index)
-            let insertAt = count;
-            if (count > 0) {
-                let lo = 0, hi = count;
-                while (lo < hi) {
-                    const mid = (lo + hi) >>> 1;
-                    if (idsByPos[mid] < tileIndex) {
-                        hi = mid;
-                    } else {
-                        lo = mid + 1;
-                    }
-                }
-                insertAt = lo;
-            }
-
-            // Shift instances at positions >= insertAt up by 1
-            if (count > 0 && insertAt < count) {
-                const { glowMesh } = shapeData;
-                for (let i = count - 1; i >= insertAt; i--) {
-                    const mat = new Matrix4();
-                    instancedMesh.getMatrixAt(i, mat);
-                    instancedMesh.setMatrixAt(i + 1, mat);
-                    glowMesh.getMatrixAt(i, mat);
-                    glowMesh.setMatrixAt(i + 1, mat);
-                }
-
-                const iColor = instancedMesh.geometry.attributes.iColor! as InstancedBufferAttribute;
-                const iBgColor = instancedMesh.geometry.attributes.iBgColor! as InstancedBufferAttribute;
-                const iOpacity = instancedMesh.geometry.attributes.iOpacity! as InstancedBufferAttribute;
-                const iTexSeed = instancedMesh.geometry.attributes.iTexSeed! as InstancedBufferAttribute;
-                const iFloorIconType = instancedMesh.geometry.attributes.iFloorIconType! as InstancedBufferAttribute;
-                const iFloorIconAngle = instancedMesh.geometry.attributes.iFloorIconAngle! as InstancedBufferAttribute;
-                const iGlow = glowMesh.geometry.attributes.iGlow! as InstancedBufferAttribute;
-
-                for (let i = count - 1; i >= insertAt; i--) {
-                    iColor.setXYZ(i + 1, iColor.getX(i), iColor.getY(i), iColor.getZ(i));
-                    iBgColor.setXYZ(i + 1, iBgColor.getX(i), iBgColor.getY(i), iBgColor.getZ(i));
-                    iOpacity.setX(i + 1, iOpacity.getX(i));
-                    iTexSeed.setX(i + 1, iTexSeed.getX(i));
-                    iFloorIconType.setX(i + 1, iFloorIconType.getX(i));
-                    iFloorIconAngle.setX(i + 1, iFloorIconAngle.getX(i));
-                    iGlow.setX(i + 1, iGlow.getX(i));
-                }
-                iColor.needsUpdate = true;
-                iBgColor.needsUpdate = true;
-                iOpacity.needsUpdate = true;
-                iTexSeed.needsUpdate = true;
-                iFloorIconType.needsUpdate = true;
-                iFloorIconAngle.needsUpdate = true;
-                iGlow.needsUpdate = true;
-                instancedMesh.instanceMatrix.needsUpdate = true;
-                glowMesh.instanceMatrix.needsUpdate = true;
-
-                // Update tileIndex→instanceIndex mapping for shifted instances only
-                for (const [tIdx, instIdx] of shapeData.instances) {
-                    if (instIdx >= insertAt) {
-                        shapeData.instances.set(tIdx, instIdx + 1);
-                    }
-                }
-                // Shift tileIdsByPosition
-                for (let i = count - 1; i >= insertAt; i--) {
-                    idsByPos[i + 1] = idsByPos[i];
-                }
-            }
-
-            idsByPos[insertAt] = tileIndex;
-            shapeData.instances.set(tileIndex, insertAt);
-            shapeData.instanceCount++;
+            shapeData.instances.set(tileIndex, instanceIndex);
             shapeData.instancedMesh.count = shapeData.instanceCount;
             shapeData.glowMesh.count = shapeData.instanceCount;
 
@@ -476,7 +424,6 @@ export class InstancedMeshManager {
                 // Lower tile ID = higher layer = rendered last = higher renderOrder
                 shapeData.instancedMesh.renderOrder = -tileIndex;
             }
-            instanceIndex = insertAt;
         }
 
         // Update instance transform and color
@@ -495,9 +442,9 @@ export class InstancedMeshManager {
 
         this.setInstanceMatrix(shapeData, instanceIndex, dummy.matrix);
 
-        // Update instance colors
-        const color3 = new Color(color);
-        const bgColor3 = new Color(bgColor);
+        // Update instance colors（临时对象复用，避免高速段每帧新建数百个 Color）
+        const color3 = _tmpTileColor.set(color);
+        const bgColor3 = _tmpTileBgColor.set(bgColor);
 
         instancedMesh.geometry.attributes.iColor!.setXYZ(
             instanceIndex,
@@ -840,6 +787,8 @@ export class InstancedMeshManager {
                 glowAttr.needsUpdate = true;
             }
             shapeData.instances.delete(tileIndex);
+            // 槽位回收：O(1) 复用（不再让 instanceCount 单调增长、死实例越画越多）。
+            shapeData.freeSlots.push(instanceIndex);
         }
 
         // 形状空了就整体回收。否则长谱上每种 (方向对 × trackStyle) 都留下一个
@@ -986,6 +935,7 @@ export class InstancedMeshManager {
 
         for (const shapeData of this.instancedMeshes.values()) {
             shapeData.instances.clear();
+            shapeData.freeSlots.length = 0;
             shapeData.instanceCount = 0;
             shapeData.instancedMesh.count = 0;
             shapeData.instancedMesh.instanceMatrix.needsUpdate = true;

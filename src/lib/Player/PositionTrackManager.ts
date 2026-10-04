@@ -55,6 +55,8 @@ export class PositionTrackManager {
     private computed: boolean = false;
     private computedEditorMode: boolean | null = null;
     private tileCount: number = 0;
+    /** getTileTransform 的复用对象（调用方均立即读取，不持有引用）。 */
+    private _tmpTransform: TileTransform | null = null;
 
     constructor(levelData: Level) {
         this.levelData = levelData;
@@ -357,13 +359,22 @@ export class PositionTrackManager {
         const rot = this.workRot ? this.workRot[tileIndex] : 0;
         const s = this.workScale ? this.workScale[tileIndex] : 1;
         const op = this.workOpacity ? this.workOpacity[tileIndex] : 1;
-        return {
-            position: new Vector3(x, y, 0),
-            rotation: rot,
-            scale: new Vector3(s, s, s),
-            opacity: op,
-            stickToFloors: this.getStickToFloors(tileIndex),
-        };
+        // 复用单个对象：所有调用方都是"取到后立即读取/拷贝"，没有持有引用的场景。
+        // 高速段每帧创建数百个砖时，避免每砖 2 个 Vector3 的 GC 压力。
+        const t = this._tmpTransform
+            ?? (this._tmpTransform = {
+                position: new Vector3(),
+                rotation: 0,
+                scale: new Vector3(),
+                opacity: 1,
+                stickToFloors: true,
+            });
+        t.position.set(x, y, 0);
+        t.rotation = rot;
+        t.scale.set(s, s, s);
+        t.opacity = op;
+        t.stickToFloors = this.getStickToFloors(tileIndex);
+        return t;
     }
 
     public dispose(): void {
