@@ -89,22 +89,31 @@ export default function EditorPage() {
     t
   } = useEditorState()
 
+  // 诊断探针：编辑器页面重渲染累计次数（播放中两次采样求差即可得渲染频率）
+  if (typeof window !== 'undefined') {
+    (window as any).__editorRenders = ((window as any).__editorRenders || 0) + 1
+  }
+
   const [timelineOpen, setTimelineOpen] = useState(false)
   const [sliderValue, setSliderValue] = useState(0)
 
   const player = previewerRef.current
   const totalMs = player?.totalDurationMs ?? 600000
 
-  // Poll slider position during playback
+  // Poll slider position during playback.
+  // 注意：只在时间轴面板打开时轮询；否则每次 setState 都会让整个编辑器页面
+  // 重渲染（大谱面下每次几十 ms，播放直接掉到 ~10fps，而预览不受影响）。
   useEffect(() => {
-    if (!playModeActive) return
+    if (!playModeActive || !timelineOpen) return
     const id = setInterval(() => {
-      if (previewerRef.current) {
-        setSliderValue(previewerRef.current.currentTimeMs)
-      }
-    }, 100)
+      const p = previewerRef.current
+      if (!p) return
+      const v = p.currentTimeMs
+      // 变化 <0.4s 时返回原值 → React bail out，不触发重渲染
+      setSliderValue(prev => (Math.abs(prev - v) < 400 ? prev : v))
+    }, 250)
     return () => clearInterval(id)
-  }, [playModeActive])
+  }, [playModeActive, timelineOpen])
 
   // Reset timeline when a new level is loaded
   useEffect(() => {
