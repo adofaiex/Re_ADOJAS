@@ -145,7 +145,13 @@ export interface IMoveDecorationsEvent {
 
 export interface ILevelData {
   settings: any;
-  tiles: any[];
+  /**
+   * 普通模式为对象数组；库开启紧凑模式时为 CompactTileStore（提供 length/getAngle/
+   * getDirection/getTwirl/getActions 等访问器）。
+   * TODO(compact): Player 内 50+ 处 `tiles[i].xxx` 读取正在逐步迁移到访问器；
+   * 当前用宽类型保证编译，实际只在未开启紧凑模式时按对象数组使用。
+   */
+  tiles: any;
   actions?: any[];
   decorations?: IDecorationEvent[];
   angleData?: number[];
