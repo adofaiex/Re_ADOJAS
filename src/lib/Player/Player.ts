@@ -306,6 +306,15 @@ export class Player implements IPlayer {
   // Shared Renderer Resources
   private geometryCache: Map<string, BufferGeometry> = new Map();
   private maxCachedTiles: number = 2000; // Only keep this many meshes in memory
+  /**
+   * 播放时"可见索引窗口"（砖数）：只渲染 currentTileIndex ± 该值的砖。
+   * 路径自我重叠的谱面（同一片区域反复绕）里，网格单元会堆几万块历史砖；
+   * 旧圈数的砖要么已被越过、要么与当前路径视觉重叠，跳过可把每帧工作量有界化。
+   * 编辑/预览模式下不启用（Infinity），保证任意 seek 都能看到轨道。
+   */
+  private static readonly VISIBLE_INDEX_WINDOW = 4096;
+  /** 每帧最多新建多少块砖的 mesh（超出顺延到下一帧；高速段肉眼不可见）。 */
+  private static readonly MAX_NEW_TILES_PER_FRAME = 256;
   /** 上次执行砖缓存清理的时间戳（限流用；超高速段不必每帧清理）。 */
   private _lastTileCacheCleanup: number = 0;
   /** 实例化模式下所有砖共用的隐藏材质（砖 mesh 本身不渲染，只作状态载体/编辑器拾取）。 */
@@ -1785,7 +1794,10 @@ export class Player implements IPlayer {
     for (let i = 0; i < n; i++) {
       const cellX = Math.floor(this.tilePositions.getX(i) / gridSize);
       const cellY = Math.floor(this.tilePositions.getY(i) / gridSize);
-      const key = cellX * 100000 + cellY; 
+      // 无碰撞网格 key：旧式 `cellX * 100000 + cellY` 在纵向绕出 50 万单位后
+      // 会把不同列合并（key 相等），一次视野查询返回远处大量砖。这里给 cy 加偏移
+      // 并用 2^22 间距，支持 ±2M 个单元（grid=5 → ±1000 万世界单位）无碰撞。
+      const key = cellX * 4194304 + (cellY + 2097152);
       
       let list = this.spatialGrid.get(key);
       if (list === undefined) {
@@ -4736,6 +4748,13 @@ export class Player implements IPlayer {
     const margin = 2.0;
     const newVisibleSet = new Set<number>();
 
+    // 播放时只渲染"沿路径索引窗口"内的砖：troll/赫兹谱的路径会在同一片区域反复
+    // 绕圈，5×5 网格单元里能堆几万块历史砖 —— 空间查询会把它们全部要求建 mesh。
+    // 视图内的砖若索引离当前砖太远（旧圈数/极远处），要么已被越过、要么与当前
+    // 路径重叠（视觉上是重复的），跳过可把每帧工作量限制在窗口内。
+    const indexWindow = this.isPlaying ? Player.VISIBLE_INDEX_WINDOW : Infinity;
+    const curIdx = this.currentTileIndex;
+
     const minCellX = Math.floor((left - margin) / this.spatialGridSize);
     const maxCellX = Math.floor((right + margin) / this.spatialGridSize);
     const minCellY = Math.floor((bottom - margin) / this.spatialGridSize);
@@ -4743,10 +4762,12 @@ export class Player implements IPlayer {
 
     for (let cx = minCellX; cx <= maxCellX; cx++) {
       for (let cy = minCellY; cy <= maxCellY; cy++) {
-        const tileIndices = this.spatialGrid.get(cx * 100000 + cy);
+        const tileIndices = this.spatialGrid.get(cx * 4194304 + (cy + 2097152));
         if (tileIndices) {
           for (let i = 0; i < tileIndices.length; i++) {
-            newVisibleSet.add(tileIndices[i]);
+            const idx = tileIndices[i];
+            if (indexWindow !== Infinity && (idx < curIdx - indexWindow || idx > curIdx + indexWindow)) continue;
+            newVisibleSet.add(idx);
           }
         }
       }
@@ -4794,9 +4815,13 @@ export class Player implements IPlayer {
         }
     }
 
-    // Add newly visible tiles — use tileVisible array to avoid string allocation
+    // Add newly visible tiles — use tileVisible array to avoid string allocation.
+    // 每帧最多建 MAX_NEW_TILES_PER_FRAME 块（路径自我重叠时空间查询可能命中大量砖；
+    // 超出预算的顺延到下一帧，高速段本来也看不清）。
+    let createdThisFrame = 0;
     for (const idx of newVisibleSet) {
       if (this.tileVisible[idx]) continue;
+      if (createdThisFrame >= Player.MAX_NEW_TILES_PER_FRAME) break;
       const tileMesh = this.getOrCreateTileMesh(idx);
       if (tileMesh) {
         if (!this.instancedMeshManager) {
@@ -4810,6 +4835,7 @@ export class Player implements IPlayer {
         this.tileVisible[idx] = 1;
         this.visibleTiles.add(idx.toString());
         this.dirtyTiles.add(idx);
+        createdThisFrame++;
       }
     }
 
