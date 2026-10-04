@@ -1917,6 +1917,28 @@ export class Player implements IPlayer {
     this.tilePositions.set(n0, newX, newY);
   }
 
+  /**
+   * 解析 MultiPlanet 的 `planets` 字段。
+   * 官方枚举 PlanetCount：TwoPlanets=2 / ThreePlanets=3（所以官方钳到 3）；
+   * 我们同时接受数字、"3"、"3Planets"、FourPlanets..EightPlanets（>3 官方未发布但可运行），
+   * 统一钳制到 2..8。
+   */
+  private parseMultiPlanetCount(raw: unknown): number {
+    const clamp = (n: number): number => Math.max(2, Math.min(8, Math.floor(n)));
+    if (typeof raw === 'number' && Number.isFinite(raw)) return clamp(raw);
+    if (typeof raw === 'string') {
+      const s = raw.trim();
+      const digits = /^(\d+)/.exec(s);
+      if (digits) return clamp(parseInt(digits[1], 10));
+      const words: Record<string, number> = {
+        Two: 2, Three: 3, Four: 4, Five: 5, Six: 6, Seven: 7, Eight: 8,
+      };
+      const word = /^([A-Za-z]+?)(?:Planets)?$/.exec(s);
+      if (word && words[word[1]] !== undefined) return clamp(words[word[1]]);
+    }
+    return 2;
+  }
+
   private calculateCumulativeRotations(): void {
     const tiles = this.levelData.tiles;
     if (!tiles || tiles.length === 0) return;
@@ -1995,7 +2017,7 @@ export class Player implements IPlayer {
                 } else if (event.eventType === 'AutoPlayTiles') {
                     autoPlayTiles = event.enabled !== false;
                 } else if (event.eventType === 'MultiPlanet') {
-                    const req = Math.max(2, Math.min(8, Math.floor(Number(event.planets)) || 2));
+                    const req = this.parseMultiPlanetCount(event.planets);
                     if (req !== numPlanets) {
                         if (req > numPlanets) {
                             // 增星：插到枢轴之后
@@ -2130,7 +2152,7 @@ export class Player implements IPlayer {
                 } else if (event.eventType === 'Pause') {
                     extraRotation += (event.duration || 0) / 2.0;
                 } else if (event.eventType === 'MultiPlanet') {
-                    const req = Math.max(2, Math.min(8, Math.floor(Number(event.planets)) || 2));
+                    const req = this.parseMultiPlanetCount(event.planets);
                     if (req !== numPlanets) {
                         if (req > numPlanets) {
                             for (let k = 1; k <= req - numPlanets; k++) {
