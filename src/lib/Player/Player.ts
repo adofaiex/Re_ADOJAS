@@ -576,6 +576,8 @@ export class Player implements IPlayer {
     // Flash 探针：__adojasFlash() → 两条 plane（FG/BG）的过渡状态与材质实际色/透明度。
     // 判定"屏幕全白"：看 bg.active/材料 opacity 是否停在起始的 100% 白。
     (window as any).__adojasFlash = () => this.flashEffect?.debugSnapshot?.() ?? null;
+    // 打拍音探针：__adojasHitsound() → 分块模式/缓存/活跃音源/最近各块峰值。
+    (window as any).__adojasHitsound = () => this.hitsoundManager?.debugSnapshot?.() ?? null;
     // 性能/泄漏探针：__adojasPerf() → 各阶段耗时（每秒平均）+ 场景/资源计数。
     // 用法：刚开局跑一次，掉帧后再跑一次；**持续增长**的那个计数就是"越来越卡"的元凶。
     (window as any).__adojasPerf = () => {

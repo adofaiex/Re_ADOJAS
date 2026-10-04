@@ -214,6 +214,8 @@ export class HitsoundManager {
   private lastWorkerStatusEmit: number = 0;
   /** 加载期预合成的块缓存（播放时直接取用；播放中按窗口淘汰）。 */
   private chunkCache: Map<number, AudioBuffer> = new Map();
+  /** 最近若干块的峰值（诊断高 BPM 段是否被削平/异常）。 */
+  private _chunkPeaks: { chunk: number; peak: number }[] = [];
 
   constructor(private defaultType: HitsoundType = 'Kick', private defaultVolume: number = 100, useOGGCompression: boolean = false) {
     this.useOGGCompression = useOGGCompression;
@@ -745,6 +747,7 @@ export class HitsoundManager {
         }
         this.synthCompletedChunks++;
         this.emitWorkerStatus(true);
+        this.recordChunkPeak(chunkIndex, Number(ev.data.peak) || 0);
         try {
           const ctx = getSharedAudioContext();
           const out = ctx.createBuffer(2, bufferLength, this.workerSampleRate);
@@ -829,18 +832,45 @@ export class HitsoundManager {
       }
     }
 
-    // 限密度 + 固定软削波：避免极密段落削爆，也不做全局归一化（分块无法全局统计）。
-    const softClipChunk = (d: Float32Array): void => {
-      for (let i = 0; i < d.length; i++) {
-        const v = d[i];
-        const a = v < 0 ? -v : v;
-        if (a > 0.5) d[i] = softClip(v);
-      }
-    };
-    softClipChunk(outL);
-    softClipChunk(outR);
+    // 限密度 + 峰值归一化 + 软削波：与 worker 路径一致。只做 softClip 会在
+    // 高密度段把波形削成 ±1 平台（听起来像消音）；先缩到峰值 0.9 再削。
+    let peak = 0;
+    for (let i = 0; i < bufferLength; i++) {
+      const al = outL[i] < 0 ? -outL[i] : outL[i];
+      if (al > peak) peak = al;
+      const ar = outR[i] < 0 ? -outR[i] : outR[i];
+      if (ar > peak) peak = ar;
+    }
+    const gain = peak > 0.9 ? 0.9 / peak : 1;
+    for (let i = 0; i < bufferLength; i++) {
+      const vl = gain < 1 ? outL[i] * gain : outL[i];
+      const al = vl < 0 ? -vl : vl;
+      if (al > 0.5) outL[i] = softClip(vl);
+      const vr = gain < 1 ? outR[i] * gain : outR[i];
+      const ar = vr < 0 ? -vr : vr;
+      if (ar > 0.5) outR[i] = softClip(vr);
+    }
+    this.recordChunkPeak(chunkIndex, peak);
 
     return outputBuffer;
+  }
+
+  /** 记录块峰值（诊断用，保留最近 64 块）。 */
+  private recordChunkPeak(chunk: number, peak: number): void {
+    this._chunkPeaks.push({ chunk, peak });
+    if (this._chunkPeaks.length > 64) this._chunkPeaks.shift();
+  }
+
+  /** 诊断快照：__adojasHitsound() 用（分块模式/缓存/音源/各块峰值）。 */
+  public debugSnapshot(): any {
+    return {
+      chunkMode: this.chunkMode,
+      totalChunks: this.synthTotalChunks,
+      cachedChunks: this.chunkCache.size,
+      activeSources: this.chunkSources.length,
+      workers: this.workers?.length ?? 0,
+      lastPeaks: this._chunkPeaks.slice(-16).map(p => `#${p.chunk}:${p.peak.toFixed(2)}`).join(' '),
+    };
   }
 
   dispose(): void {

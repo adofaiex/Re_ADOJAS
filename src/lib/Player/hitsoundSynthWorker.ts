@@ -104,17 +104,29 @@ self.onmessage = (event: MessageEvent): void => {
     }
     (self as any).postMessage({ type: 'progress', chunkIndex, progress: 1 });
 
+    // ── 峰值归一化 + 软削波（与整曲路径一致）─────────────────────
+    // 高 BPM 段命中极密，逐采样和很容易累到几百；只做 softClip 会把 |x|≥1.5
+    // 全部压成 ±1 平台，交流成分被削平 → 听起来像"被消音/噪声门切掉"。
+    // 先按峰值缩到 0.9 再 softClip，保留波形形状。peak 回传用于诊断。
+    let peak = 0;
     for (let i = 0; i < bufferLength; i++) {
-      const vl = outL[i];
+      const al = outL[i] < 0 ? -outL[i] : outL[i];
+      if (al > peak) peak = al;
+      const ar = outR[i] < 0 ? -outR[i] : outR[i];
+      if (ar > peak) peak = ar;
+    }
+    const gain = peak > 0.9 ? 0.9 / peak : 1;
+    for (let i = 0; i < bufferLength; i++) {
+      const vl = gain < 1 ? outL[i] * gain : outL[i];
       const al = vl < 0 ? -vl : vl;
       if (al > 0.5) outL[i] = softClip(vl);
-      const vr = outR[i];
+      const vr = gain < 1 ? outR[i] * gain : outR[i];
       const ar = vr < 0 ? -vr : vr;
       if (ar > 0.5) outR[i] = softClip(vr);
     }
 
     (self as any).postMessage(
-      { type: 'chunk', chunkIndex, L: outL.buffer, R: outR.buffer, length: bufferLength },
+      { type: 'chunk', chunkIndex, L: outL.buffer, R: outR.buffer, length: bufferLength, peak },
       [outL.buffer, outR.buffer]
     );
   }
