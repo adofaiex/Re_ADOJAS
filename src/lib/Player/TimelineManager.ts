@@ -31,12 +31,12 @@ const REPEAT_SOLO_TYPES = new Set<string>([
  * （原版 scnGame.ApplyEventsToFloors）。
  */
 export function computeEntryBeats(
-    tileStartTimes: number[],
-    tileBPM: number[],
+    tileStartTimes: ArrayLike<number>,
+    tileBPM: ArrayLike<number>,
     totalTiles: number,
-): number[] {
+): Float64Array {
     const n = Math.max(0, totalTiles);
-    const eb = new Array<number>(n).fill(0);
+    const eb = new Float64Array(n);
     // 原版 listFloors.Count == 1 时提前 return：entryBeat[0] 保持默认 0（不是 -1）。
     if (n <= 1) return eb;
     // 哨兵：floor 0 的 entryBeat 显式置 -1。
@@ -85,11 +85,11 @@ export class TimelineManager {
      * 时已判定为非活跃，那一帧永远不会被应用到（"该动的砖没动"）。
      */
     private static readonly RANGE_GRACE = 0.1;
-    private tileStartTimes: number[];
-    private tileBPM: number[];
+    private tileStartTimes: ArrayLike<number>;
+    private tileBPM: ArrayLike<number>;
     private totalTiles: number;
     // 几何拍数（原版 entryBeat），RepeatEvents Floor 模式角偏移用。
-    private entryBeat: number[] = [];
+    private entryBeat: Float64Array = new Float64Array(0);
 
     private entryBeatOf(i: number): number {
         const v = this.entryBeat[i];
@@ -103,8 +103,8 @@ export class TimelineManager {
 
     constructor(
         actions: any[],
-        tileStartTimes: number[],
-        tileBPM: number[],
+        tileStartTimes: ArrayLike<number>,
+        tileBPM: ArrayLike<number>,
         basePositions: Vector2[],
         baseRotations: number[],
         baseScales: Vector2[],

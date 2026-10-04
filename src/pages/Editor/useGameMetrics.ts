@@ -12,9 +12,9 @@ export interface GameMetricsData {
   /** Total number of tiles in the level */
   totalTiles: number
   /** Per-tile BPM array (TBPM values, affected by SetSpeed events) */
-  tileBPM: number[]
+  tileBPM: ArrayLike<number>
   /** Per-tile start time in seconds (relative to tile 1 = 0) */
-  tileStartTimes: number[]
+  tileStartTimes: ArrayLike<number>
 }
 
 /**

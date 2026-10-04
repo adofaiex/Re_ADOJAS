@@ -1587,8 +1587,8 @@ export class DecorationManager {
     private scene: Scene;
     private container: Group;
     private levelData: any;
-    private tileStartTimes: number[];
-    private tileBPM: number[];
+    private tileStartTimes: ArrayLike<number>;
+    private tileBPM: ArrayLike<number>;
     private decorations: Map<string, DecorationInstance> = new Map();
     private decoList: DecorationInstance[] = [];
     /**
@@ -1673,7 +1673,7 @@ export class DecorationManager {
         if (need > this._staticQueryPad) this._staticQueryPad = need;
     }
 
-    constructor(scene: Scene, levelData: any, tileStartTimes: number[], tileBPM: number[]) {
+    constructor(scene: Scene, levelData: any, tileStartTimes: ArrayLike<number>, tileBPM: ArrayLike<number>) {
         this.scene = scene;
         this.levelData = levelData;
         this.tileStartTimes = tileStartTimes;

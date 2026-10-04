@@ -104,7 +104,7 @@ export class Player implements IPlayer {
   // Tile Management
   private tiles: Map<string, Mesh> = new Map();
   private visibleTiles: Set<string> = new Set();
-  private tileVisible: boolean[] = []; // O(1) visibility check, avoids string allocation
+  private tileVisible: Uint8Array = new Uint8Array(0); // O(1) visibility check, avoids string allocation
   private lastAnimatedCamRotation: number = 0; // cache to skip sprite rotation when camera hasn't turned
   private _tilesWithAnimatedColor: Set<number> | null = null; // tiles needing per-frame color update
   private _anyTileHasSpriteChild: boolean = false; // fast skip when no tiles have sprites
@@ -170,7 +170,7 @@ export class Player implements IPlayer {
   private marginCounts: number[] = new Array(12).fill(0); // 各判定等级计数（按 HitMargin 索引）
   private judgeDeadTiles: number = 0;           // 死亡次数（XAcc 权重）
   private deaths: number = 0;                   // 死亡次数（HUD 显示）
-  private tileMarginScales: number[] = [];       // 各砖块判定窗口倍率（ScaleMargin 事件）
+  private tileMarginScales: Float32Array = new Float32Array(0);       // 各砖块判定窗口倍率（ScaleMargin 事件）
   private hitErrorSamples: number[] = [];        // 手打有效命中的按键时机偏移（ms，正=晚/慢，负=早/快）
 
   // Camera settings
@@ -196,7 +196,7 @@ export class Player implements IPlayer {
   public overlayHUD: OverlayHUD | null = null;
 
   // Stats callback
-  private onStatsUpdate: ((stats: { fps: number; time: number; tileIndex: number; tileBPM: number[]; tileStartTimes: number[]; totalTiles: number }) => void) | null = null;
+  private onStatsUpdate: ((stats: { fps: number; time: number; tileIndex: number; tileBPM: ArrayLike<number>; tileStartTimes: ArrayLike<number>; totalTiles: number }) => void) | null = null;
   private frameCount: number = 0;
   private lastTime: number = 0;
 
@@ -206,30 +206,30 @@ export class Player implements IPlayer {
   private onManualCorrect: (() => void) | null = null;
 
   // Precalculated rotations and timing
-  private cumulativeRotations: number[] = [];
+  private cumulativeRotations: Float64Array = new Float64Array(0);
   private totalLevelRotation: number = 0;
 
-  private tileStartTimes: number[] = [];
+  private tileStartTimes: Float64Array = new Float64Array(0);
 
   // Cached resolved absolute directions (angleData with 999s resolved via backtracking)
-  private resolvedTileDirections: number[] | null = null;
-  private tileDurations: number[] = [];
-  private tileExtraRotations: number[] = [];
-  private tileIsCW: boolean[] = [];
-  private tileBPM: number[] = [];
-  private tileStartAngle: number[] = [];
-  private tileStickToFloors: boolean[] = []; // Whether planet follows each tile
-  private tileTotalAngle: number[] = [];
-  private tileStartDist: number[] = [];
-  private tileEndDist: number[] = [];
-  private tileAuto: boolean[] = [];
+  private resolvedTileDirections: Float32Array | null = null;
+  private tileDurations: Float64Array = new Float64Array(0);
+  private tileExtraRotations: Float32Array = new Float32Array(0);
+  private tileIsCW: Uint8Array = new Uint8Array(0);
+  private tileBPM: Float32Array = new Float32Array(0);
+  private tileStartAngle: Float32Array = new Float32Array(0);
+  private tileStickToFloors: Uint8Array = new Uint8Array(0); // Whether planet follows each tile
+  private tileTotalAngle: Float32Array = new Float32Array(0);
+  private tileStartDist: Float32Array = new Float32Array(0);
+  private tileEndDist: Float32Array = new Float32Array(0);
+  private tileAuto: Uint8Array = new Uint8Array(0);
   // SetPlanetRotation（星球缓速）：逐砖继承的 ease/easeParts/easePartBehavior
   private tilePlanetEase: string[] = [];
-  private tilePlanetEaseParts: number[] = [];
+  private tilePlanetEaseParts: Float32Array = new Float32Array(0);
   private tilePlanetEaseBehavior: string[] = [];
   // Pause 事件的“角度校准”（隐性缓速）：回正偏移（弧度）与回正时长（秒）
-  private tilePauseOffset: number[] = [];
-  private tilePauseTweenDuration: number[] = [];
+  private tilePauseOffset: Float32Array = new Float32Array(0);
+  private tilePauseTweenDuration: Float32Array = new Float32Array(0);
   private tileEvents: Map<number, any[]> = new Map();
   private tileCameraEvents: Map<number, any[]> = new Map();
   private tileSetHitsoundEvents: Map<number, any[]> = new Map();
@@ -909,7 +909,7 @@ export class Player implements IPlayer {
   /** 该砖块当前的 marginScale（ScaleMargin 事件，scale/100，从事件 floor 起继承）。 */
   private buildTileMarginScales(): void {
     const n = this.levelData.tiles?.length ?? 0;
-    this.tileMarginScales = new Array(n).fill(1);
+    this.tileMarginScales = new Float32Array(n).fill(1);
     const actions = this.levelData.actions;
     if (!actions || n === 0) return;
 
@@ -952,7 +952,7 @@ export class Player implements IPlayer {
   private buildTilePlanetEase(): void {
     const n = this.levelData.tiles?.length ?? 0;
     this.tilePlanetEase = new Array(n).fill('Linear');
-    this.tilePlanetEaseParts = new Array(n).fill(1);
+    this.tilePlanetEaseParts = new Float32Array(n).fill(1);
     this.tilePlanetEaseBehavior = new Array(n).fill('Mirror');
     if (n === 0) return;
 
@@ -1020,8 +1020,8 @@ export class Player implements IPlayer {
    */
   private buildPauseTweens(): void {
     const n = this.levelData.tiles?.length ?? 0;
-    this.tilePauseOffset = new Array(n).fill(0);
-    this.tilePauseTweenDuration = new Array(n).fill(0);
+    this.tilePauseOffset = new Float32Array(n);
+    this.tilePauseTweenDuration = new Float32Array(n);
     if (n < 2) return;
     const actions = this.levelData.actions;
     if (!actions) return;
@@ -1523,7 +1523,7 @@ export class Player implements IPlayer {
     if (!this.resolvedTileDirections) {
       const angleData = this.levelData.angleData || [];
       const count = angleData.length;
-      const resolved = new Array(count);
+      const resolved = new Float32Array(count);
       for (let i = 0; i < count; i++) {
         resolved[i] = angleData[i] === 999 ? (resolved[i - 1] || 0) + 180 : angleData[i];
       }
@@ -1838,28 +1838,28 @@ export class Player implements IPlayer {
     if (!tiles || tiles.length === 0) return;
 
     const n = tiles.length;
-    this.cumulativeRotations = new Array(n);
-    this.tileStartTimes = new Array(n);
-    this.tileDurations = new Array(n - 1);
-    this.tileExtraRotations = new Array(n);
-    this.tileIsCW = new Array(n);
-    this.tileBPM = new Array(n);
-    this.tileStartAngle = new Array(n - 1);
-    this.tileTotalAngle = new Array(n - 1);
-    this.tileStartDist = new Array(n - 1);
-    this.tileEndDist = new Array(n - 1);
-    this.tileStickToFloors = new Array(n);
-    this.tileAuto = new Array(n).fill(false);
+    this.cumulativeRotations = new Float64Array(n);
+    this.tileStartTimes = new Float64Array(n);
+    this.tileDurations = new Float64Array(n - 1);
+    this.tileExtraRotations = new Float32Array(n);
+    this.tileIsCW = new Uint8Array(n);
+    this.tileBPM = new Float32Array(n);
+    this.tileStartAngle = new Float32Array(n - 1);
+    this.tileTotalAngle = new Float32Array(n - 1);
+    this.tileStartDist = new Float32Array(n - 1);
+    this.tileEndDist = new Float32Array(n - 1);
+    this.tileStickToFloors = new Uint8Array(n);
+    this.tileAuto = new Uint8Array(n);
     
     // Initialize tileStickToFloors from PositionTrackManager
     if (this.positionTrackManager) {
       for (let i = 0; i < n; i++) {
-        this.tileStickToFloors[i] = this.positionTrackManager.getStickToFloors(i);
+        this.tileStickToFloors[i] = this.positionTrackManager.getStickToFloors(i) ? 1 : 0;
       }
     } else {
       // Default to true if no PositionTrackManager
       for (let i = 0; i < n; i++) {
-        this.tileStickToFloors[i] = this.levelData.settings?.stickToFloors !== false;
+        this.tileStickToFloors[i] = this.levelData.settings?.stickToFloors !== false ? 1 : 0;
       }
     }
     
@@ -1902,10 +1902,10 @@ export class Player implements IPlayer {
         
         // AutoPlayTiles: event on tile i → tiles i+1 onwards are auto (not including i)
         if (autoPlayTiles) {
-            this.tileAuto[i + 1] = true;
+            this.tileAuto[i + 1] = 1;
         }
         
-        this.tileIsCW[i] = isCW;
+        this.tileIsCW[i] = isCW ? 1 : 0;
         this.tileBPM[i] = currentBPM;
         
         const pivot = tiles[i];
@@ -1990,7 +1990,7 @@ export class Player implements IPlayer {
                 }
             }
         }
-        this.tileIsCW[lastIndex] = isCW;
+        this.tileIsCW[lastIndex] = isCW ? 1 : 0;
         this.tileBPM[lastIndex] = currentBPM;
         this.tileExtraRotations[lastIndex] = extraRotation;
     }
@@ -2588,7 +2588,7 @@ export class Player implements IPlayer {
     this.initialPinchDistance = 0;
   }
 
-  public setStatsCallback(callback: (stats: { fps: number; time: number; tileIndex: number; tileBPM: number[]; tileStartTimes: number[]; totalTiles: number }) => void): void {
+  public setStatsCallback(callback: (stats: { fps: number; time: number; tileIndex: number; tileBPM: ArrayLike<number>; tileStartTimes: ArrayLike<number>; totalTiles: number }) => void): void {
     this.onStatsUpdate = callback;
   }
 
@@ -4031,7 +4031,7 @@ export class Player implements IPlayer {
 
       // Update tileStickToFloors array
       for (let i = 0; i < this.levelData.tiles.length; i++) {
-        this.tileStickToFloors[i] = this.positionTrackManager!.getStickToFloors(i);
+        this.tileStickToFloors[i] = this.positionTrackManager!.getStickToFloors(i) ? 1 : 0;
       }
 
       // Sync instanced meshes after re-applying PositionTrack in editor mode
@@ -4109,7 +4109,7 @@ export class Player implements IPlayer {
 
     // Update tileStickToFloors array
     for (let i = 0; i < this.levelData.tiles.length; i++) {
-      this.tileStickToFloors[i] = this.positionTrackManager!.getStickToFloors(i);
+      this.tileStickToFloors[i] = this.positionTrackManager!.getStickToFloors(i) ? 1 : 0;
     }
 
     // Sync instanced meshes after re-applying PositionTrack
@@ -4478,7 +4478,7 @@ export class Player implements IPlayer {
     } else {
       // 与实况 updatePlanetsPosition 完全同一套公式（stickToFloors / 邻居位置 /
       // SetPlanetRotation 缓动 / Pause 角度校准），只是砖块位置按 t 时刻取样。
-      const useStick = this.tileStickToFloors[tileIndex] !== false;
+      const useStick = this.tileStickToFloors[tileIndex] !== 0;
       if (useStick) {
         const p = tilePosAt(tileIndex, timeInLevel);
         px = p.x; py = p.y;
@@ -4726,7 +4726,7 @@ export class Player implements IPlayer {
     // Lazily initialize tileVisible array
     const totalTiles = this.levelData.tiles.length;
     if (this.tileVisible.length !== totalTiles) {
-        this.tileVisible = new Array(totalTiles).fill(false);
+        this.tileVisible = new Uint8Array(totalTiles);
     }
 
     const left = this.cameraPosition.x + this.camera.left / zoom;
@@ -4789,7 +4789,7 @@ export class Player implements IPlayer {
             if (this.instancedMeshManager) {
                 this.instancedMeshManager.setTileVisibility(idx, false);
             }
-            this.tileVisible[idx] = false;
+            this.tileVisible[idx] = 0;
             this.dirtyTiles.add(idx);
             this.visibleTiles.delete(id);
         }
@@ -4808,7 +4808,7 @@ export class Player implements IPlayer {
           this.instancedMeshManager.setFloorIconType(idx, tileMesh.userData.floorIconType ?? 0);
           this.instancedMeshManager.setFloorIconAngle(idx, tileMesh.userData.floorIconAngle ?? 0);
         }
-        this.tileVisible[idx] = true;
+        this.tileVisible[idx] = 1;
         this.visibleTiles.add(idx.toString());
         this.dirtyTiles.add(idx);
       }
@@ -4872,7 +4872,7 @@ export class Player implements IPlayer {
             }
             this.tiles.delete(id);
             if (this.tileVisible.length > parseInt(id)) {
-                this.tileVisible[parseInt(id)] = false;
+                this.tileVisible[parseInt(id)] = 0;
             }
             removed++;
         }
@@ -5224,7 +5224,7 @@ export class Player implements IPlayer {
         const tileId = tileIndex.toString();
         const tileMesh = this.tiles.get(tileId);
         const tileData = this.levelData.tiles[tileIndex];
-        const useStickToFloor = this.tileStickToFloors[tileIndex] !== false;
+        const useStickToFloor = this.tileStickToFloors[tileIndex] !== 0;
         
         let pivotPos: Vector3;
         if (useStickToFloor && tileMesh) {

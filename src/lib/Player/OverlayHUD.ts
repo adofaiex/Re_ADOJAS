@@ -8,8 +8,8 @@ export class OverlayHUD {
   private time: number = 0;
   private tileIndex: number = 0;
   private totalTiles: number = 0;
-  private tileBPM: number[] = [];
-  private tileStartTimes: number[] = [];
+  private tileBPM: ArrayLike<number> = [];
+  private tileStartTimes: ArrayLike<number> = [];
   private countdownText: string = '';
   private marginCounts: number[] = [];
   private xAcc: number = 1;
@@ -49,8 +49,8 @@ export class OverlayHUD {
     fps: number;
     time: number;
     tileIndex: number;
-    tileBPM: number[];
-    tileStartTimes: number[];
+    tileBPM: ArrayLike<number>;
+    tileStartTimes: ArrayLike<number>;
     totalTiles: number;
     countdownText?: string;
     marginCounts?: number[];

@@ -130,10 +130,10 @@ export class CameraController {
     private lastFollowTile = -1;
 
     private levelData: any;
-    private tileStartTimes: number[];
-    private tileBPM: number[];
+    private tileStartTimes: ArrayLike<number>;
+    private tileBPM: ArrayLike<number>;
 
-    constructor(levelData: any, tileStartTimes: number[], tileBPM: number[]) {
+    constructor(levelData: any, tileStartTimes: ArrayLike<number>, tileBPM: ArrayLike<number>) {
         this.levelData = levelData;
         this.tileStartTimes = tileStartTimes;
         this.tileBPM = tileBPM;
