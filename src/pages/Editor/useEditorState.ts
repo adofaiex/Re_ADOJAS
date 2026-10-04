@@ -182,6 +182,7 @@ export function useEditorState() {
       player.setDisableTrackTexture(settings.disableTrackTexture)
       player.setMusicDelayMs(settings.musicDelayMs)
       player.setShowHitErrorMeter(settings.showHitErrorMeter)
+      player.setRecordingMode(settings.recordingMode)
 
       previewerRef.current = player
       bindOttoEvents(player)
@@ -404,6 +405,7 @@ export function useEditorState() {
       player.setStatsPanel(settings.showStats)
       player.setDisableTrackTexture(settings.disableTrackTexture)
       player.setShowHitErrorMeter(settings.showHitErrorMeter)
+      player.setRecordingMode(settings.recordingMode)
     }
   }, [
     settings.renderer,
@@ -417,6 +419,7 @@ export function useEditorState() {
     settings.showStats,
     settings.disableTrackTexture,
     settings.showHitErrorMeter,
+    settings.recordingMode,
   ])
 
   // 监听渲染器设置变化
@@ -490,6 +493,10 @@ export function useEditorState() {
           e.preventDefault()
           handlePlay()
         }
+      } else if (e.code === "F9") {
+        // 录制模式：实时隐藏/显示编辑器控件
+        e.preventDefault()
+        updateSettings({ recordingMode: !settings.recordingMode })
       } else if (e.code === "Escape" && playModeActive) {
         e.preventDefault()
         handleExitPlayMode()
@@ -498,7 +505,7 @@ export function useEditorState() {
 
     window.addEventListener("keydown", handleKeyDown)
     return () => window.removeEventListener("keydown", handleKeyDown)
-  }, [playMode, playModeActive, handlePlay, handleExitPlayMode])
+  }, [playMode, playModeActive, handlePlay, handleExitPlayMode, settings.recordingMode, updateSettings])
 
   // 初始化示例数据
   useEffect(() => {
@@ -532,6 +539,7 @@ export function useEditorState() {
             player.setDisableTrackTexture(settings.disableTrackTexture)
             player.setMusicDelayMs(settings.musicDelayMs)
             player.setShowHitErrorMeter(settings.showHitErrorMeter)
+            player.setRecordingMode(settings.recordingMode)
             
             // Synthesize hitsounds
             await player.preSynthesizeHitsoundsWithProgress()

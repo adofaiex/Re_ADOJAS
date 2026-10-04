@@ -76,6 +76,12 @@ export default function SettingsPage() {
           type: "showHitErrorMeter",
         },
         {
+          id: "recordingMode",
+          title: t("settings.recordingMode.title"),
+          description: t("settings.recordingMode.description"),
+          type: "recordingMode",
+        },
+        {
           id: "trailSampleMode",
           title: t("settings.trailSampleMode.title"),
           description: t("settings.trailSampleMode.description"),
@@ -350,6 +356,26 @@ export default function SettingsPage() {
                       </button>
                       <span className="text-sm text-slate-600 dark:text-slate-400">
                         {settings.showHitErrorMeter ? t("settings.showHitErrorMeter.enabled") : t("settings.showHitErrorMeter.disabled")}
+                      </span>
+                    </div>
+                  )}
+
+                  {setting.type === "recordingMode" && (
+                    <div className="flex items-center gap-3">
+                      <button
+                        onClick={() => updateSettings({ recordingMode: !settings.recordingMode })}
+                        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                          settings.recordingMode ? "bg-purple-500" : "bg-slate-300 dark:bg-slate-600"
+                        }`}
+                      >
+                        <span
+                          className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                            settings.recordingMode ? "translate-x-6" : "translate-x-1"
+                          }`}
+                        />
+                      </button>
+                      <span className="text-sm text-slate-600 dark:text-slate-400">
+                        {settings.recordingMode ? t("settings.recordingMode.enabled") : t("settings.recordingMode.disabled")}
                       </span>
                     </div>
                   )}

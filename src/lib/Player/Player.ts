@@ -187,6 +187,8 @@ export class Player implements IPlayer {
   private hitErrorMeter: HitErrorMeter | null = null; // 准度条
   /** 设置项：是否显示准度条（创建时应用，运行中实时切换）。 */
   private showHitErrorMeter: boolean = true;
+  /** 设置项：录制模式（隐藏判定统计等次要 HUD）。 */
+  private recordingMode: boolean = false;
   private _judgeLastCorrectedTile: number = -1; // 防重复矫正
   private _judgeHitsoundPlayed: number = -1;    // 防重复 hitsound
   private _manualDead: boolean = false;         // 手动模式下玩家已死亡
@@ -2578,6 +2580,7 @@ export class Player implements IPlayer {
     
     // Create overlay HUD (2D canvas on top of WebGL)
     this.overlayHUD = new OverlayHUD(container);
+    this.overlayHUD.setRecordingMode(this.recordingMode);
 
     // 准度条（判定误差显示，底部中央）
     this.hitErrorMeter = new HitErrorMeter(container);
@@ -4212,6 +4215,13 @@ export class Player implements IPlayer {
   public setShowHitErrorMeter(show: boolean): void {
     this.showHitErrorMeter = show;
     this.hitErrorMeter?.setEnabled(show);
+  }
+
+  /** 录制模式：仅保留 FPS 与右上角信息（隐藏判定统计与星球判定文本）。 */
+  public setRecordingMode(enabled: boolean): void {
+    this.recordingMode = enabled;
+    this.overlayHUD?.setRecordingMode(enabled);
+    this.judgmentDisplay?.setRecordingMode(enabled);
   }
 
   public pausePlay(): void {

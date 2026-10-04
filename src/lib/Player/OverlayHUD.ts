@@ -16,6 +16,8 @@ export class OverlayHUD {
   private dead: boolean = false;
   private percentComplete: number = 0;
   private deaths: number = 0;
+  /** 录制模式：隐藏判定统计等次要 HUD（仅保留 FPS 与右上角信息）。 */
+  private recordingMode: boolean = false;
 
   private readonly p = 8;
   private readonly lh = 18;
@@ -86,10 +88,15 @@ export class OverlayHUD {
     this.drawFPS(ctx, w, h);
     this.drawPanel(ctx, w, h, this.computeText());
     this.drawCountdown(ctx, w, h);
-    this.drawMargins(ctx, w, h);
+    if (!this.recordingMode) this.drawMargins(ctx, w, h);
     if (this.dead) this.drawDeath(ctx, w, h);
 
     ctx.restore();
+  }
+
+  /** 录制模式：隐藏判定统计等次要 HUD，仅保留 FPS 与右上角信息。 */
+  setRecordingMode(v: boolean): void {
+    this.recordingMode = v;
   }
 
   /** 死亡界面：完成度 / 死亡次数 / XAcc（显示 txtPercent + deaths）。 */

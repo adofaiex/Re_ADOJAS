@@ -91,6 +91,7 @@ export default function EditorPage() {
 
   const [timelineOpen, setTimelineOpen] = useState(false)
   const [sliderValue, setSliderValue] = useState(0)
+  const recordingMode = settings.recordingMode
 
   const player = previewerRef.current
   const totalMs = player?.totalDurationMs ?? 600000
@@ -251,7 +252,7 @@ export default function EditorPage() {
 
   return (
     <div className={`h-screen ${isDark ? "bg-slate-900" : "bg-slate-50"} overflow-hidden relative`}>
-      <NotificationSystem />
+      {!recordingMode && <NotificationSystem />}
 
       {/* Hidden file inputs */}
       <input ref={fileInputRef} type="file" accept=".adofai,.json,.zip" onChange={handleFileLoad} className="hidden" />
@@ -260,7 +261,8 @@ export default function EditorPage() {
       <input ref={decorationInputRef} type="file" accept="image/*" multiple onChange={handleDecorationLoad} className="hidden" />
       <input ref={bgImageInputRef} type="file" accept="image/*" multiple onChange={handleBGImageLoad} className="hidden" />
 
-      {/* Floating Header Buttons */}
+      {/* Floating Header Buttons（录制模式隐藏） */}
+      {!recordingMode && (
       <div className="absolute top-0 left-0 right-0 px-4 py-3 flex justify-between items-center z-10 pointer-events-none">
         <div className="flex items-center gap-4 pointer-events-auto">
           <Button
@@ -370,6 +372,7 @@ export default function EditorPage() {
           </Button>
         </div>
       </div>
+      )}
 
       {/* Exit Confirmation Dialog */}
       {showExitDialog && (
@@ -475,7 +478,7 @@ export default function EditorPage() {
       <SettingsModal isOpen={settingsOpen} onClose={() => setSettingsOpen(false)} />
 
       {/* 死亡后建议的音频延迟弹窗（非阻塞，按播放/退出可关闭） */}
-      {suggestedAudioDelayMs !== null && (
+      {!recordingMode && suggestedAudioDelayMs !== null && (
         <div className="fixed inset-0 z-40 flex items-center justify-center pointer-events-none">
           <div className={`pointer-events-auto relative w-72 rounded-xl shadow-2xl overflow-hidden border ${isDark ? "bg-slate-800 border-slate-700" : "bg-white border-slate-200"}`}>
             <div className={`px-5 py-4 ${isDark ? "text-white" : "text-slate-900"}`}>
@@ -518,7 +521,8 @@ export default function EditorPage() {
 
       {/* Full-screen Canvas Area */}
       <div ref={containerRef} className="absolute inset-0">
-        {/* 右下角：判定选择 / 不死模式 / 自动播放（otto）——编辑器布局 */}
+        {/* 右下角：判定选择 / 不死模式 / 自动播放（otto）——编辑器布局（录制模式隐藏） */}
+        {!recordingMode && (
         <div className="absolute bottom-4 right-4 flex items-end gap-3 select-none">
           {/* 判定选择：单按钮循环切换（宽→标→严） */}
           <button
@@ -571,6 +575,7 @@ export default function EditorPage() {
             />
           </button>
         </div>
+        )}
         <div className="absolute bottom-4 left-4 flex items-end gap-4">
           <div className="relative inline-block">
             <button

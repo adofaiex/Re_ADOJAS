@@ -25,6 +25,7 @@ interface AppSettings {
   disableTrackTexture: boolean // 对 Standard 轨道禁用轨道纹理（高砖块数谱面性能优化）
   musicDelayMs: number // 音乐播放延迟补偿（ms，独立于谱面 offset）
   showHitErrorMeter: boolean // 显示准度条（Hit Error Meter）
+  recordingMode: boolean // 录制模式：隐藏编辑器控件，仅保留 FPS / 右上角信息 / 左下角播放控制（F9 切换）
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -42,6 +43,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   disableTrackTexture: false, // Default to enabled (texture on)
   musicDelayMs: 0, // Default to no compensation
   showHitErrorMeter: true, // Default to shown
+  recordingMode: false, // Default to normal editing UI
 }
 
 export function useAppSettings() {

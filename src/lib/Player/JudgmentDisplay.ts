@@ -65,10 +65,18 @@ export class JudgmentDisplay {
   private active: ActiveSprite[] = [];     // 正在展示中的 entry
   private textureCache: Map<number, CanvasTexture> = new Map();
   private i18n: any = null;
+  /** 录制模式：不再显示判定文本（完美/稍快/稍慢等）。 */
+  private recordingMode: boolean = false;
 
   /** 注入场景（sprite 作为独立节点加入场景，不绑定砖块）。 */
   public setScene(scene: Scene): void {
     this.scene = scene;
+  }
+
+  /** 录制模式：隐藏判定文本（如 完美/稍快/稍慢）；开启时立即清空在显示的文本。 */
+  public setRecordingMode(enabled: boolean): void {
+    this.recordingMode = enabled;
+    if (enabled) this.clear();
   }
 
   /** 注入 i18n 翻译对象（可选）。清缓存让文本纹理在下次 show 时按新语言生成。 */
@@ -84,7 +92,7 @@ export class JudgmentDisplay {
    * 文字位于砖块上方约 OFFSET_Y 个单位。
    */
   public show(tileMesh: Mesh | null, margin: HitMargin): void {
-    if (!tileMesh || !this.scene) return;
+    if (this.recordingMode || !tileMesh || !this.scene) return;
 
     // 从空闲列表取，没有则新建（预实例化 100 个 → 多个砖块可同时展示）
     let entry = this.freeList.pop();
