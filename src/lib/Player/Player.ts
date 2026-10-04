@@ -110,6 +110,26 @@ export class Player implements IPlayer {
   private levelData: ILevelData;
   private planetRed: Planet | null = null;
   private planetBlue: Planet | null = null;
+  /** 全部行星按颜色 id（0..7）缓存；MultiPlanet 时 N>2 会创建额外行星。 */
+  private planetsById: (Planet | null)[] = new Array(8).fill(null);
+  /** 当前激活的行星颜色 id 列表（默认 [红, 蓝]）。 */
+  private activePlanetIds: number[] = [0, 1];
+  /** 最近一次应用的行星列表 ref，避免每帧重复增删场景对象。 */
+  private _appliedPlanetListRef: number = -1;
+  /** 官方行星配色（红/蓝/绿/黄/紫/粉/橙/青）。 */
+  private static readonly PLANET_DEFS: { color: number; texture: string | null }[] = [
+    { color: 0xff0000, texture: 'DefaultRed' },
+    { color: 0x0000ff, texture: 'DefaultBlue' },
+    { color: 0x4db300, texture: null },
+    { color: 0xffcc00, texture: null },
+    { color: 0xb31aff, texture: null },
+    { color: 0xff1ab3, texture: null },
+    { color: 0xff661a, texture: null },
+    { color: 0x1acce6, texture: null },
+  ];
+  /** 定位用：本帧每颗行星的目标位置。 */
+  private _layoutX: Float64Array = new Float64Array(8);
+  private _layoutY: Float64Array = new Float64Array(8);
   private currentPivotPosition: { x: number; y: number } = { x: 0, y: 0 };
 
   // Tile Management
@@ -247,6 +267,11 @@ export class Player implements IPlayer {
    * 由官方 SetNumPlanets 的增/删星规则（在 chosen 索引处插/删）模拟得到。
    */
   private tilePivotPlanetId: Int8Array = new Int8Array(0);
+  /** 每砖的行星列表（`planetListTable` 下标）与枢轴在列表中的位置。 */
+  private tilePlanetListRef: Int16Array = new Int16Array(0);
+  private tilePivotPos: Int8Array = new Int8Array(0);
+  /** 去重后的行星列表表（列表 → 颜色 id 数组）。 */
+  private planetListTable: number[][] = [];
   // SetPlanetRotation（星球缓速）：逐砖继承的 ease/easeParts/easePartBehavior
   private tilePlanetEase: string[] = [];
   private tilePlanetEaseParts: Float32Array = new Float32Array(0);
@@ -628,12 +653,16 @@ export class Player implements IPlayer {
     (window as any).__adojasHitsound = () => this.hitsoundManager?.debugSnapshot?.() ?? null;
     // MultiPlanet 探针：
     //   __adojasMultiPlanet()      → 全谱统计（各 N 的砖数 + 所有 MultiPlanet 事件）
-    //   __adojasMultiPlanet(i)     → 第 i 砖的 { numPlanets, pivotPlanetId }
+    //   __adojasMultiPlanet(i)     → 第 i 砖的 { numPlanets, pivotPlanetId, pivotPos, ids }
     (window as any).__adojasMultiPlanet = (i?: number) => {
       if (typeof i === 'number') {
+        const ref = this.tilePlanetListRef[i] ?? -1;
         return {
           numPlanets: this.tileNumPlanets[i] ?? 0,
           pivotPlanetId: this.tilePivotPlanetId[i] ?? -1,
+          pivotPos: this.tilePivotPos[i] ?? -1,
+          listRef: ref,
+          ids: ref >= 0 && ref < this.planetListTable.length ? this.planetListTable[ref] : null,
         };
       }
       const counts: Record<number, number> = {};
@@ -1977,6 +2006,20 @@ export class Player implements IPlayer {
     this.tileAuto = new Uint8Array(n);
     this.tileNumPlanets = new Uint8Array(n);
     this.tilePivotPlanetId = new Int8Array(n);
+    this.tilePlanetListRef = new Int16Array(n);
+    this.tilePivotPos = new Int8Array(n);
+    this.planetListTable = [];
+    const planetListRefMap = new Map<string, number>();
+    const planetListRefOf = (ids: number[]): number => {
+      const key = ids.join(',');
+      let ref = planetListRefMap.get(key);
+      if (ref === undefined) {
+        ref = this.planetListTable.length;
+        this.planetListTable.push(ids.slice());
+        planetListRefMap.set(key, ref);
+      }
+      return ref;
+    };
     
     // Initialize tileStickToFloors from PositionTrackManager
     if (this.positionTrackManager) {
@@ -2077,6 +2120,8 @@ export class Player implements IPlayer {
         // MultiPlanet：记录本砖的 N 与枢轴，再按官方规则推进枢轴
         this.tileNumPlanets[i] = numPlanets;
         this.tilePivotPlanetId[i] = planetIds[chosenPos] ?? 0;
+        this.tilePlanetListRef[i] = planetListRefOf(planetIds);
+        this.tilePivotPos[i] = chosenPos;
         if (numPlanets > 2 && tileDirection(tiles, i) === 999) {
             chosenPos = (chosenPos - 1 + numPlanets) % numPlanets;   // midspin：prev
         } else {
@@ -2205,6 +2250,8 @@ export class Player implements IPlayer {
         this.tileExtraRotations[lastIndex] = extraRotation;
         this.tileNumPlanets[lastIndex] = numPlanets;
         this.tilePivotPlanetId[lastIndex] = planetIds[chosenPos] ?? 0;
+        this.tilePlanetListRef[lastIndex] = planetListRefOf(planetIds);
+        this.tilePivotPos[lastIndex] = chosenPos;
     }
     
     this.totalLevelRotation = totalRotation;
@@ -3299,9 +3346,9 @@ export class Player implements IPlayer {
       planetPositions[DecPlacementType.BluePlanet] = undefined;
     }
 
-    // relativeTo: Player = 玩家正在控制的球。pivot 是偶数砖时红球当轴，
-    // 那么正在运动（被控制）的是蓝球，反之亦然。
-    const moving = (this.currentTileIndex % 2 === 0) ? this.planetBlue : this.planetRed;
+    // relativeTo: Player = 玩家正在控制的球（列表中的"移动星"）。
+    const decInfo = this.getTilePlanetInfo(this.currentTileIndex);
+    const moving = this.planetsById[decInfo.ids[(decInfo.pivotPos + 1) % decInfo.ids.length]] ?? null;
     if (moving) {
       this._decPlayerPos.set(moving.position.x, moving.position.y);
       o.playerPosition = this._decPlayerPos;
@@ -4193,6 +4240,14 @@ export class Player implements IPlayer {
           if (this.planetBlue) {
             this.planetBlue.position.set(px, py, 1.0);
           }
+          // MultiPlanet：切换到 seek 砖的行星列表并归位
+          const seekInfo = this.getTilePlanetInfo(seekIdx);
+          this.setActivePlanets(seekInfo.ids);
+          this._appliedPlanetListRef = seekIdx >= 0 && seekIdx < this.tilePlanetListRef.length
+            ? this.tilePlanetListRef[seekIdx] : -1;
+          for (const id of this.activePlanetIds) {
+            this.planetsById[id]?.position.set(px, py, 1.0);
+          }
           // Reset trail history to prevent stale trail positions
           this.resetTrailHistory();
         }
@@ -4629,17 +4684,102 @@ export class Player implements IPlayer {
     }
   }
 
-  private createPlanets(): void {
-    this.planetRed = new Planet(0xff0000, undefined, this.showTrail, getPlanetTexture('DefaultRed'));
-    this.planetBlue = new Planet(0x0000ff, undefined, this.showTrail, getPlanetTexture('DefaultBlue'));
+  /** 按颜色 id 获取（必要时创建）行星；0=红、1=蓝，2..7 为 MultiPlanet 追加色。 */
+  private ensurePlanet(id: number): Planet {
+    let planet = this.planetsById[id];
+    if (!planet) {
+      const def = Player.PLANET_DEFS[id] ?? { color: 0xffffff, texture: null };
+      planet = new Planet(def.color, undefined, this.showTrail, def.texture ? getPlanetTexture(def.texture) : undefined);
+      planet.render(this.scene);
+      this.planetsById[id] = planet;
+      if (id === 0) this.planetRed = planet;
+      if (id === 1) this.planetBlue = planet;
+    }
+    return planet;
+  }
 
-    this.planetRed.render(this.scene);
-    this.planetBlue.render(this.scene);
+  /** 设置当前激活行星列表：激活的加入场景，其余移出并清拖尾。 */
+  private setActivePlanets(ids: number[]): void {
+    this.activePlanetIds = Array.from(new Set(ids));
+    for (const id of this.activePlanetIds) this.ensurePlanet(id);
+    for (let id = 0; id < this.planetsById.length; id++) {
+      const planet = this.planetsById[id];
+      if (!planet) continue;
+      const active = this.activePlanetIds.indexOf(id) >= 0;
+      const inScene = this.scene.children.includes(planet.mesh);
+      if (active && !inScene) {
+        planet.render(this.scene);
+      } else if (!active && inScene) {
+        planet.removeFromScene(this.scene);
+        planet.clearTrail();
+      }
+    }
+  }
+
+  /** 读取某砖的行星列表与枢轴下标（无数据时退回红蓝两颗）。 */
+  private getTilePlanetInfo(tileIndex: number): { ids: number[]; pivotPos: number } {
+    const ref = tileIndex >= 0 && tileIndex < this.tilePlanetListRef.length ? this.tilePlanetListRef[tileIndex] : -1;
+    const ids = ref >= 0 && ref < this.planetListTable.length ? this.planetListTable[ref] : [0, 1];
+    const raw = tileIndex >= 0 && tileIndex < this.tilePivotPos.length ? this.tilePivotPos[tileIndex] : 0;
+    return { ids, pivotPos: Math.max(0, Math.min(ids.length - 1, raw)) };
+  }
+
+  /**
+   * 本帧多行星布局：枢轴星在砖心，移动星在轨道角 `movingAngle`、半径 `movingDist`，
+   * 其余行星以 2π/N 为间隔沿同一圆周均匀分布（N=2 时严格退化为原来的枢轴+移动球）。
+   */
+  private applyMultiPlanetLayout(tileIndex: number, pivotX: number, pivotY: number, movingAngle: number, movingDist: number): void {
+    const info = this.getTilePlanetInfo(tileIndex);
+    const ids = info.ids;
+    const n = ids.length;
+    const step = (Math.PI * 2) / n;
+    const dir = this.tileIsCW[tileIndex] ? -1 : 1;
+    for (let k = 0; k < n; k++) {
+      const id = ids[k];
+      const offset = (k - info.pivotPos + n) % n;
+      if (offset === 0) {
+        this._layoutX[id] = pivotX;
+        this._layoutY[id] = pivotY;
+      } else {
+        const angle = movingAngle - dir * (offset - 1) * step;
+        this._layoutX[id] = pivotX + Math.cos(angle) * movingDist;
+        this._layoutY[id] = pivotY + Math.sin(angle) * movingDist;
+      }
+    }
+  }
+
+  /** 按本帧布局更新激活行星的位置；砖列表变化时切换场景中的行星集合。 */
+  private syncActivePlanets(tileIndex: number): void {
+    const ref = tileIndex >= 0 && tileIndex < this.tilePlanetListRef.length ? this.tilePlanetListRef[tileIndex] : -1;
+    if (ref !== this._appliedPlanetListRef) {
+      this._appliedPlanetListRef = ref;
+      this.setActivePlanets(this.getTilePlanetInfo(tileIndex).ids);
+    }
+    for (const id of this.activePlanetIds) {
+      const planet = this.planetsById[id];
+      if (planet) planet.position.set(this._layoutX[id], this._layoutY[id], 1.0);
+    }
+  }
+
+  private createPlanets(): void {
+    this.planetsById = new Array(8).fill(null);
+    this.planetRed = null;
+    this.planetBlue = null;
+    this._appliedPlanetListRef = -1;
+
+    this.ensurePlanet(0);
+    this.ensurePlanet(1);
     
     if (tileCountOf(this.levelData.tiles) > 1) {
-      this.planetRed.position.set(this.tilePositions.getX(0), this.tilePositions.getY(0), 1.0);
-      this.planetBlue.position.set(this.tilePositions.getX(1), this.tilePositions.getY(1), 1.0);
+      this.planetRed!.position.set(this.tilePositions.getX(0), this.tilePositions.getY(0), 1.0);
+      this.planetBlue!.position.set(this.tilePositions.getX(1), this.tilePositions.getY(1), 1.0);
     }
+
+    // 初始砖的行星列表（MultiPlanet 时可能多于两颗）
+    const info = this.getTilePlanetInfo(Math.max(0, this.currentTileIndex));
+    this.setActivePlanets(info.ids);
+    this._appliedPlanetListRef = this.currentTileIndex >= 0 && this.currentTileIndex < this.tilePlanetListRef.length
+      ? this.tilePlanetListRef[this.currentTileIndex] : -1;
   }
 
   /**
@@ -4894,16 +5034,17 @@ export class Player implements IPlayer {
   }
 
   private removePlanets(): void {
-    if (this.planetRed) {
-      this.planetRed.removeFromScene(this.scene);
-      this.planetRed.dispose();
-      this.planetRed = null;
+    for (let id = 0; id < this.planetsById.length; id++) {
+      const planet = this.planetsById[id];
+      if (planet) {
+        planet.removeFromScene(this.scene);
+        planet.dispose();
+        this.planetsById[id] = null;
+      }
     }
-    if (this.planetBlue) {
-      this.planetBlue.removeFromScene(this.scene);
-      this.planetBlue.dispose();
-      this.planetBlue = null;
-    }
+    this.planetRed = null;
+    this.planetBlue = null;
+    this._appliedPlanetListRef = -1;
   }
 
   private getContainerSize(): { width: number; height: number } {
@@ -5406,15 +5547,10 @@ export class Player implements IPlayer {
         const lastIndex = tileCountOf(this.levelData.tiles) - 1;
 
         {
-             const isRedPivot = (lastIndex % 2 === 0);
-             const pivotPlanet = isRedPivot ? this.planetRed : this.planetBlue;
-             const movingPlanet = isRedPivot ? this.planetBlue : this.planetRed;
-             
              const pivotX = this.tilePositions.getX(lastIndex);
              const pivotY = this.tilePositions.getY(lastIndex);
              this.currentPivotPosition.x = pivotX;
              this.currentPivotPosition.y = pivotY;
-             pivotPlanet.position.set(pivotX, pivotY, 1.0);
              
              let startAngle = 0;
              if (lastIndex > 0) {
@@ -5435,15 +5571,11 @@ export class Player implements IPlayer {
              const currentAngle = isCW ? (startAngle - totalAngle) : (startAngle + totalAngle);
              
              const dist = 1.0;
-             movingPlanet.position.set(
-                 pivotX + Math.cos(currentAngle) * dist,
-                 pivotY + Math.sin(currentAngle) * dist,
-                 1.0
-             );
+             this.applyMultiPlanetLayout(lastIndex, pivotX, pivotY, currentAngle, dist);
+             this.syncActivePlanets(lastIndex);
              
-     	    pivotPlanet.position.z = 1.0;
-             pivotPlanet.update(0, timeInLevel);
-             movingPlanet.update(0, timeInLevel);
+     	    // 枢轴星位置已由 applyMultiPlanetLayout 设置
+             for (const id of this.activePlanetIds) this.planetsById[id]?.update(0, timeInLevel);
              this.computePlanetTrails(timeInLevel);
         }
         return;
@@ -5451,10 +5583,6 @@ export class Player implements IPlayer {
 
     // Normal Rotation Logic
     if (tileIndex >= 0 && tileIndex < tileCountOf(this.levelData.tiles)) {
-        const isRedPivot = (tileIndex % 2 === 0);
-        const pivotPlanet = isRedPivot ? this.planetRed : this.planetBlue;
-        const movingPlanet = isRedPivot ? this.planetBlue : this.planetRed;
-
         // Get tile position based on stickToFloors
         // If stickToFloors is false, use original position (planet doesn't follow tile movement)
         // If stickToFloors is true, use actual mesh position (planet follows tile movement)
@@ -5474,8 +5602,7 @@ export class Player implements IPlayer {
         this.currentPivotPosition.x = pivotPos.x;
         this.currentPivotPosition.y = pivotPos.y;
 
-        // Pivot planet uses the selected position
-        pivotPlanet.position.set(pivotPos.x, pivotPos.y, 1.0);
+        // 枢轴星位置由 applyMultiPlanetLayout 统一设置
 
         // When stickToFloors is enabled, use live mesh positions for the full trajectory
         // so the ball correctly arrives at each tile's actual (possibly moved) position.
@@ -5538,15 +5665,12 @@ export class Player implements IPlayer {
         const clampedProgress = Math.max(0, Math.min(1, progress));
         const currentDist = startDist + (endDist - startDist) * clampedProgress;
 
-        // Calculate planet position relative to selected pivot position
-        const planetX = pivotPos.x + Math.cos(currentAngle) * currentDist;
-        const planetY = pivotPos.y + Math.sin(currentAngle) * currentDist;
-
-        movingPlanet.position.set(planetX, planetY, 1.0);
+        // 统一多行星布局：枢轴在砖心、移动星在轨道、其余按 2π/N 分布
+        this.applyMultiPlanetLayout(tileIndex, pivotPos.x, pivotPos.y, currentAngle, currentDist);
+        this.syncActivePlanets(tileIndex);
     }
     
-    this.planetRed.update(0, timeInLevel);
-    this.planetBlue.update(0, timeInLevel);
+    for (const id of this.activePlanetIds) this.planetsById[id]?.update(0, timeInLevel);
     this.computePlanetTrails(timeInLevel);
   }
   
@@ -5997,8 +6121,10 @@ export class Player implements IPlayer {
     });
     this.geometryCache.clear();
     
-    if (this.planetRed) this.planetRed.dispose();
-    if (this.planetBlue) this.planetBlue.dispose();
+    for (const planet of this.planetsById) planet?.dispose();
+    this.planetsById = new Array(8).fill(null);
+    this.planetRed = null;
+    this.planetBlue = null;
 
     this.spatialGrid.clear();
 
