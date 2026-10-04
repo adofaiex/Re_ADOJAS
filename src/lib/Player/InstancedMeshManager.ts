@@ -89,6 +89,8 @@ interface ShapeInstancedMesh {
     instances: Map<number, number>; // tileIndex -> instanceIndex
     /** 已释放、可复用的实例槽位（删除砖时 O(1) 回收，避免 count 无限增长）。 */
     freeSlots: number[];
+    /** 已进入"空闲待回收"队列（防止重复入队）。 */
+    emptyMarked?: boolean;
     maxInstances: number;
     instanceCount: number;
     minTileIndex: number; // lowest tile ID in this mesh → highest render priority
@@ -106,6 +108,13 @@ export class InstancedMeshManager {
     private scene: Scene;
     private geometryCache: Map<string, BufferGeometry>;
     private instancedMeshes: Map<string, ShapeInstancedMesh>;
+    /**
+     * 空形状回收队列（LRU 序）。高速谱面下砖块大量进出视野，常用形状会瞬间清空；
+     * 若立即回收，下一帧又要重新生成几何/材质/属性缓冲（垃圾 + GPU 上传风暴）。
+     * 现在空形状保留复用，只有形状总数超过 MAX_TRACKED_SHAPES 时才回收最旧的空闲形状。
+     */
+    private emptyShapes: ShapeInstancedMesh[] = [];
+    private static readonly MAX_TRACKED_SHAPES = 256;
     private tileInstances: Map<number, TileInstance>;
     private onGeometryNeeded: (shapeKey: string) => BufferGeometry | null;
     private maxCacheSize: number = 100;
@@ -181,6 +190,8 @@ export class InstancedMeshManager {
      * Initialize an instanced mesh for a specific shape
      */
     private createInstancedMesh(shapeKey: string, maxInstances: number): ShapeInstancedMesh | undefined {
+        // 新建形状前先做预算检查（回收最久的空闲形状，保留常用形状）
+        this.ensureShapeBudget();
         const geometry = this.onGeometryNeeded(shapeKey);
         if (!geometry) return undefined;
 
@@ -360,9 +371,9 @@ export class InstancedMeshManager {
                     oldShapeData.instances.delete(tileIndex);
                     oldShapeData.freeSlots.push(oldInstanceIndex);
                 }
-                // 变更形状后旧形状可能已空：回收，避免残留空批。
+                // 变更形状后旧形状可能已空：放入空闲队列（不立即回收）
                 if (oldShapeData.instances.size === 0) {
-                    this.evictShape(oldShapeData);
+                    this.markShapeEmpty(oldShapeData);
                 }
             }
         }
@@ -392,6 +403,9 @@ export class InstancedMeshManager {
             // Start with 100 instances, will grow if needed
             shapeData = this.createInstancedMesh(shapeKey, 100);
             if (!shapeData) return;
+        } else if (shapeData.emptyMarked) {
+            // 形状复活：从空闲队列语义中移除（队列里的过客会被 budget 检查跳过）
+            shapeData.emptyMarked = false;
         }
 
         // Check if we need more instances
@@ -656,8 +670,6 @@ export class InstancedMeshManager {
         const oldMax = shapeData.maxInstances;
         const newMax = oldMax * 2;
 
-        console.log(`[InstancedMeshManager] Expanding instanced mesh for ${shapeData.shapeKey} from ${oldMax} to ${newMax}`);
-
         // Create new instanced mesh with double capacity
         const oldMesh = shapeData.instancedMesh;
         const geometry = oldMesh.geometry.clone();
@@ -791,16 +803,31 @@ export class InstancedMeshManager {
             shapeData.freeSlots.push(instanceIndex);
         }
 
-        // 形状空了就整体回收。否则长谱上每种 (方向对 × trackStyle) 都留下一个
-        // 预分配了 100 实例缓冲的 InstancedMesh，永不释放（实测 6 分钟涨到 1000+，
-        // GPU 几何 348→4712），且所有按砖操作都要遍历形状表 → 帧率持续下降。
-        if (shapeData.instances.size === 0) {
-            this.evictShape(shapeData);
+        // 形状空了不立即回收：放进空闲队列，优先复用（见 emptyShapes 注释）
+        this.markShapeEmpty(shapeData);
+    }
+
+    /** 形状清空：放入空闲队列（只标记一次；复活后 budget 检查会跳过）。 */
+    private markShapeEmpty(shapeData: ShapeInstancedMesh): void {
+        if (shapeData.emptyMarked) return;
+        shapeData.emptyMarked = true;
+        this.emptyShapes.push(shapeData);
+    }
+
+    /** 形状数量超预算时，回收最久空闲的形状（活跃形状永不回收）。 */
+    private ensureShapeBudget(): void {
+        if (this.instancedMeshes.size < InstancedMeshManager.MAX_TRACKED_SHAPES) return;
+        while (this.instancedMeshes.size >= InstancedMeshManager.MAX_TRACKED_SHAPES && this.emptyShapes.length > 0) {
+            const shape = this.emptyShapes.shift()!;
+            if (shape.instances.size > 0) continue;            // 已复活
+            if (!this.instancedMeshes.has(shape.shapeKey)) continue; // 已回收
+            this.evictShape(shape);
         }
     }
 
     /** 回收一个已无实例的形状（从场景与形状表移除并释放 GPU 资源）。 */
     private evictShape(shapeData: ShapeInstancedMesh): void {
+        shapeData.emptyMarked = false;
         this.instancedMeshes.delete(shapeData.shapeKey);
         this.scene.remove(shapeData.instancedMesh);
         shapeData.instancedMesh.geometry.dispose();
@@ -932,6 +959,7 @@ export class InstancedMeshManager {
      */
     public clear(): void {
         this.tileInstances.clear();
+        this.emptyShapes.length = 0;
 
         for (const shapeData of this.instancedMeshes.values()) {
             shapeData.instances.clear();
