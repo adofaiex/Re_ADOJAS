@@ -87,6 +87,8 @@ export class Player implements IPlayer {
   private _perf: Record<string, number> = {};
   private _perfSamples: number = 0;
   private _perfLastLog: number = 0;
+  /** 上一帧 rAF 时间戳（frameGap 探针）。 */
+  private _lastAnimateTime: number = 0;
   private perfAdd(name: string, ms: number): void { this._perf[name] = (this._perf[name] ?? 0) + ms; }
   private perfTick(nowMs: number): void {
     this._perfSamples++;
@@ -618,6 +620,9 @@ export class Player implements IPlayer {
             programs: r?.info?.programs?.length ?? null,
             drawCalls: r?.info?.render?.calls ?? null,
             triangles: r?.info?.render?.triangles ?? null,
+            jsHeapMB: (performance as any).memory
+                ? +(((performance as any).memory.usedJSHeapSize as number) / 1048576).toFixed(1)
+                : null,
             video: this.videoElement ? {
                 currentTime: +this.videoElement.currentTime.toFixed(3),
                 paused: this.videoElement.paused,
@@ -2670,6 +2675,9 @@ export class Player implements IPlayer {
       const delta = (time - lastTime) / 1000;
       lastTime = time;
       const tFrame = performance.now();
+      // 帧间隔（与 total 对比可区分"我们的帧时间"与"帧间阻塞/合成/GC"）
+      if (this._lastAnimateTime > 0) this.perfAdd('frameGap', tFrame - this._lastAnimateTime);
+      this._lastAnimateTime = tFrame;
       
       if (this.isPlaying && !this.isPaused && !this._manualDead) {
         const tU = performance.now();
@@ -2708,6 +2716,7 @@ export class Player implements IPlayer {
       }
       
       // Overlay HUD update (2D canvas, no DOM layout)
+      const tHud = performance.now();
       if (this.overlayHUD) {
         this.overlayHUD.update({
           fps,
@@ -2727,6 +2736,7 @@ export class Player implements IPlayer {
         });
         this.overlayHUD.render();
       }
+      this.perfAdd('hud', performance.now() - tHud);
       
       try {
         this.stats?.end();
