@@ -139,6 +139,16 @@ export interface TimestampGroup {
   timestamps: number[]; // in seconds
 }
 
+/** 二分：第一个 >= t 的下标（timestamps 升序）。 */
+function lowerBoundTime(arr: number[], t: number): number {
+  let lo = 0, hi = arr.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (arr[mid] < t) lo = mid + 1; else hi = mid;
+  }
+  return lo;
+}
+
 export class HitsoundManager {
   private enabled: boolean = true;
   private gainNode: GainNode | null = null;
@@ -150,6 +160,21 @@ export class HitsoundManager {
   private useOGGCompression: boolean = false;
   private compressedOGGBlob: Blob | null = null;
   private compressedBuffer: AudioBuffer | null = null;
+
+  // ── 超大物量谱的分块按需合成 ───────────────────────────────
+  // 100 万砖的谱面（Singularity 99.7 万）整曲逐采样混音是数十亿次运算，主线程
+  // 直接卡死；OGG 压缩只减小存储、救不了合成。命中数/时长超限时改为按 10s 块
+  // 合成：每块只混该窗口内的命中（并限制密度），随播放进度调度，内存/CPU 有界。
+  private chunkMode: boolean = false;
+  private chunkGroups: TimestampGroup[] = [];
+  private chunkDuration: number = 0;
+  private chunkSources: AudioBufferSourceNode[] = [];
+  private chunkGeneration: number = 0;
+  private chunkTypeBuffers: Map<HitsoundType, AudioBuffer> = new Map();
+  private static readonly CHUNK_SEC = 10;
+  private static readonly MAX_HITS_PER_CHUNK = 6000;
+  private static readonly CHUNK_MODE_HIT_THRESHOLD = 250000;
+  private static readonly CHUNK_MODE_DURATION_THRESHOLD = 900; // 15 分钟
 
   constructor(private defaultType: HitsoundType = 'Kick', private defaultVolume: number = 100, useOGGCompression: boolean = false) {
     this.useOGGCompression = useOGGCompression;
@@ -253,6 +278,25 @@ export class HitsoundManager {
     let totalHits = 0;
     for (const group of stillActive) totalHits += group.timestamps.length;
 
+    // 超大物量保护：整曲逐采样混音是 hits × 采样长 × 声道 的运算量（百万砖谱
+    // 可达数十亿次），会卡死主线程；OGG 压缩只减小存储，救不了合成。命中数或
+    // 时长超限时切换为分块按需合成（见字段注释）。
+    if (totalHits > HitsoundManager.CHUNK_MODE_HIT_THRESHOLD
+        || totalDuration > HitsoundManager.CHUNK_MODE_DURATION_THRESHOLD) {
+      this.chunkMode = true;
+      this.chunkGroups = stillActive;
+      this.chunkDuration = totalDuration;
+      this.chunkTypeBuffers = typeBuffers;
+      this.synthesizedBuffer = null;
+      this.compressedBuffer = null;
+      this.compressedOGGBlob = null;
+      console.log(`[HitsoundManager] Chunked synthesis mode: ${totalHits} hits, ${totalDuration.toFixed(1)}s, ${stillActive.length} groups`);
+      if (onProgress) onProgress(100);
+      return;
+    }
+    this.chunkMode = false;
+    this.chunkGroups = [];
+
     let processedHits = 0;
     let peakAmplitude = 0;
     const CHUNK_SIZE = 100000;
@@ -343,6 +387,11 @@ export class HitsoundManager {
     const ctx = getSharedAudioContext();
     if (ctx.state === 'suspended') ctx.resume();
 
+    if (this.chunkMode) {
+      this.startChunked(0, delay);
+      return;
+    }
+
     const playBuf = this.compressedBuffer || this.synthesizedBuffer;
     if (!playBuf) return;
 
@@ -365,6 +414,11 @@ export class HitsoundManager {
     const ctx = getSharedAudioContext();
     if (ctx.state === 'suspended') ctx.resume();
 
+    if (this.chunkMode) {
+      this.startChunked(Math.max(0, offset), 0);
+      return;
+    }
+
     const playBuf = this.compressedBuffer || this.synthesizedBuffer;
     if (!playBuf) return;
 
@@ -384,6 +438,14 @@ export class HitsoundManager {
   }
 
   stop(): void {
+    // 取消分块调度循环并停掉所有块音源
+    this.chunkGeneration++;
+    if (this.chunkSources.length > 0) {
+      for (const s of this.chunkSources) {
+        try { s.stop(); s.disconnect(); } catch (e) { }
+      }
+      this.chunkSources = [];
+    }
     if (this.synthesizedSource) {
       try { this.synthesizedSource.stop(); this.synthesizedSource.disconnect(); } catch (e) { }
       this.synthesizedSource = null;
@@ -391,7 +453,112 @@ export class HitsoundManager {
   }
 
   isSynthesized(): boolean {
+    if (this.chunkMode) return this.chunkGroups.length > 0;
     return this.synthesizedBuffer !== null || this.compressedBuffer !== null;
+  }
+
+  /**
+   * 分块模式播放：从 offset（秒）开始，第一块在 currentTime+delay 出声。
+   * 逐块合成并在后台连续调度；stop()/seek 通过 chunkGeneration 取消。
+   */
+  private startChunked(offset: number, delay: number): void {
+    const ctx = getSharedAudioContext();
+    const gen = ++this.chunkGeneration;
+    const startWall = ctx.currentTime + Math.max(0, delay);
+    const firstChunk = Math.max(0, Math.floor(offset / HitsoundManager.CHUNK_SEC));
+    void this.scheduleChunksFrom(firstChunk, offset, startWall, gen);
+  }
+
+  private async scheduleChunksFrom(firstChunk: number, offset: number, startWall: number, gen: number): Promise<void> {
+    const totalChunks = Math.ceil(this.chunkDuration / HitsoundManager.CHUNK_SEC);
+    for (let k = firstChunk; k <= totalChunks; k++) {
+      if (gen !== this.chunkGeneration) return;
+      const buf = this.synthesizeChunk(k);
+      if (buf) {
+        const ctx = getSharedAudioContext();
+        const src = ctx.createBufferSource();
+        src.buffer = buf;
+        src.connect(this.getGainNode());
+        src.onended = () => {
+          try { src.disconnect(); } catch (e) { }
+          const i = this.chunkSources.indexOf(src);
+          if (i >= 0) this.chunkSources.splice(i, 1);
+        };
+        const when = startWall + (k * HitsoundManager.CHUNK_SEC - offset);
+        src.start(Math.max(ctx.currentTime, when));
+        this.chunkSources.push(src);
+      }
+      // 让出主线程，避免一次性合成全部块造成长阻塞；合成速度通常远快于实时。
+      await new Promise(resolve => setTimeout(resolve, 0));
+      if (gen !== this.chunkGeneration) return;
+    }
+  }
+
+  /** 合成第 k 块（10s 窗口 + 命中尾音），只混该窗口内的命中并限密度。 */
+  private synthesizeChunk(chunkIndex: number): AudioBuffer | null {
+    const ctx = getSharedAudioContext();
+    const sampleRate = ctx.sampleRate;
+    const CHUNK = HitsoundManager.CHUNK_SEC;
+    const chunkStart = chunkIndex * CHUNK;
+    const chunkEnd = chunkStart + CHUNK;
+
+    let maxHitDuration = 0;
+    for (const buf of this.chunkTypeBuffers.values()) {
+      if (buf.duration > maxHitDuration) maxHitDuration = buf.duration;
+    }
+
+    const windows: { group: TimestampGroup; start: number; end: number }[] = [];
+    let windowHits = 0;
+    for (const group of this.chunkGroups) {
+      const ts = group.timestamps;
+      const start = lowerBoundTime(ts, chunkStart);
+      const end = lowerBoundTime(ts, chunkEnd);
+      if (end > start) {
+        windows.push({ group, start, end });
+        windowHits += (end - start);
+      }
+    }
+    if (windowHits === 0) return null;
+
+    const stride = Math.max(1, Math.ceil(windowHits / HitsoundManager.MAX_HITS_PER_CHUNK));
+    const bufferLength = Math.ceil((CHUNK + maxHitDuration + 0.1) * sampleRate);
+    const outputBuffer = ctx.createBuffer(2, bufferLength, sampleRate);
+    const outL = outputBuffer.getChannelData(0);
+    const outR = outputBuffer.getChannelData(1);
+
+    for (const w of windows) {
+      const buf = this.chunkTypeBuffers.get(w.group.type);
+      if (!buf) continue;
+      const volScale = w.group.volume / 100;
+      const srcL = buf.getChannelData(0);
+      const srcR = buf.numberOfChannels > 1 ? buf.getChannelData(1) : srcL;
+      const hitLen = Math.floor(buf.duration * sampleRate);
+      const ts = w.group.timestamps;
+      for (let idx = w.start; idx < w.end; idx += stride) {
+        const t = ts[idx];
+        if (t < chunkStart) continue;
+        const startSample = Math.floor((t - chunkStart) * sampleRate);
+        if (startSample >= bufferLength) break;
+        const len = Math.min(hitLen, bufferLength - startSample);
+        for (let i = 0; i < len; i++) {
+          outL[startSample + i] += srcL[i] * volScale;
+          outR[startSample + i] += srcR[i] * volScale;
+        }
+      }
+    }
+
+    // 限密度 + 固定软削波：避免极密段落削爆，也不做全局归一化（分块无法全局统计）。
+    const softClipChunk = (d: Float32Array): void => {
+      for (let i = 0; i < d.length; i++) {
+        const v = d[i];
+        const a = v < 0 ? -v : v;
+        if (a > 0.5) d[i] = softClip(v);
+      }
+    };
+    softClipChunk(outL);
+    softClipChunk(outR);
+
+    return outputBuffer;
   }
 
   dispose(): void {
@@ -400,5 +567,7 @@ export class HitsoundManager {
     this.compressedBuffer = null;
     this.compressedOGGBlob = null;
     this.gainNode = null;
+    this.chunkGroups = [];
+    this.chunkTypeBuffers.clear();
   }
 }

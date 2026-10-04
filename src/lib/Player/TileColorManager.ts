@@ -357,24 +357,41 @@ export class TileColorManager {
     }
 
     // --- Pre-compute static tile colors & build tileRecolorConfigs ---
+    // 按 colorInfluencing 分段共享对象：100 万砖逐砖 new config + color 会占
+    // 200-400MB（Singularity 99.7 万砖实测）。这些字段只由 shift 决定，同段所有砖
+    // 完全一致；运行期 setTileRecolorConfig / setTileColor 都是"替换引用"，
+    // 不会原地修改共享对象。
     const defaultOpacity = parseHexAlpha(defaultColor);
+    let sharedEvtIdx = -2;
+    let sharedCfg: TileColorConfig | null = null;
+    let sharedColor: { color: string; secondaryColor: string } | null = null;
     for (let i = 0; i < totalTiles; i++) {
       const evtIdx = this.colorInfluencing[i];
-      const shift = this.trackColorEvent[evtIdx];
-      this.tileRecolorConfigs[i] = {
-        trackStyle: shift.floortype,
-        trackColorType: shift.onType,
-        trackColor: '#' + shift.colorString,
-        secondaryTrackColor: '#' + shift.seccolorString,
-        trackColorPulse: shift.pulsecal.type,
-        trackColorAnimDuration: shift.pulsecal.animationLength,
-        trackPulseLength: shift.pulsecal.pulseLength,
-        trackOpacity: shift.alpha,
-        trackGlowIntensity: shift.glowIntensity * 100,
-        startFloor: 0
-      };
-      const rendered = this.getTileRenderer(i, 0, this.tileRecolorConfigs[i]!);
-      this.tileColors[i] = { color: rendered.color, secondaryColor: rendered.bgcolor };
+      if (evtIdx !== sharedEvtIdx || !sharedCfg) {
+        const shift = this.trackColorEvent[evtIdx];
+        sharedCfg = {
+          trackStyle: shift.floortype,
+          trackColorType: shift.onType,
+          trackColor: '#' + shift.colorString,
+          secondaryTrackColor: '#' + shift.seccolorString,
+          trackColorPulse: shift.pulsecal.type,
+          trackColorAnimDuration: shift.pulsecal.animationLength,
+          trackPulseLength: shift.pulsecal.pulseLength,
+          trackOpacity: shift.alpha,
+          trackGlowIntensity: shift.glowIntensity * 100,
+          startFloor: 0
+        };
+        sharedColor = null;
+        sharedEvtIdx = evtIdx;
+      }
+      this.tileRecolorConfigs[i] = sharedCfg;
+      if (!sharedColor) {
+        // getTileRenderer 的 id 只影响 Volume 幅度 / startFloor 缺省，而 init 时
+        // 幅度表为空、startFloor 固定 0 → 同段渲染结果一致，可整体共享。
+        const rendered = this.getTileRenderer(i, 0, sharedCfg);
+        sharedColor = { color: rendered.color, secondaryColor: rendered.bgcolor };
+      }
+      this.tileColors[i] = sharedColor;
     }
 
     // --- RecolorTrack events ---

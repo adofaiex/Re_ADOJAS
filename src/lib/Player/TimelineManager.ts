@@ -66,6 +66,19 @@ export class TimelineManager {
     private _tileRangesSorted: boolean = false;
 
     /**
+     * 超大物量谱的保护阈值：无 AnimateTrack 事件（纯 settings 全局出场/退场）时，
+     * 每块砖的关键帧都是同一套公式；100 万砖逐块建关键帧会产生数百万 Keyframe +
+     * 每砖一个时间轴 Map，直接 OOM（实测 Singularity 99.7 万砖）。超过阈值时跳过
+     * 全局出场/退场动画（砖直接可见），保证谱面能加载；MoveTrack 等不受影响。
+     */
+    private static readonly GLOBAL_ANIM_TILE_LIMIT = 100000;
+    private _globalTileAnimationSkipped: boolean = false;
+
+    public get globalTileAnimationSkipped(): boolean {
+        return this._globalTileAnimationSkipped;
+    }
+
+    /**
      * 末端宽限（秒）：动画最后一帧之后再多保留一小段活跃窗口。
      * duration=0 的事件、以及动画末值都是"瞬时落地并保持"，
      * 时间轴上只有一个点；若不宽限，getActiveTileIndicesAt 在 time === end
@@ -1049,6 +1062,14 @@ export class TimelineManager {
         let num5 = baseTileBPM;
         let num6 = baseTileBPM;
         let flag2 = false;
+
+        // 超大物量 + 纯 settings 全局动画：见 GLOBAL_ANIM_TILE_LIMIT 注释。
+        if (animateTrackEvents.length === 0 && this.totalTiles > TimelineManager.GLOBAL_ANIM_TILE_LIMIT) {
+            this._globalTileAnimationSkipped = true;
+            debugLog('[TimelineManager] global tile animation skipped: tiles=' + this.totalTiles
+                + ' appear=' + appearType + ' disappear=' + disappearType);
+            return;
+        }
 
         let eventIdx = 0;
         for (let floor = 0; floor < this.totalTiles; floor++) {

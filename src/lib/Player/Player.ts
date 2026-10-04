@@ -429,14 +429,10 @@ export class Player implements IPlayer {
     // Re-initialize position track manager with updated tiles (including extra tile)
     this.positionTrackManager = new PositionTrackManager(levelData);
 
-    // Update levelData.tiles with final positions (including PositionTrack offsets)
-    const allTransforms = this.positionTrackManager.calculateAllTileTransforms(this.isEditorMode);
-    for (let i = 0; i < this.levelData.tiles.length; i++) {
-      const transform = allTransforms.get(i);
-      if (transform) {
-        this.levelData.tiles[i].position = [transform.position.x, transform.position.y];
-      }
-    }
+    // Update levelData.tiles with final positions (including PositionTrack offsets).
+    // 紧凑版：结果在 typed array 里，原地写回 tile.position，避免 100 万级 Map/Vector。
+    this.positionTrackManager.computeTransforms(this.isEditorMode);
+    this.positionTrackManager.applyPositionsToTiles(this.levelData.tiles);
 
     // Initialize tile colors from settings (now after appendExtraTile)
     this.tileColorManager.initTileColors();
@@ -455,21 +451,19 @@ export class Player implements IPlayer {
     this.calculateCumulativeRotations();
 
     // Precomputed tile positions/rotations as base for MoveTrack computation
-    const basePositions: Vector2[] = this.levelData.tiles.map((t: any) =>
-        new Vector2(t.position[0], t.position[1])
-    );
-    const baseRotations: number[] = this.levelData.tiles.map((_: any, i: number) => {
-        const transform = this.positionTrackManager?.getTileTransform(i);
-        return transform ? transform.rotation * Math.PI / 180 : 0;
-    });
-    const baseScales: Vector2[] = this.levelData.tiles.map((_: any, i: number) => {
-        const transform = this.positionTrackManager?.getTileTransform(i);
-        return transform ? new Vector2(transform.scale.x, transform.scale.y) : new Vector2(1, 1);
-    });
-    const baseOpacities: number[] = this.levelData.tiles.map((_: any, i: number) => {
-        const transform = this.positionTrackManager?.getTileTransform(i);
-        return transform ? transform.opacity : 1;
-    });
+    const tileCountNow = this.levelData.tiles.length;
+    const basePositions: Vector2[] = new Array(tileCountNow);
+    const baseRotations: number[] = new Array(tileCountNow);
+    const baseScales: Vector2[] = new Array(tileCountNow);
+    const baseOpacities: number[] = new Array(tileCountNow);
+    for (let i = 0; i < tileCountNow; i++) {
+        const t = this.levelData.tiles[i];
+        basePositions[i] = new Vector2(t.position[0], t.position[1]);
+        baseRotations[i] = this.positionTrackManager ? this.positionTrackManager.getRotationDeg(i) * Math.PI / 180 : 0;
+        const s = this.positionTrackManager ? this.positionTrackManager.getScale(i) : 1;
+        baseScales[i] = new Vector2(s, s);
+        baseOpacities[i] = this.positionTrackManager ? this.positionTrackManager.getOpacity(i) : 1;
+    }
 
     // Initialize Timeline Manager (unified timelines for all event types)
     // 事件时间轴与判定/打拍音/球共用 tileStartTimes（timeInLevel 时间线），完全同步：
@@ -1852,10 +1846,8 @@ export class Player implements IPlayer {
     
     // Initialize tileStickToFloors from PositionTrackManager
     if (this.positionTrackManager) {
-      const allTransforms = this.positionTrackManager.calculateAllTileTransforms(this.isEditorMode);
       for (let i = 0; i < n; i++) {
-        const transform = allTransforms.get(i);
-        this.tileStickToFloors[i] = transform?.stickToFloors ?? isEnabled(this.levelData.settings?.stickToFloors, true);
+        this.tileStickToFloors[i] = this.positionTrackManager.getStickToFloors(i);
       }
     } else {
       // Default to true if no PositionTrackManager
@@ -3996,10 +3988,10 @@ export class Player implements IPlayer {
     this.isEditorMode = isEditorMode;
     // Re-calculate all tile positions with new editor mode
     if (this.positionTrackManager) {
-      const allTransforms = this.positionTrackManager.calculateAllTileTransforms(this.isEditorMode);
+      this.positionTrackManager.computeTransforms(this.isEditorMode);
       this.tiles.forEach((mesh, id) => {
         const index = parseInt(id);
-        const transform = allTransforms.get(index);
+        const transform = this.positionTrackManager!.getTileTransform(index);
         if (transform) {
           mesh.position.copy(transform.position);
           mesh.rotation.z = transform.rotation * (Math.PI / 180);
@@ -4023,8 +4015,7 @@ export class Player implements IPlayer {
 
       // Update tileStickToFloors array
       for (let i = 0; i < this.levelData.tiles.length; i++) {
-        const transform = allTransforms.get(i);
-        this.tileStickToFloors[i] = transform?.stickToFloors ?? isEnabled(this.levelData.settings?.stickToFloors, true);
+        this.tileStickToFloors[i] = this.positionTrackManager!.getStickToFloors(i);
       }
 
       // Sync instanced meshes after re-applying PositionTrack in editor mode
@@ -4063,12 +4054,12 @@ export class Player implements IPlayer {
   private reapplyPositionTrackTransforms(): void {
     if (!this.positionTrackManager) return;
     
-    // Calculate all transforms at once for efficiency and correctness
-    const allTransforms = this.positionTrackManager.calculateAllTileTransforms(this.isEditorMode);
+    // Recompute compact transforms, then apply to cached tiles on demand.
+    this.positionTrackManager.computeTransforms(this.isEditorMode);
     
     this.tiles.forEach((mesh, id) => {
       const index = parseInt(id);
-      const transform = allTransforms.get(index);
+      const transform = this.positionTrackManager!.getTileTransform(index);
       
       if (transform) {
         mesh.position.copy(transform.position);
@@ -4102,8 +4093,7 @@ export class Player implements IPlayer {
 
     // Update tileStickToFloors array
     for (let i = 0; i < this.levelData.tiles.length; i++) {
-      const transform = allTransforms.get(i);
-      this.tileStickToFloors[i] = transform?.stickToFloors ?? isEnabled(this.levelData.settings?.stickToFloors, true);
+      this.tileStickToFloors[i] = this.positionTrackManager!.getStickToFloors(i);
     }
 
     // Sync instanced meshes after re-applying PositionTrack

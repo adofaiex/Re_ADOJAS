@@ -1,4 +1,4 @@
-import { Vector3, Vector2 } from 'three';
+import { Vector3 } from 'three';
 import { isEventActive, isEnabled } from './EventUtils';
 import { Level } from 'adofai';
 
@@ -22,19 +22,42 @@ export interface TileTransform {
     stickToFloors: boolean;
 }
 
+/**
+ * PositionTrack 计算器（紧凑版）。
+ *
+ * 谱面砖数可达百万级（例：Singularity 99.7 万砖），原实现会一次性构造
+ * `Map<number, TileTransform>` + 每砖一个 Vector2/Vector3，单次数百 MB。
+ * 现在：
+ *  - 基础位置/事件结果全部存 Float64Array（位置）、Float32Array（角度/缩放/透明度）、
+ *    Uint8Array（stickToFloors）；
+ *  - `applyPositionsToTiles()` 把结果写回 `tile.position`（存在则原地写）；
+ *  - `getTileTransform(i)` 按需临时组装（只对可见砖/编辑器缓存砖调用）。
+ * 语义与旧实现保持一致（含 relativeTo / vector 累积 / disabled / editorOnly）。
+ */
 export class PositionTrackManager {
     private levelData: any;
     private positionTrackEvents: Map<number, PositionTrackEvent[]>;
-    private tileTransforms: Map<number, TileTransform>;
-    private tilePositions: Map<number, Vector2>;
 
     private static TILE_SIZE = 1.0;
+
+    // ── 紧凑数组（tileCount 长度）───────────────────────────────
+    /** 基础位置（仅由 angleData 递推） */
+    private baseX: Float64Array | null = null;
+    private baseY: Float64Array | null = null;
+    /** 应用 PositionTrack 事件后的位置 */
+    private workX: Float64Array | null = null;
+    private workY: Float64Array | null = null;
+    private workRot: Float32Array | null = null;      // 度
+    private workScale: Float32Array | null = null;
+    private workOpacity: Float32Array | null = null;
+    private workStick: Uint8Array | null = null;
+
+    private computed: boolean = false;
+    private tileCount: number = 0;
 
     constructor(levelData: Level) {
         this.levelData = levelData;
         this.positionTrackEvents = new Map();
-        this.tileTransforms = new Map();
-        this.tilePositions = new Map();
         this.parsePositionTrackEvents();
     }
 
@@ -104,17 +127,26 @@ export class PositionTrackManager {
         }
     }
 
-    public calculateAllTileTransforms(isEditorMode: boolean = false): Map<number, TileTransform> {
-        const transforms = new Map<number, TileTransform>();
-        const tiles = this.levelData.tiles;
+    /** 是否有任何 PositionTrack 事件（没有的话所有 transform 都是默认值）。 */
+    public hasPositionTrackEvents(): boolean {
+        return this.positionTrackEvents.size > 0;
+    }
+
+    /**
+     * 计算基础位置与 PositionTrack 事件结果（紧凑数组）。
+     * 多次调用会重算（editorMode 影响 editorOnly 事件，语义同旧实现）。
+     */
+    public computeTransforms(isEditorMode: boolean = false): void {
+        const tiles = this.levelData.tiles || [];
         const tileCount = tiles.length;
         const rawAngleData = this.levelData.angleData || [];
-
         const TILE_SIZE = PositionTrackManager.TILE_SIZE;
 
-        this.tilePositions.clear();
+        this.tileCount = tileCount;
 
-        const floats = new Array(tileCount);
+        const baseX = new Float64Array(tileCount);
+        const baseY = new Float64Array(tileCount);
+        const floats = new Float64Array(tileCount);
         for (let i = 0; i < tileCount; i++) {
             const a = rawAngleData[i];
             if (a === undefined || a === null) {
@@ -124,34 +156,42 @@ export class PositionTrackManager {
             }
         }
 
-        let currentPos = new Vector2(0, 0);
-        this.tilePositions.set(0, currentPos.clone());
+        let px = 0, py = 0;
         for (let i = 0; i < tileCount; i++) {
+            // tilePositions[k] = 前 k 步累积（与旧实现一致：先 set(0)，循环里 set(i+1)）
+            baseX[i] = px;
+            baseY[i] = py;
             const rad = floats[i] * Math.PI / 180;
-            currentPos.x += Math.cos(rad) * TILE_SIZE;
-            currentPos.y += Math.sin(rad) * TILE_SIZE;
-            this.tilePositions.set(i + 1, currentPos.clone());
+            px += Math.cos(rad) * TILE_SIZE;
+            py += Math.sin(rad) * TILE_SIZE;
         }
 
-        const workingPos: Vector2[] = [];
-        const workingRot: number[] = [];
-        const workingScale: number[] = [];
-        const workingOpacity: number[] = [];
-        const workingStick: boolean[] = [];
+        this.baseX = baseX;
+        this.baseY = baseY;
+
         const defaultStick = isEnabled(this.levelData.settings?.stickToFloors, true);
 
-        for (let i = 0; i < tileCount; i++) {
-            const basePos = this.tilePositions.get(i);
-            workingPos.push(basePos ? basePos.clone() : new Vector2(0, 0));
-            workingRot.push(0);
-            workingScale.push(1);
-            workingOpacity.push(1);
-            workingStick.push(defaultStick);
+        // 无事件：work 直接等于 base，旋转/缩放/透明度默认。
+        if (this.positionTrackEvents.size === 0) {
+            this.workX = baseX;
+            this.workY = baseY;
+            this.workRot = null;
+            this.workScale = null;
+            this.workOpacity = null;
+            this.workStick = null;
+            this.computed = true;
+            return;
         }
 
+        const workX = new Float64Array(baseX);
+        const workY = new Float64Array(baseY);
+        const workRot = new Float32Array(tileCount);
+        const workScale = new Float32Array(tileCount).fill(1);
+        const workOpacity = new Float32Array(tileCount).fill(1);
+        const workStick = new Uint8Array(tileCount).fill(defaultStick ? 1 : 0);
+
         // ADOFAI's `vector`: accumulated non-justThisTile offset, used for relativeTo
-        // relativeTo formula: (target.startPos + target.offsetPos) - (current.startPos + vector)
-        const vector = new Vector2(0, 0);
+        let vectorX = 0, vectorY = 0;
 
         for (let floor = 0; floor < tileCount; floor++) {
             const events = this.positionTrackEvents.get(floor);
@@ -160,138 +200,171 @@ export class PositionTrackManager {
             for (const event of events) {
                 if (event.editorOnly && !isEditorMode) continue;
 
-                // ============================================================
-                // Position offset block
-                // Gated by !disabled["positionOffset"]
-                // Contains positionOffset ADDITION + relativeTo + vector update
-                // ============================================================
+                // ── positionOffset + relativeTo ─────────────────────
                 if (!this.isDisabled(event, 'positionOffset')) {
                     let changeX = 0, changeY = 0;
 
-                    // relativeTo target tile
                     let targetTileId = floor;
                     if (event.relativeTo) {
                         targetTileId = this.IDFromTile(event.relativeTo, floor);
                     }
 
-                    // positionOffset * tileSize (constant tileSize, not affected by ScaleRadius)
                     if (event.positionOffset) {
                         const pos = this.normalizeVec2(event.positionOffset);
                         changeX += pos[0] * TILE_SIZE;
                         changeY += pos[1] * TILE_SIZE;
                     }
 
-                    // relativeTo difference
-                    // ADOFAI: (target.startPos + target.offsetPos) - (current.startPos + vector)
                     if (targetTileId !== floor && targetTileId < tileCount) {
-                        const basePos = this.tilePositions.get(floor)!;
-                        changeX += workingPos[targetTileId].x - (basePos.x + vector.x);
-                        changeY += workingPos[targetTileId].y - (basePos.y + vector.y);
+                        changeX += workX[targetTileId] - (baseX[floor] + vectorX);
+                        changeY += workY[targetTileId] - (baseY[floor] + vectorY);
                     }
 
-                    // Apply change
                     if (event.justThisTile) {
-                        workingPos[floor].x += changeX;
-                        workingPos[floor].y += changeY;
+                        workX[floor] += changeX;
+                        workY[floor] += changeY;
                     } else {
                         for (let j = floor; j < tileCount; j++) {
-                            workingPos[j].x += changeX;
-                            workingPos[j].y += changeY;
+                            workX[j] += changeX;
+                            workY[j] += changeY;
                         }
-                        // ADOFAI: vector = vector2
-                        // vector2 = total accumulated offset for current floor = workingPos[floor] - basePos[floor]
-                        const basePos = this.tilePositions.get(floor)!;
-                        vector.x = workingPos[floor].x - basePos.x;
-                        vector.y = workingPos[floor].y - basePos.y;
+                        vectorX = workX[floor] - baseX[floor];
+                        vectorY = workY[floor] - baseY[floor];
                     }
                 }
 
-                // ============================================================
-                // Scale — gated by !disabled["scale"] (TryGetAndSet with onlyIfEnabled)
-                // ADOFAI: output3 /= 100f; if (!justThisTile) num10 = output3
-                // ============================================================
+                // ── scale ───────────────────────────────────────────
                 if (event.scale !== undefined && event.scale !== null && !this.isDisabled(event, 'scale')) {
                     const s = event.scale / 100;
                     if (event.justThisTile) {
-                        workingScale[floor] = s;
+                        workScale[floor] = s;
                     } else {
-                        for (let j = floor; j < tileCount; j++) {
-                            workingScale[j] = s;
-                        }
+                        for (let j = floor; j < tileCount; j++) workScale[j] = s;
                     }
                 }
 
-                // ============================================================
-                // Rotation — gated by !disabled["rotation"]
-                // ============================================================
+                // ── rotation ────────────────────────────────────────
                 if (event.rotation !== undefined && event.rotation !== null && !this.isDisabled(event, 'rotation')) {
                     if (event.justThisTile) {
-                        workingRot[floor] = event.rotation;
+                        workRot[floor] = event.rotation;
                     } else {
-                        for (let j = floor; j < tileCount; j++) {
-                            workingRot[j] = event.rotation;
-                        }
+                        for (let j = floor; j < tileCount; j++) workRot[j] = event.rotation;
                     }
                 }
 
-                // ============================================================
-                // Opacity — gated by !disabled["opacity"]
-                // ============================================================
+                // ── opacity ─────────────────────────────────────────
                 if (event.opacity !== undefined && event.opacity !== null && !this.isDisabled(event, 'opacity')) {
                     const o = event.opacity / 100;
                     if (event.justThisTile) {
-                        workingOpacity[floor] = o;
+                        workOpacity[floor] = o;
                     } else {
-                        for (let j = floor; j < tileCount; j++) {
-                            workingOpacity[j] = o;
-                        }
+                        for (let j = floor; j < tileCount; j++) workOpacity[j] = o;
                     }
                 }
 
-                // ============================================================
-                // stickToFloors — gated by !disabled["stickToFloors"]
-                // ============================================================
+                // ── stickToFloors ───────────────────────────────────
                 if (event.stickToFloors !== undefined && !this.isDisabled(event, 'stickToFloors')) {
                     const st = this.parseStickToFloors(event.stickToFloors);
                     if (event.justThisTile) {
-                        workingStick[floor] = st;
+                        workStick[floor] = st ? 1 : 0;
                     } else {
-                        for (let j = floor; j < tileCount; j++) {
-                            workingStick[j] = st;
-                        }
+                        for (let j = floor; j < tileCount; j++) workStick[j] = st ? 1 : 0;
                     }
                 }
             }
         }
 
-        for (let i = 0; i < tileCount; i++) {
-            // 统一到 z=0 平面：depthZ() 的层级模型以 tile 在 z=0 为前提
-            // （bg 装饰物 z<0、fg 装饰物 z>0、行星 z=1）。
-            // tile 的 z 高度在俯视正交相机下不影响投影，只会破坏与装饰物的深度排序。
-            transforms.set(i, {
-                position: new Vector3(workingPos[i].x, workingPos[i].y, 0),
-                rotation: workingRot[i],
-                scale: new Vector3(workingScale[i], workingScale[i], workingScale[i]),
-                opacity: workingOpacity[i],
-                stickToFloors: workingStick[i],
-            });
+        this.workX = workX;
+        this.workY = workY;
+        this.workRot = workRot;
+        this.workScale = workScale;
+        this.workOpacity = workOpacity;
+        this.workStick = workStick;
+        this.computed = true;
+    }
+
+    private ensureComputed(): void {
+        if (!this.computed) this.computeTransforms(false);
+    }
+
+    /** 把最终位置写回 tiles[i].position（存在数组则原地写，避免再造 100 万个数组）。 */
+    public applyPositionsToTiles(tiles: any[]): void {
+        this.ensureComputed();
+        const wx = this.workX, wy = this.workY;
+        if (!wx || !wy) return;
+        const n = Math.min(tiles.length, wx.length);
+        for (let i = 0; i < n; i++) {
+            const t = tiles[i];
+            if (!t) continue;
+            const arr = t.position;
+            if (Array.isArray(arr)) {
+                arr[0] = wx[i];
+                arr[1] = wy[i];
+            } else {
+                t.position = [wx[i], wy[i]];
+            }
         }
-
-        this.tileTransforms = transforms;
-        return transforms;
     }
 
+    /** 基础位置（角度递推、不含事件），供需要"原始起点"的逻辑使用。 */
+    public getBasePosition(index: number): { x: number; y: number } | undefined {
+        this.ensureComputed();
+        if (!this.baseX || !this.baseY) return undefined;
+        if (index < 0 || index >= this.baseX.length) return undefined;
+        return { x: this.baseX[index], y: this.baseY[index] };
+    }
+
+    public getRotationDeg(index: number): number {
+        this.ensureComputed();
+        return this.workRot ? this.workRot[index] : 0;
+    }
+
+    public getScale(index: number): number {
+        this.ensureComputed();
+        return this.workScale ? this.workScale[index] : 1;
+    }
+
+    public getOpacity(index: number): number {
+        this.ensureComputed();
+        return this.workOpacity ? this.workOpacity[index] : 1;
+    }
+
+    public getStickToFloors(index: number): boolean {
+        this.ensureComputed();
+        if (!this.workStick) {
+            return isEnabled(this.levelData.settings?.stickToFloors, true);
+        }
+        return this.workStick[index] !== 0;
+    }
+
+    /**
+     * 按需组装单个砖块的 TileTransform（只应在可见砖/编辑器缓存砖上调用）。
+     * 没有 PositionTrack 事件时返回 undefined —— 调用方按基础值处理。
+     */
     public getTileTransform(tileIndex: number): TileTransform | undefined {
-        return this.tileTransforms.get(tileIndex);
-    }
-
-    public getAllTileTransforms(): Map<number, TileTransform> {
-        return this.tileTransforms;
+        this.ensureComputed();
+        if (this.positionTrackEvents.size === 0) return undefined;
+        if (tileIndex < 0 || tileIndex >= this.tileCount) return undefined;
+        const x = this.workX ? this.workX[tileIndex] : 0;
+        const y = this.workY ? this.workY[tileIndex] : 0;
+        const rot = this.workRot ? this.workRot[tileIndex] : 0;
+        const s = this.workScale ? this.workScale[tileIndex] : 1;
+        const op = this.workOpacity ? this.workOpacity[tileIndex] : 1;
+        return {
+            position: new Vector3(x, y, 0),
+            rotation: rot,
+            scale: new Vector3(s, s, s),
+            opacity: op,
+            stickToFloors: this.getStickToFloors(tileIndex),
+        };
     }
 
     public dispose(): void {
         this.positionTrackEvents.clear();
-        this.tileTransforms.clear();
-        this.tilePositions.clear();
+        this.baseX = this.baseY = null;
+        this.workX = this.workY = null;
+        this.workRot = this.workScale = this.workOpacity = null;
+        this.workStick = null;
+        this.computed = false;
     }
 }
