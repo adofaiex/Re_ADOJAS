@@ -218,6 +218,7 @@ export class HitsoundManager {
   private _scheduledSources: number = 0;
   private _syncFallbackUsed: boolean = false;
   private _syncChunksMixed: number = 0;
+  private _schedActive: boolean = false;
   /** 加载期预合成的块缓存（播放时直接取用；播放中按窗口淘汰）。 */
   private chunkCache: Map<number, AudioBuffer> = new Map();
   /** 最近若干块的峰值（诊断高 BPM 段是否被削平/异常）。 */
@@ -526,26 +527,31 @@ export class HitsoundManager {
   }
 
   private async scheduleChunksFrom(firstChunk: number, offset: number, startWall: number, gen: number): Promise<void> {
-    // 优先使用 worker 池（混音不占主线程）；不可用时降级为同步合成。
-    if (await this.ensureWorkers()) {
-      if (gen !== this.chunkGeneration) return;
-      await this.scheduleChunksWorkers(firstChunk, offset, startWall, gen);
-      return;
-    }
-
-    const totalChunks = Math.ceil(this.chunkDuration / HitsoundManager.CHUNK_SEC);
-    for (let k = firstChunk; k <= totalChunks; k++) {
-      if (gen !== this.chunkGeneration) return;
-      // 同步降级路径（worker 池不可用）：主线程逐块混音，会明显抢占帧时间
-      this._syncFallbackUsed = true;
-      const buf = this.synthesizeChunk(k);
-      if (buf) {
-        this._syncChunksMixed++;
-        this.scheduleChunkSource(k, buf, offset, startWall);
+    this._schedActive = true;
+    try {
+      // 优先使用 worker 池（混音不占主线程）；不可用时降级为同步合成。
+      if (await this.ensureWorkers()) {
+        if (gen !== this.chunkGeneration) return;
+        await this.scheduleChunksWorkers(firstChunk, offset, startWall, gen);
+        return;
       }
-      // 让出主线程，避免一次性合成全部块造成长阻塞；合成速度通常远快于实时。
-      await new Promise(resolve => setTimeout(resolve, 0));
-      if (gen !== this.chunkGeneration) return;
+
+      const totalChunks = Math.ceil(this.chunkDuration / HitsoundManager.CHUNK_SEC);
+      for (let k = firstChunk; k <= totalChunks; k++) {
+        if (gen !== this.chunkGeneration) return;
+        // 同步降级路径（worker 池不可用）：主线程逐块混音，会明显抢占帧时间
+        this._syncFallbackUsed = true;
+        const buf = this.synthesizeChunk(k);
+        if (buf) {
+          this._syncChunksMixed++;
+          this.scheduleChunkSource(k, buf, offset, startWall);
+        }
+        // 让出主线程，避免一次性合成全部块造成长阻塞；合成速度通常远快于实时。
+        await new Promise(resolve => setTimeout(resolve, 0));
+        if (gen !== this.chunkGeneration) return;
+      }
+    } finally {
+      if (gen === this.chunkGeneration) this._schedActive = false;
     }
   }
 
@@ -877,11 +883,13 @@ export class HitsoundManager {
   public debugSnapshot(): any {
     return {
       chunkMode: this.chunkMode,
+      durationSec: +this.chunkDuration.toFixed(1),
       totalChunks: this.synthTotalChunks,
       cachedChunks: this.chunkCache.size,
       activeSources: this.chunkSources.length,
       workers: this.workers?.length ?? 0,
       workersReady: this.workersReady,
+      schedulingActive: this._schedActive,
       syncFallbackUsed: this._syncFallbackUsed,
       syncChunksMixed: this._syncChunksMixed,
       jobsPosted: this._jobsPosted,
