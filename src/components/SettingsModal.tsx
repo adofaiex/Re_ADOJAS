@@ -61,6 +61,12 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
           type: "showTrail",
         },
         {
+          id: "trailSampleMode",
+          title: t("settings.trailSampleMode.title"),
+          description: t("settings.trailSampleMode.description"),
+          type: "trailSampleMode",
+        },
+        {
           id: "hitsoundEnabled",
           title: t("settings.hitsoundEnabled.title"),
           description: t("settings.hitsoundEnabled.description"),
@@ -423,6 +429,22 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                         </SelectItem>
                         <SelectItem value="worker" className="text-slate-900 dark:text-white hover:bg-slate-100 dark:hover:bg-slate-700 focus:bg-slate-100 dark:focus:bg-slate-700 cursor-pointer">
                           {t("settings.loadMethod.worker")}
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                  )}
+
+                  {setting.type === "trailSampleMode" && (
+                    <Select value={settings.trailSampleMode} onValueChange={(value: any) => updateSettings({ trailSampleMode: value })}>
+                      <SelectTrigger className="bg-white dark:bg-slate-700 border-slate-200 dark:border-slate-600 text-slate-900 dark:text-white w-full sm:w-48 hover:bg-slate-50 dark:hover:bg-slate-600 focus:border-purple-500 dark:focus:border-purple-400 focus:ring-purple-500/20 dark:focus:ring-purple-400/20">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent className="bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 shadow-lg dark:shadow-slate-900/50">
+                        <SelectItem value="fixed" className="text-slate-900 dark:text-white hover:bg-slate-100 dark:hover:bg-slate-700 focus:bg-slate-100 dark:focus:bg-slate-700 cursor-pointer">
+                          {t("settings.trailSampleMode.fixed")}
+                        </SelectItem>
+                        <SelectItem value="bpm" className="text-slate-900 dark:text-white hover:bg-slate-100 dark:hover:bg-slate-700 focus:bg-slate-100 dark:focus:bg-slate-700 cursor-pointer">
+                          {t("settings.trailSampleMode.bpm")}
                         </SelectItem>
                       </SelectContent>
                     </Select>

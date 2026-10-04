@@ -171,6 +171,7 @@ export function useEditorState() {
       player.setRenderer(settings.renderer)
       player.setRenderMethod(settings.renderMethod)
       player.setShowTrail(settings.showTrail)
+      player.setTrailSampleMode(settings.trailSampleMode)
       player.setHitsoundEnabled(settings.hitsoundEnabled)
       player.setTargetFramerate(settings.targetFramerate)
       player.setRenderScale(settings.renderScale)
@@ -391,6 +392,7 @@ export function useEditorState() {
       player.setRenderer(settings.renderer)
       player.setRenderMethod(settings.renderMethod)
       player.setShowTrail(settings.showTrail)
+      player.setTrailSampleMode(settings.trailSampleMode)
       player.setHitsoundEnabled(settings.hitsoundEnabled)
       player.setTargetFramerate(settings.targetFramerate)
       player.setRenderScale(settings.renderScale)
@@ -403,6 +405,7 @@ export function useEditorState() {
     settings.renderer,
     settings.renderMethod,
     settings.showTrail,
+    settings.trailSampleMode,
     settings.hitsoundEnabled,
     settings.targetFramerate,
     settings.renderScale,

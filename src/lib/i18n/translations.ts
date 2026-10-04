@@ -148,6 +148,12 @@ export const translations = {
         enabled: "已启用",
         disabled: "已禁用",
       },
+      trailSampleMode: {
+        title: "拖尾采样率",
+        description: "高 BPM 下拖尾的采样密度：固定 = 10ms/点；随 BPM = 采样率随当前 BPM 提高（更平滑，顶点数略增）。",
+        fixed: "固定",
+        bpm: "随 BPM 增加",
+      },
       hitsoundEnabled: {
         title: "打击音效",
         description: "启用球踩砖块时的打击音效。",
@@ -357,6 +363,12 @@ export const translations = {
         enabled: "Enabled",
         disabled: "Disabled",
       },
+      trailSampleMode: {
+        title: "Trail Sampling Rate",
+        description: "Trail sampling density at high BPM: Fixed = 10 ms/point; With BPM = sampling rate rises with the current BPM (smoother, slightly more vertices).",
+        fixed: "Fixed",
+        bpm: "Increase with BPM",
+      },
       hitsoundEnabled: {
         title: "Hit Sound",
         description: "Enable hit sound when planet lands on tile.",
@@ -559,6 +571,12 @@ export const translations = {
         description: "惑星のトレール効果を有効にします。",
         enabled: "有効",
         disabled: "無効",
+      },
+      trailSampleMode: {
+        title: "トレールサンプリングレート",
+        description: "高 BPM 時のトレールのサンプリング密度：固定 = 10ms/点、BPM 連動 = 現在の BPM に応じてサンプリングレートが上がります（より滑らか、頂点数は少し増加）。",
+        fixed: "固定",
+        bpm: "BPM 連動",
       },
       hitsoundEnabled: {
         title: "ヒットサウンド",

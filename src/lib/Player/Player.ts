@@ -55,6 +55,8 @@ export class Player implements IPlayer {
   private rendererType: 'webgl' | 'webgpu' = 'webgpu';
   private renderMethod: 'sync' | 'async' = 'sync';
   private showTrail: boolean = false;
+  /** 拖尾采样率模式（见 setTrailSampleMode）。 */
+  private trailSampleMode: 'fixed' | 'bpm' = 'fixed';
   private targetFramerate: TargetFramerateType = 'auto';
   private renderScale: RenderScaleType = '1.5';
 
@@ -2173,6 +2175,11 @@ export class Player implements IPlayer {
       this.removePlanets();
       this.createPlanets();
     }
+  }
+
+  /** 拖尾采样率模式：fixed=固定 100 点/秒；bpm=随当前有效 BPM 提高采样率。 */
+  public setTrailSampleMode(mode: 'fixed' | 'bpm'): void {
+    this.trailSampleMode = mode;
   }
 
   private disableTrackTexture: boolean = false;
@@ -4572,7 +4579,15 @@ export class Player implements IPlayer {
     this.recordTrailHistory(timeInLevel);
 
     const TRAIL_DURATION = 0.74;   // 拖尾寿命 yf = 74e4 µs
-    const INV_INTERVAL = 100;      // 10ms 一个采样点
+    // 采样率（点/秒）：固定模式 100（10ms/点）；bpm 模式随当前有效 BPM 提高
+    // 采样率（上限 666 → 1.5ms/点）。高 BPM 时一段弧只有几十毫秒，固定 10ms
+    // 只采到几个点，连线就是折线；加密后按真实弧线取点，拖尾明显更平滑。
+    let sampleRate = 100;
+    if (this.trailSampleMode === 'bpm') {
+      const bpm = this.getCurrentBPM() || 100;
+      sampleRate = Math.max(100, Math.min(666, bpm));
+    }
+    const INV_INTERVAL = sampleRate;
     const startTime = timeInLevel - TRAIL_DURATION;
     const maxSteps = Math.ceil(TRAIL_DURATION * INV_INTERVAL) + 3;
 
