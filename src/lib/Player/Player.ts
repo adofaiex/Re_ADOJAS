@@ -185,6 +185,8 @@ export class Player implements IPlayer {
   private inputAttached: boolean = false;
   private judgmentDisplay: JudgmentDisplay | null = new JudgmentDisplay();
   private hitErrorMeter: HitErrorMeter | null = null; // 准度条
+  /** 设置项：是否显示准度条（创建时应用，运行中实时切换）。 */
+  private showHitErrorMeter: boolean = true;
   private _judgeLastCorrectedTile: number = -1; // 防重复矫正
   private _judgeHitsoundPlayed: number = -1;    // 防重复 hitsound
   private _manualDead: boolean = false;         // 手动模式下玩家已死亡
@@ -2580,6 +2582,7 @@ export class Player implements IPlayer {
     // 准度条（判定误差显示，底部中央）
     this.hitErrorMeter = new HitErrorMeter(container);
     this.hitErrorMeter.setVisible(false);
+    this.hitErrorMeter.setEnabled(this.showHitErrorMeter);
     
     this.onWindowResize();
     
@@ -4203,6 +4206,12 @@ export class Player implements IPlayer {
     } else {
       this.hitsoundManager.start(-timeInLevel);
     }
+  }
+
+  /** 显示/隐藏准度条（设置项；关闭后立即清空判定痕迹并停止记录）。 */
+  public setShowHitErrorMeter(show: boolean): void {
+    this.showHitErrorMeter = show;
+    this.hitErrorMeter?.setEnabled(show);
   }
 
   public pausePlay(): void {

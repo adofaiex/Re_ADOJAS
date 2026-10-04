@@ -32,6 +32,8 @@ export class HitErrorMeter {
   private container: HTMLElement;
   private dpr: number = 1;
   private visible: boolean = false;
+  /** 设置开关：关闭后不再记录/绘制任何判定痕迹。 */
+  private enabled: boolean = true;
 
   private averageAngle: number = 0;
   private ticks: Tick[] = [];
@@ -75,6 +77,12 @@ export class HitErrorMeter {
     this.visible = v;
   }
 
+  /** 设置是否启用准度条（关闭时立即清空并停止记录）。 */
+  setEnabled(v: boolean): void {
+    this.enabled = v;
+    if (!v) this.clear();
+  }
+
   /**
    * 记录一次判定。
    * @param errorAngleDeg 误差角度（度，正=晚/慢，负=早/快）
@@ -84,6 +92,7 @@ export class HitErrorMeter {
    * @param config 判定配置（难度等）
    */
   addHit(errorAngleDeg: number, bpmTimesSpeed: number, pitch: number, marginScale: number, config: JudgeConfig = {}): void {
+    if (!this.enabled) return;
     const bounds = getBoundariesInDeg(bpmTimesSpeed, pitch, marginScale, config);
     if (bounds.countedDeg <= 0) return;
 
@@ -129,6 +138,7 @@ export class HitErrorMeter {
 
   /** 每帧：指针平滑 + tick 淡出 */
   update(delta: number): void {
+    if (!this.enabled) return;
     if (!this.visible && this.ticks.length === 0 && Math.abs(this.averageAngle) < 0.1) return;
 
     // tick 淡出

@@ -24,6 +24,7 @@ interface AppSettings {
   useOGGCompression: boolean // 是否使用 OGG 压缩减少内存占用
   disableTrackTexture: boolean // 对 Standard 轨道禁用轨道纹理（高砖块数谱面性能优化）
   musicDelayMs: number // 音乐播放延迟补偿（ms，独立于谱面 offset）
+  showHitErrorMeter: boolean // 显示准度条（Hit Error Meter）
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -40,6 +41,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   useOGGCompression: false, // Default to disabled (may affect quality)
   disableTrackTexture: false, // Default to enabled (texture on)
   musicDelayMs: 0, // Default to no compensation
+  showHitErrorMeter: true, // Default to shown
 }
 
 export function useAppSettings() {

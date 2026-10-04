@@ -181,6 +181,7 @@ export function useEditorState() {
       player.setStatsPanel(settings.showStats)
       player.setDisableTrackTexture(settings.disableTrackTexture)
       player.setMusicDelayMs(settings.musicDelayMs)
+      player.setShowHitErrorMeter(settings.showHitErrorMeter)
 
       previewerRef.current = player
       bindOttoEvents(player)
@@ -402,6 +403,7 @@ export function useEditorState() {
       player.setOGGCompression(settings.useOGGCompression)
       player.setStatsPanel(settings.showStats)
       player.setDisableTrackTexture(settings.disableTrackTexture)
+      player.setShowHitErrorMeter(settings.showHitErrorMeter)
     }
   }, [
     settings.renderer,
@@ -414,6 +416,7 @@ export function useEditorState() {
     settings.inputMethod,
     settings.showStats,
     settings.disableTrackTexture,
+    settings.showHitErrorMeter,
   ])
 
   // 监听渲染器设置变化
@@ -528,6 +531,7 @@ export function useEditorState() {
 
             player.setDisableTrackTexture(settings.disableTrackTexture)
             player.setMusicDelayMs(settings.musicDelayMs)
+            player.setShowHitErrorMeter(settings.showHitErrorMeter)
             
             // Synthesize hitsounds
             await player.preSynthesizeHitsoundsWithProgress()

@@ -61,6 +61,12 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
           type: "showTrail",
         },
         {
+          id: "showHitErrorMeter",
+          title: t("settings.showHitErrorMeter.title"),
+          description: t("settings.showHitErrorMeter.description"),
+          type: "showHitErrorMeter",
+        },
+        {
           id: "trailSampleMode",
           title: t("settings.trailSampleMode.title"),
           description: t("settings.trailSampleMode.description"),
@@ -315,6 +321,26 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                       </button>
                       <span className="text-sm text-slate-600 dark:text-slate-400">
                         {settings.showTrail ? t("settings.showTrail.enabled") : t("settings.showTrail.disabled")}
+                      </span>
+                    </div>
+                  )}
+
+                  {setting.type === "showHitErrorMeter" && (
+                    <div className="flex items-center gap-3">
+                      <button
+                        onClick={() => updateSettings({ showHitErrorMeter: !settings.showHitErrorMeter })}
+                        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                          settings.showHitErrorMeter ? "bg-purple-500" : "bg-slate-300 dark:bg-slate-600"
+                        }`}
+                      >
+                        <span
+                          className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                            settings.showHitErrorMeter ? "translate-x-6" : "translate-x-1"
+                          }`}
+                        />
+                      </button>
+                      <span className="text-sm text-slate-600 dark:text-slate-400">
+                        {settings.showHitErrorMeter ? t("settings.showHitErrorMeter.enabled") : t("settings.showHitErrorMeter.disabled")}
                       </span>
                     </div>
                   )}

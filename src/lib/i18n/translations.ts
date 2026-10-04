@@ -148,6 +148,12 @@ export const translations = {
         enabled: "已启用",
         disabled: "已禁用",
       },
+      showHitErrorMeter: {
+        title: "显示准度条",
+        description: "显示判定误差准度条（Hit Error Meter）。",
+        enabled: "已启用",
+        disabled: "已禁用",
+      },
       trailSampleMode: {
         title: "拖尾采样率",
         description: "高 BPM 下拖尾的采样密度：固定 = 10ms/点；随 BPM = 采样率随当前 BPM 提高（更平滑，顶点数略增）。",
@@ -363,6 +369,12 @@ export const translations = {
         enabled: "Enabled",
         disabled: "Disabled",
       },
+      showHitErrorMeter: {
+        title: "Show Accuracy Bar",
+        description: "Show the hit error meter (accuracy bar).",
+        enabled: "Enabled",
+        disabled: "Disabled",
+      },
       trailSampleMode: {
         title: "Trail Sampling Rate",
         description: "Trail sampling density at high BPM: Fixed = 10 ms/point; With BPM = sampling rate rises with the current BPM (smoother, slightly more vertices).",
@@ -569,6 +581,12 @@ export const translations = {
       showTrail: {
         title: "トレール表示",
         description: "惑星のトレール効果を有効にします。",
+        enabled: "有効",
+        disabled: "無効",
+      },
+      showHitErrorMeter: {
+        title: "精度バー表示",
+        description: "判定誤差の精度バー（Hit Error Meter）を表示します。",
         enabled: "有効",
         disabled: "無効",
       },
