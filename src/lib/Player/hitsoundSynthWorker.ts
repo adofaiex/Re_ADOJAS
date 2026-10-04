@@ -63,6 +63,16 @@ self.onmessage = (event: MessageEvent): void => {
     const outL = new Float32Array(bufferLength);
     const outR = new Float32Array(bufferLength);
 
+    // 进度上报用的总处理量（含 stride 抽样后的命中数）
+    let totalToProcess = 0;
+    for (const job of jobs) {
+      const st = Math.max(1, Math.ceil(job.timestamps.length / maxHits));
+      totalToProcess += Math.ceil(job.timestamps.length / st);
+    }
+    let processed = 0;
+    let lastReport = performance.now();
+    (self as any).postMessage({ type: 'progress', chunkIndex, progress: 0 });
+
     for (const job of jobs) {
       const buf = buffers.get(job.type);
       if (!buf) continue;
@@ -74,14 +84,25 @@ self.onmessage = (event: MessageEvent): void => {
       const R = buf.R;
       for (let idx = 0; idx < ts.length; idx += stride) {
         const startSample = Math.floor((ts[idx] - chunkStart) * sampleRate);
+        processed++;
         if (startSample < 0 || startSample >= bufferLength) continue;
         const len = Math.min(hitLen, bufferLength - startSample);
         for (let i = 0; i < len; i++) {
           outL[startSample + i] += L[i] * volScale;
           outR[startSample + i] += R[i] * volScale;
         }
+        const now = performance.now();
+        if (now - lastReport >= 100) {
+          lastReport = now;
+          (self as any).postMessage({
+            type: 'progress',
+            chunkIndex,
+            progress: totalToProcess > 0 ? processed / totalToProcess : 1,
+          });
+        }
       }
     }
+    (self as any).postMessage({ type: 'progress', chunkIndex, progress: 1 });
 
     for (let i = 0; i < bufferLength; i++) {
       const vl = outL[i];

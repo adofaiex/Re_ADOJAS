@@ -10,6 +10,7 @@ import { ILevelData } from "@/lib/Player/types"
 import type { Difficulty } from "@/lib/Player/Judge"
 import example from "@/lib/example/line.json"
 import { useFileHandlers } from "./useFileHandlers"
+import type { HitsoundSynthStatus } from "@/lib/Player/HitsoundManager"
 
 
 // 类型导入
@@ -101,6 +102,7 @@ export function useEditorState() {
   const [isLoading, setIsLoading] = useState<boolean>(false)
   const [loadingProgress, setLoadingProgress] = useState<number>(0)
   const [loadingStatus, setLoadingStatus] = useState<string>("")
+  const [loadingWorkers, setLoadingWorkers] = useState<HitsoundSynthStatus | null>(null)
   const [adofaiFile, setAdofaiFile] = useState<any>(null)
   const [mounted, setMounted] = useState(false)
   const [themeReady, setThemeReady] = useState(false)
@@ -195,6 +197,7 @@ export function useEditorState() {
     setIsLoading,
     setLoadingProgress,
     setLoadingStatus,
+    setLoadingWorkers,
     setAdofaiFile,
     initializePlayer,
     settings,
@@ -598,6 +601,7 @@ export function useEditorState() {
     isLoading,
     loadingProgress,
     loadingStatus,
+    loadingWorkers,
     adofaiFile,
     mounted,
     themeReady,

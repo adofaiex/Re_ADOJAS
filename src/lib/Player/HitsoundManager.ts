@@ -139,6 +139,25 @@ export interface TimestampGroup {
   timestamps: number[]; // in seconds
 }
 
+/** 单个 worker 的当前状态（加载窗口 pacman 风格列表用）。 */
+export interface HitsoundWorkerStatus {
+  /** 1-based worker 序号 */
+  worker: number;
+  /** 正在合成的块号；-1 = 空闲 */
+  chunkIndex: number;
+  /** 当前块内进度 0..1 */
+  progress: number;
+}
+
+/** worker 池整体状态。 */
+export interface HitsoundSynthStatus {
+  totalWorkers: number;
+  activeWorkers: number;
+  totalChunks: number;
+  completedChunks: number;
+  workers: HitsoundWorkerStatus[];
+}
+
 /** 二分：第一个 >= t 的下标（timestamps 升序）。 */
 function lowerBoundTime(arr: number[], t: number): number {
   let lo = 0, hi = arr.length;
@@ -175,6 +194,8 @@ export class HitsoundManager {
   private static readonly MAX_HITS_PER_CHUNK = 6000;
   private static readonly CHUNK_MODE_HIT_THRESHOLD = 250000;
   private static readonly CHUNK_MODE_DURATION_THRESHOLD = 900; // 15 分钟
+  /** 加载期预合成并缓存的块数上限（10s/块 → 400s）。超出的块播放时按需合成。 */
+  private static readonly CHUNK_CACHE_MAX = 40;
 
   // 分块合成的 worker 池：把逐采样混音移出主线程（每块 10s 窗口一个 job，
   // 最多 pool 个块并行合成）。初始化失败时降级为主线程同步合成。
@@ -184,6 +205,15 @@ export class HitsoundManager {
   private nextWorker: number = 0;
   private workerSampleRate: number = 0;
   private workerMaxHitDuration: number = 0;
+
+  // 进度上报（UI 列表）
+  private onWorkerStatus: ((s: HitsoundSynthStatus) => void) | null = null;
+  private workerSlots: { chunkIndex: number; progress: number }[] = [];
+  private synthTotalChunks: number = 0;
+  private synthCompletedChunks: number = 0;
+  private lastWorkerStatusEmit: number = 0;
+  /** 加载期预合成的块缓存（播放时直接取用；播放中按窗口淘汰）。 */
+  private chunkCache: Map<number, AudioBuffer> = new Map();
 
   constructor(private defaultType: HitsoundType = 'Kick', private defaultVolume: number = 100, useOGGCompression: boolean = false) {
     this.useOGGCompression = useOGGCompression;
@@ -220,7 +250,8 @@ export class HitsoundManager {
    * Pre-synthesize hitsounds from grouped timestamps.
    * Each group has a hitsound type and volume. All groups are mixed into one buffer.
    */
-  async preSynthesize(groups: TimestampGroup[], totalDuration: number, onProgress?: (percent: number) => void): Promise<void> {
+  async preSynthesize(groups: TimestampGroup[], totalDuration: number, onProgress?: (percent: number) => void, onWorkerStatus?: (s: HitsoundSynthStatus) => void): Promise<void> {
+    this.onWorkerStatus = onWorkerStatus ?? null;
     if (!this.enabled) {
       if (onProgress) onProgress(100);
       return;
@@ -299,12 +330,20 @@ export class HitsoundManager {
       this.synthesizedBuffer = null;
       this.compressedBuffer = null;
       this.compressedOGGBlob = null;
+      this.synthTotalChunks = Math.ceil(totalDuration / HitsoundManager.CHUNK_SEC);
+      this.synthCompletedChunks = 0;
+      this.chunkCache.clear();
       console.log(`[HitsoundManager] Chunked synthesis mode: ${totalHits} hits, ${totalDuration.toFixed(1)}s, ${stillActive.length} groups`);
+      // 加载期就用 worker 池预热前若干块：加载窗口显示逐 worker 进度，
+      // 播放开始时已有现成块可用（不再有首帧合成卡顿）。
+      await this.warmUpChunks(onProgress);
+      this.emitWorkerStatus(true);
       if (onProgress) onProgress(100);
       return;
     }
     this.chunkMode = false;
     this.chunkGroups = [];
+    this.onWorkerStatus = null;
 
     let processedHits = 0;
     let peakAmplitude = 0;
@@ -554,7 +593,9 @@ export class HitsoundManager {
         if (alive.length === 0) return false;
         this.workers = alive;
         this.workersReady = true;
+        this.workerSlots = alive.map(() => ({ chunkIndex: -1, progress: 0 }));
         console.log(`[HitsoundManager] chunk synth workers ready: ${alive.length}`);
+        this.emitWorkerStatus(true);
         return true;
       } catch (e) {
         console.warn('[HitsoundManager] worker pool init failed, falling back to sync synthesis', e);
@@ -562,6 +603,36 @@ export class HitsoundManager {
       }
     })();
     return this.workerInitPromise;
+  }
+
+  /**
+   * 加载期预热：用 worker 池并行预合成前 CHUNK_CACHE_MAX 块并缓存。
+   * onProgress 以 5→100 表示预热进度（映射到调用方加载条区间）。
+   */
+  private async warmUpChunks(onProgress?: (percent: number) => void): Promise<void> {
+    const useWorkers = await this.ensureWorkers();
+    if (!useWorkers) return; // 无 worker：播放时按同步路径合成
+    const limit = Math.min(this.synthTotalChunks, HitsoundManager.CHUNK_CACHE_MAX);
+    if (limit <= 0) return;
+    const pool = Math.max(1, this.workers?.length ?? 1);
+    let next = 0;
+    let done = 0;
+    const inFlight: Promise<void>[] = [];
+    const launch = (): void => {
+      while (inFlight.length < pool && next < limit) {
+        const k = next++;
+        inFlight.push(this.synthesizeChunkWorker(k).then((buf) => {
+          if (buf) this.chunkCache.set(k, buf);
+          done++;
+          if (onProgress) onProgress(5 + (done / limit) * 95);
+        }));
+      }
+    };
+    launch();
+    while (inFlight.length > 0) {
+      await inFlight.shift();
+      launch();
+    }
   }
 
   /** 并行调度：最多 pool 个块同时在 worker 里合成，按块序回到主线程排队播放。 */
@@ -573,7 +644,8 @@ export class HitsoundManager {
     const launch = (): void => {
       while (inFlight.length < pool && nextToLaunch <= totalChunks) {
         const k = nextToLaunch++;
-        inFlight.push(this.synthesizeChunkWorker(k).then(buf => ({ k, buf })));
+        const cached = this.chunkCache.get(k);
+        inFlight.push((cached ? Promise.resolve(cached) : this.synthesizeChunkWorker(k)).then(buf => ({ k, buf })));
       }
     };
     launch();
@@ -582,8 +654,32 @@ export class HitsoundManager {
       const { k, buf } = await inFlight.shift()!;
       if (gen !== this.chunkGeneration) return;
       if (buf) this.scheduleChunkSource(k, buf, offset, startWall);
+      // 播放窗口外的旧块淘汰，限制内存
+      if (k >= 3) this.chunkCache.delete(k - 3);
       launch();
     }
+    this.emitWorkerStatus(true);
+  }
+
+  /** 节流上报 worker 池状态（~100ms，防止 React 每条进度消息重渲染）。 */
+  private emitWorkerStatus(force: boolean = false): void {
+    const cb = this.onWorkerStatus;
+    if (!cb) return;
+    const now = performance.now();
+    if (!force && now - this.lastWorkerStatusEmit < 100) return;
+    this.lastWorkerStatusEmit = now;
+    const workers = this.workerSlots.map((s, i) => ({
+      worker: i + 1,
+      chunkIndex: s.chunkIndex,
+      progress: s.progress,
+    }));
+    cb({
+      totalWorkers: workers.length,
+      activeWorkers: workers.reduce((n, w) => n + (w.chunkIndex >= 0 ? 1 : 0), 0),
+      totalChunks: this.synthTotalChunks,
+      completedChunks: this.synthCompletedChunks,
+      workers,
+    });
   }
 
   private scheduleChunkSource(chunkIndex: number, buf: AudioBuffer, offset: number, startWall: number): void {
@@ -605,7 +701,8 @@ export class HitsoundManager {
   private synthesizeChunkWorker(chunkIndex: number): Promise<AudioBuffer | null> {
     const workers = this.workers;
     if (!workers || workers.length === 0) return Promise.resolve(null);
-    const w = workers[this.nextWorker++ % workers.length];
+    const workerIdx = this.nextWorker++ % workers.length;
+    const w = workers[workerIdx];
     const CHUNK = HitsoundManager.CHUNK_SEC;
     const chunkStart = chunkIndex * CHUNK;
     const chunkEnd = chunkStart + CHUNK;
@@ -628,9 +725,26 @@ export class HitsoundManager {
     const bufferLength = Math.ceil((CHUNK + this.workerMaxHitDuration + 0.1) * this.workerSampleRate);
     return new Promise<AudioBuffer | null>((resolve) => {
       const onMsg = (ev: MessageEvent): void => {
-        if (ev.data?.type !== 'chunk' || ev.data.chunkIndex !== chunkIndex) return;
+        if (ev.data?.chunkIndex !== chunkIndex) return;
+        if (ev.data?.type === 'progress') {
+          const slot = this.workerSlots[workerIdx];
+          if (slot) {
+            slot.chunkIndex = chunkIndex;
+            slot.progress = ev.data.progress as number;
+          }
+          this.emitWorkerStatus();
+          return;
+        }
+        if (ev.data?.type !== 'chunk') return;
         w.removeEventListener('message', onMsg);
         w.removeEventListener('error', onErr);
+        const slot = this.workerSlots[workerIdx];
+        if (slot) {
+          slot.progress = 1;
+          slot.chunkIndex = -1;
+        }
+        this.synthCompletedChunks++;
+        this.emitWorkerStatus(true);
         try {
           const ctx = getSharedAudioContext();
           const out = ctx.createBuffer(2, bufferLength, this.workerSampleRate);
@@ -644,6 +758,9 @@ export class HitsoundManager {
       // worker 崩溃时 resolve(null)：不能永远挂住按序等待的调度循环。
       const onErr = (): void => {
         w.removeEventListener('message', onMsg);
+        const slot = this.workerSlots[workerIdx];
+        if (slot) { slot.progress = 0; slot.chunkIndex = -1; }
+        this.emitWorkerStatus(true);
         resolve(null);
       };
       w.addEventListener('message', onMsg);
@@ -734,6 +851,7 @@ export class HitsoundManager {
     this.gainNode = null;
     this.chunkGroups = [];
     this.chunkTypeBuffers.clear();
+    this.chunkCache.clear();
     if (this.workers) {
       for (const w of this.workers) { try { w.terminate(); } catch (e) { } }
       this.workers = null;

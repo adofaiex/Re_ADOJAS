@@ -2,7 +2,7 @@ import { Scene, OrthographicCamera, WebGLRenderer, Mesh, Vector3, Texture, Buffe
 import {WebGPURenderer} from 'three/webgpu';
 import { IPlayer, ILevelData, IMusic, TargetFramerateType, RenderScaleType, InputMethodType, InputQueue } from './types';
 import { Planet } from './Planet';
-import { HitsoundManager, HitsoundType, TimestampGroup } from './HitsoundManager';
+import { HitsoundManager, HitsoundType, TimestampGroup, HitsoundSynthStatus } from './HitsoundManager';
 import { BloomEffect } from './BloomEffect';
 import { FlashEffect } from './FlashEffect';
 import { BlitPass } from './BackdropBlend';
@@ -1688,7 +1688,10 @@ export class Player implements IPlayer {
    * Pre-synthesize hitsounds with progress callback (public method for UI)
    * @param onProgress Progress callback (0-100)
    */
-  public async preSynthesizeHitsoundsWithProgress(onProgress?: (percent: number) => void): Promise<void> {
+  public async preSynthesizeHitsoundsWithProgress(
+    onProgress?: (percent: number) => void,
+    onWorkerStatus?: (status: HitsoundSynthStatus) => void,
+  ): Promise<void> {
     console.log('[Player] preSynthesizeHitsoundsWithProgress called');
 
     if (!this.hitsoundManager.isEnabled()) {
@@ -1759,7 +1762,7 @@ export class Player implements IPlayer {
     }
 
     console.log(`[Player] preSynthesizeHitsoundsWithProgress: ${groups.length} groups, ${defaultTimestamps.length} default hits, ${overrideGroups.size} override groups`);
-    await this.hitsoundManager.preSynthesize(groups, totalDuration, onProgress);
+    await this.hitsoundManager.preSynthesize(groups, totalDuration, onProgress, onWorkerStatus);
   }
   
   /**

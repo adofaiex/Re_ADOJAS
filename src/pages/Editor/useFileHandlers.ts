@@ -4,6 +4,7 @@ import { Parsers, Structure } from "adofai"
 import type { ILevelData } from "@/lib/Player/types"
 import { Player } from "@/lib/Player/Player"
 import { LargeFileParser } from "@/lib/LargeFileParser"
+import type { HitsoundSynthStatus } from "@/lib/Player/HitsoundManager"
 import JSZip from "jszip"
 import { isAdojas, autoLoadAssets as adojasAutoLoadAssets, getLastFileDir } from "@/lib/fs"
 // @ts-ignore
@@ -54,6 +55,7 @@ interface UseFileHandlersProps {
   setIsLoading: (loading: boolean) => void
   setLoadingProgress: (progress: number) => void
   setLoadingStatus: (status: string) => void
+  setLoadingWorkers?: (status: HitsoundSynthStatus | null) => void
   setAdofaiFile: (file: any) => void
   initializePlayer: (loadedLevel: any) => Player | null
   settings: any
@@ -66,6 +68,7 @@ export function useFileHandlers({
   setIsLoading,
   setLoadingProgress,
   setLoadingStatus,
+  setLoadingWorkers,
   setAdofaiFile,
   initializePlayer,
   settings,
@@ -101,9 +104,15 @@ export function useFileHandlers({
       setLoadingProgress(hsFrom)
       setLoadingStatus(t("loading.synthesizingHitsounds"))
 
-      await previewerRef.current.preSynthesizeHitsoundsWithProgress((percent) => {
-        setLoadingProgress(hsFrom + (percent / 100) * hsSpan)
-      })
+      await previewerRef.current.preSynthesizeHitsoundsWithProgress(
+        (percent) => {
+          setLoadingProgress(hsFrom + (percent / 100) * hsSpan)
+        },
+        (status) => {
+          setLoadingWorkers?.(status)
+        }
+      )
+      setLoadingWorkers?.(null)
     }
   }
 

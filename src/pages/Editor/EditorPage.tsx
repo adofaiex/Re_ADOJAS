@@ -39,6 +39,7 @@ export default function EditorPage() {
     isLoading,
     loadingProgress,
     loadingStatus,
+    loadingWorkers,
     adofaiFile,
     mounted,
     themeReady,
@@ -505,6 +506,7 @@ export default function EditorPage() {
         progress={loadingProgress}
         status={loadingStatus}
         loadMethod={settings.loadMethod}
+        workers={loadingWorkers}
       />
 
       {/* Full-screen Canvas Area */}

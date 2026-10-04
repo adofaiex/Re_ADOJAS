@@ -1,14 +1,23 @@
 import { useI18n } from "@/lib/i18n/context"
 import type { LoadMethodType } from "@/hooks/use-app-settings"
+import type { HitsoundSynthStatus } from "@/lib/Player/HitsoundManager"
 
 interface LoadingModalProps {
   isOpen: boolean
   progress: number // 0-100
   status?: string // Optional status text
   loadMethod?: LoadMethodType // Loading method (sync/async/worker)
+  /** hitsound 分块合成的 worker 池状态（pacman -Syu 风格逐 worker 显示） */
+  workers?: HitsoundSynthStatus | null
 }
 
-export function LoadingModal({ isOpen, progress, status, loadMethod }: LoadingModalProps) {
+/** 固定宽度的方块进度条，如 [██████░░░░]。 */
+function miniBar(p: number, width: number = 10): string {
+  const filled = Math.max(0, Math.min(width, Math.round(p * width)))
+  return '█'.repeat(filled) + '░'.repeat(width - filled)
+}
+
+export function LoadingModal({ isOpen, progress, status, loadMethod, workers }: LoadingModalProps) {
   const { t } = useI18n()
 
   if (!isOpen) return null
@@ -77,6 +86,25 @@ export function LoadingModal({ isOpen, progress, status, loadMethod }: LoadingMo
           <p className="text-sm text-slate-600 dark:text-slate-400">
             {status || t("loading.parsingLevel")}
           </p>
+
+          {/* Hitsound worker pool（分块合成时的 pacman 风格逐 worker 状态） */}
+          {workers && workers.totalWorkers > 0 && (
+            <div className="space-y-1.5">
+              <div className="flex justify-between text-xs font-mono text-slate-500 dark:text-slate-400">
+                <span>{`hitsound workers: ${workers.activeWorkers}/${workers.totalWorkers} active`}</span>
+                <span>{`chunks ${workers.completedChunks}/${workers.totalChunks}`}</span>
+              </div>
+              <div className="rounded-lg bg-slate-900/95 px-3 py-2 font-mono text-[11px] leading-5 text-emerald-300 max-h-44 overflow-y-auto whitespace-pre">
+                {workers.workers.map((w) => (
+                  <div key={w.worker}>
+                    {w.chunkIndex >= 0
+                      ? `[w${w.worker}] chunk ${String(w.chunkIndex + 1).padStart(3)}/${String(workers.totalChunks).padEnd(3)} [${miniBar(w.progress)}] ${String(Math.round(w.progress * 100)).padStart(3)}%`
+                      : `[w${w.worker}] idle                            [${miniBar(0)}]   0%`}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Progress bar */}
           <div className="space-y-2">
