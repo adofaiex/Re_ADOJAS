@@ -176,6 +176,15 @@ export class HitsoundManager {
   private static readonly CHUNK_MODE_HIT_THRESHOLD = 250000;
   private static readonly CHUNK_MODE_DURATION_THRESHOLD = 900; // 15 分钟
 
+  // 分块合成的 worker 池：把逐采样混音移出主线程（每块 10s 窗口一个 job，
+  // 最多 pool 个块并行合成）。初始化失败时降级为主线程同步合成。
+  private workers: Worker[] | null = null;
+  private workersReady: boolean = false;
+  private workerInitPromise: Promise<boolean> | null = null;
+  private nextWorker: number = 0;
+  private workerSampleRate: number = 0;
+  private workerMaxHitDuration: number = 0;
+
   constructor(private defaultType: HitsoundType = 'Kick', private defaultVolume: number = 100, useOGGCompression: boolean = false) {
     this.useOGGCompression = useOGGCompression;
   }
@@ -470,28 +479,184 @@ export class HitsoundManager {
   }
 
   private async scheduleChunksFrom(firstChunk: number, offset: number, startWall: number, gen: number): Promise<void> {
+    // 优先使用 worker 池（混音不占主线程）；不可用时降级为同步合成。
+    if (await this.ensureWorkers()) {
+      if (gen !== this.chunkGeneration) return;
+      await this.scheduleChunksWorkers(firstChunk, offset, startWall, gen);
+      return;
+    }
+
     const totalChunks = Math.ceil(this.chunkDuration / HitsoundManager.CHUNK_SEC);
     for (let k = firstChunk; k <= totalChunks; k++) {
       if (gen !== this.chunkGeneration) return;
       const buf = this.synthesizeChunk(k);
       if (buf) {
-        const ctx = getSharedAudioContext();
-        const src = ctx.createBufferSource();
-        src.buffer = buf;
-        src.connect(this.getGainNode());
-        src.onended = () => {
-          try { src.disconnect(); } catch (e) { }
-          const i = this.chunkSources.indexOf(src);
-          if (i >= 0) this.chunkSources.splice(i, 1);
-        };
-        const when = startWall + (k * HitsoundManager.CHUNK_SEC - offset);
-        src.start(Math.max(ctx.currentTime, when));
-        this.chunkSources.push(src);
+        this.scheduleChunkSource(k, buf, offset, startWall);
       }
       // 让出主线程，避免一次性合成全部块造成长阻塞；合成速度通常远快于实时。
       await new Promise(resolve => setTimeout(resolve, 0));
       if (gen !== this.chunkGeneration) return;
     }
+  }
+
+  /** 懒加载 worker 池。返回 false 表示应走主线程同步合成。 */
+  private ensureWorkers(): Promise<boolean> {
+    if (this.workerInitPromise) return this.workerInitPromise;
+    this.workerInitPromise = (async () => {
+      try {
+        if (typeof Worker === 'undefined' || this.chunkTypeBuffers.size === 0) return false;
+        const cores = (navigator as any)?.hardwareConcurrency || 4;
+        const count = Math.max(1, Math.min(3, cores - 1));
+        const sampleRate = getSharedAudioContext().sampleRate;
+        let maxHitDuration = 0;
+        for (const buf of this.chunkTypeBuffers.values()) {
+          if (buf.duration > maxHitDuration) maxHitDuration = buf.duration;
+        }
+        this.workerSampleRate = sampleRate;
+        this.workerMaxHitDuration = maxHitDuration;
+
+        const workers: Worker[] = [];
+        const ready: Promise<boolean>[] = [];
+        for (let i = 0; i < count; i++) {
+          const w = new Worker(new URL('./hitsoundSynthWorker.ts', import.meta.url), { type: 'module' });
+          workers.push(w);
+          ready.push(new Promise<boolean>((resolve) => {
+            const onMsg = (e: MessageEvent): void => {
+              if (e.data?.type === 'ready') {
+                w.removeEventListener('message', onMsg);
+                resolve(true);
+              }
+            };
+            w.addEventListener('message', onMsg);
+            w.addEventListener('error', () => {
+              w.removeEventListener('message', onMsg);
+              resolve(false);
+            }, { once: true });
+            // 每个 worker 需要自己的样本副本（同一个 ArrayBuffer 只能 transfer 一次）
+            const buffers: { type: string; L: Float32Array; R: Float32Array }[] = [];
+            const transfer: Transferable[] = [];
+            for (const [type, buf] of this.chunkTypeBuffers) {
+              const L = new Float32Array(buf.getChannelData(0));
+              const R = new Float32Array(buf.numberOfChannels > 1 ? buf.getChannelData(1) : buf.getChannelData(0));
+              buffers.push({ type, L, R });
+              transfer.push(L.buffer, R.buffer);
+            }
+            w.postMessage({ type: 'init', sampleRate, buffers }, transfer);
+          }));
+        }
+        const results = await Promise.all(ready);
+        // 只保留 init 成功的 worker（否则 round-robin 派活会卡在死掉的 worker 上）
+        const alive: Worker[] = [];
+        for (let i = 0; i < workers.length; i++) {
+          if (results[i]) alive.push(workers[i]);
+          else { try { workers[i].terminate(); } catch (e) { } }
+        }
+        if (alive.length === 0) return false;
+        this.workers = alive;
+        this.workersReady = true;
+        console.log(`[HitsoundManager] chunk synth workers ready: ${alive.length}`);
+        return true;
+      } catch (e) {
+        console.warn('[HitsoundManager] worker pool init failed, falling back to sync synthesis', e);
+        return false;
+      }
+    })();
+    return this.workerInitPromise;
+  }
+
+  /** 并行调度：最多 pool 个块同时在 worker 里合成，按块序回到主线程排队播放。 */
+  private async scheduleChunksWorkers(firstChunk: number, offset: number, startWall: number, gen: number): Promise<void> {
+    const totalChunks = Math.ceil(this.chunkDuration / HitsoundManager.CHUNK_SEC);
+    const pool = Math.max(1, this.workers?.length ?? 1);
+    let nextToLaunch = firstChunk;
+    const inFlight: Promise<{ k: number; buf: AudioBuffer | null }>[] = [];
+    const launch = (): void => {
+      while (inFlight.length < pool && nextToLaunch <= totalChunks) {
+        const k = nextToLaunch++;
+        inFlight.push(this.synthesizeChunkWorker(k).then(buf => ({ k, buf })));
+      }
+    };
+    launch();
+    while (inFlight.length > 0) {
+      if (gen !== this.chunkGeneration) return;
+      const { k, buf } = await inFlight.shift()!;
+      if (gen !== this.chunkGeneration) return;
+      if (buf) this.scheduleChunkSource(k, buf, offset, startWall);
+      launch();
+    }
+  }
+
+  private scheduleChunkSource(chunkIndex: number, buf: AudioBuffer, offset: number, startWall: number): void {
+    const ctx = getSharedAudioContext();
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.connect(this.getGainNode());
+    src.onended = () => {
+      try { src.disconnect(); } catch (e) { }
+      const i = this.chunkSources.indexOf(src);
+      if (i >= 0) this.chunkSources.splice(i, 1);
+    };
+    const when = startWall + (chunkIndex * HitsoundManager.CHUNK_SEC - offset);
+    src.start(Math.max(ctx.currentTime, when));
+    this.chunkSources.push(src);
+  }
+
+  /** 在 worker 里合成第 k 块，返回可直接播放的 AudioBuffer。 */
+  private synthesizeChunkWorker(chunkIndex: number): Promise<AudioBuffer | null> {
+    const workers = this.workers;
+    if (!workers || workers.length === 0) return Promise.resolve(null);
+    const w = workers[this.nextWorker++ % workers.length];
+    const CHUNK = HitsoundManager.CHUNK_SEC;
+    const chunkStart = chunkIndex * CHUNK;
+    const chunkEnd = chunkStart + CHUNK;
+
+    const jobs: { type: string; volume: number; timestamps: Float64Array }[] = [];
+    for (const group of this.chunkGroups) {
+      const ts = group.timestamps;
+      const start = lowerBoundTime(ts, chunkStart);
+      const end = lowerBoundTime(ts, chunkEnd);
+      if (end > start) {
+        jobs.push({
+          type: group.type,
+          volume: group.volume,
+          timestamps: Float64Array.from(ts.slice(start, end)),
+        });
+      }
+    }
+    if (jobs.length === 0) return Promise.resolve(null);
+
+    const bufferLength = Math.ceil((CHUNK + this.workerMaxHitDuration + 0.1) * this.workerSampleRate);
+    return new Promise<AudioBuffer | null>((resolve) => {
+      const onMsg = (ev: MessageEvent): void => {
+        if (ev.data?.type !== 'chunk' || ev.data.chunkIndex !== chunkIndex) return;
+        w.removeEventListener('message', onMsg);
+        w.removeEventListener('error', onErr);
+        try {
+          const ctx = getSharedAudioContext();
+          const out = ctx.createBuffer(2, bufferLength, this.workerSampleRate);
+          out.copyToChannel(new Float32Array(ev.data.L), 0);
+          out.copyToChannel(new Float32Array(ev.data.R), 1);
+          resolve(out);
+        } catch (e) {
+          resolve(null);
+        }
+      };
+      // worker 崩溃时 resolve(null)：不能永远挂住按序等待的调度循环。
+      const onErr = (): void => {
+        w.removeEventListener('message', onMsg);
+        resolve(null);
+      };
+      w.addEventListener('message', onMsg);
+      w.addEventListener('error', onErr, { once: true });
+      w.postMessage({
+        type: 'chunk',
+        chunkIndex,
+        chunkStart,
+        bufferLength,
+        maxHits: HitsoundManager.MAX_HITS_PER_CHUNK,
+        jobs,
+      });
+    });
   }
 
   /** 合成第 k 块（10s 窗口 + 命中尾音），只混该窗口内的命中并限密度。 */
@@ -569,5 +734,10 @@ export class HitsoundManager {
     this.gainNode = null;
     this.chunkGroups = [];
     this.chunkTypeBuffers.clear();
+    if (this.workers) {
+      for (const w of this.workers) { try { w.terminate(); } catch (e) { } }
+      this.workers = null;
+      this.workersReady = false;
+    }
   }
 }
