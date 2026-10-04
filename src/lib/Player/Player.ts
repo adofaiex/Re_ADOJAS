@@ -641,10 +641,12 @@ export class Player implements IPlayer {
         const np = this.tileNumPlanets[k];
         counts[np] = (counts[np] || 0) + 1;
       }
-      const events: { floor: number; planets: number }[] = [];
+      const events: { floor: number; planets: unknown; keys?: string[] }[] = [];
       for (const [floor, list] of this.tileEvents) {
         for (const e of list) {
-          if (e.eventType === 'MultiPlanet') events.push({ floor, planets: Number(e.planets) });
+          if (e.eventType === 'MultiPlanet') {
+            events.push({ floor, planets: e.planets, keys: Object.keys(e) });
+          }
         }
       }
       events.sort((a, b) => a.floor - b.floor);
