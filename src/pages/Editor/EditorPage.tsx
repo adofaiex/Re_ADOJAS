@@ -112,6 +112,16 @@ export default function EditorPage() {
       for (const k of Object.keys(editorState)) now[k] = editorState[k]
       w.__prevEditorState = now
     }
+    // EditorPage 自身 state 也要对比（sliderValue/petting 等）
+    const prevLocal = w.__prevLocalState as Record<string, unknown> | undefined
+    const local: Record<string, unknown> = { sliderValue, timelineOpen, petting, petHappy }
+    if (prevLocal) {
+      const changed = w.__changedKeys || (w.__changedKeys = {})
+      for (const k of Object.keys(local)) {
+        if (prevLocal[k] !== local[k]) changed[k] = (changed[k] || 0) + 1
+      }
+    }
+    w.__prevLocalState = local
   }
 
   const [timelineOpen, setTimelineOpen] = useState(false)
