@@ -102,6 +102,7 @@ export function useEditorState() {
   const [isLoading, setIsLoading] = useState<boolean>(false)
   const [loadingProgress, setLoadingProgress] = useState<number>(0)
   const [loadingStatus, setLoadingStatus] = useState<string>("")
+  const [loadingDetail, setLoadingDetail] = useState<string>("")
   const [loadingWorkers, setLoadingWorkers] = useState<HitsoundSynthStatus | null>(null)
   const [adofaiFile, setAdofaiFile] = useState<any>(null)
   const [mounted, setMounted] = useState(false)
@@ -199,6 +200,7 @@ export function useEditorState() {
     setLoadingProgress,
     setLoadingStatus,
     setLoadingWorkers,
+    setLoadingDetail,
     setAdofaiFile,
     initializePlayer,
     settings,
@@ -604,6 +606,7 @@ export function useEditorState() {
     isLoading,
     loadingProgress,
     loadingStatus,
+    loadingDetail,
     loadingWorkers,
     adofaiFile,
     mounted,

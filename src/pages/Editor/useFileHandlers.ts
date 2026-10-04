@@ -1,4 +1,4 @@
-import { useCallback } from "react"
+import { useCallback, useRef } from "react"
 import * as ADOFAI from "adofai"
 import { Parsers, Structure } from "adofai"
 import type { ILevelData } from "@/lib/Player/types"
@@ -60,6 +60,7 @@ interface UseFileHandlersProps {
   setLoadingProgress: (progress: number) => void
   setLoadingStatus: (status: string) => void
   setLoadingWorkers?: (status: HitsoundSynthStatus | null) => void
+  setLoadingDetail?: (detail: string) => void
   setAdofaiFile: (file: any) => void
   initializePlayer: (loadedLevel: any) => Player | null
   settings: any
@@ -73,6 +74,7 @@ export function useFileHandlers({
   setLoadingProgress,
   setLoadingStatus,
   setLoadingWorkers,
+  setLoadingDetail,
   setAdofaiFile,
   initializePlayer,
   settings,
@@ -80,6 +82,26 @@ export function useFileHandlers({
   containerRef,
   previewerRef
 }: UseFileHandlersProps) {
+
+  // 加载进度明细（如 "6635/131072"）：节流到 ~12 次/秒、且只在文本变化时 setState，
+  // 避免高频 React 重渲染反而拖慢加载。
+  const progressDetailRef = useRef<{ last: number; text: string }>({ last: 0, text: '' })
+  const updateProgressDetail = (current?: number, total?: number): void => {
+    if (typeof current !== 'number' || typeof total !== 'number' || total <= 0) return
+    const text = `${current}/${total}`
+    if (text === progressDetailRef.current.text) return
+    const now = performance.now()
+    const done = current >= total
+    if (!done && now - progressDetailRef.current.last < 80) return
+    progressDetailRef.current.last = now
+    progressDetailRef.current.text = text
+    setLoadingDetail?.(text)
+  }
+  const resetProgressDetail = (): void => {
+    progressDetailRef.current.text = ''
+    progressDetailRef.current.last = 0
+    setLoadingDetail?.('')
+  }
 
   // 辅助函数：初始化玩家、分帧创建装饰物并合成打拍音
   const initializePlayerWithHitsounds = async (loadedLevel: any, isVeryLargeFile: boolean = false): Promise<void> => {
@@ -151,6 +173,7 @@ export function useFileHandlers({
       level.on("parse:progress", (progressEvent: ParseProgressEvent): void => {
         setLoadingProgress(80 + Math.round(progressEvent.percent * 0.05))
         setLoadingStatus(getStageText(progressEvent.stage, t))
+      updateProgressDetail(progressEvent.current, progressEvent.total)
       })
 
       level.on("load", async (loadedLevel: any): Promise<void> => {
@@ -158,6 +181,7 @@ export function useFileHandlers({
         loadedLevel.on("parse:progress", (progressEvent: ParseProgressEvent): void => {
           setLoadingProgress(80 + Math.round(progressEvent.percent * 0.05))
           setLoadingStatus(getStageText(progressEvent.stage, t))
+      updateProgressDetail(progressEvent.current, progressEvent.total)
         })
         // loadedLevel.calculateTilePosition() // Skip - using our own position calculation in PositionTrackManager
 
@@ -191,6 +215,7 @@ export function useFileHandlers({
     level.on("parse:progress", (progressEvent: ParseProgressEvent): void => {
       setLoadingProgress(progressEvent.percent)
       setLoadingStatus(getStageText(progressEvent.stage, t))
+      updateProgressDetail(progressEvent.current, progressEvent.total)
     })
 
     level.on("load", async (loadedLevel: any): Promise<void> => {
@@ -198,6 +223,7 @@ export function useFileHandlers({
       loadedLevel.on("parse:progress", (progressEvent: ParseProgressEvent): void => {
         setLoadingProgress(progressEvent.percent)
         setLoadingStatus(getStageText(progressEvent.stage, t))
+      updateProgressDetail(progressEvent.current, progressEvent.total)
       })
       // loadedLevel.calculateTilePosition() // Skip - using our own position calculation in PositionTrackManager
 
@@ -252,6 +278,7 @@ export function useFileHandlers({
     level.on("parse:progress", (progressEvent: ParseProgressEvent): void => {
       setLoadingProgress(progressEvent.percent)
       setLoadingStatus(getStageText(progressEvent.stage, t))
+      updateProgressDetail(progressEvent.current, progressEvent.total)
     })
 
     level.on("load", async (loadedLevel: any): Promise<void> => {
@@ -259,6 +286,7 @@ export function useFileHandlers({
       loadedLevel.on("parse:progress", (progressEvent: ParseProgressEvent): void => {
         setLoadingProgress(progressEvent.percent)
         setLoadingStatus(getStageText(progressEvent.stage, t))
+      updateProgressDetail(progressEvent.current, progressEvent.total)
       })
       // loadedLevel.calculateTilePosition() // Skip - using our own position calculation in PositionTrackManager
 
@@ -295,6 +323,7 @@ export function useFileHandlers({
   const loadFromZip = async (arrayBuffer: ArrayBuffer): Promise<void> => {
     setLoadingStatus(t("loading.extractingZip"))
     setLoadingProgress(5)
+    resetProgressDetail()
 
     try {
       const zip = await JSZip.loadAsync(arrayBuffer)
@@ -342,12 +371,14 @@ export function useFileHandlers({
       level.on("parse:progress", (progressEvent: ParseProgressEvent): void => {
         setLoadingProgress(10 + Math.round(progressEvent.percent * 0.5))
         setLoadingStatus(getStageText(progressEvent.stage, t))
+      updateProgressDetail(progressEvent.current, progressEvent.total)
       })
 
       level.on("load", async (loadedLevel: any): Promise<void> => {
         loadedLevel.on("parse:progress", (progressEvent: ParseProgressEvent): void => {
           setLoadingProgress(10 + Math.round(progressEvent.percent * 0.5))
           setLoadingStatus(getStageText(progressEvent.stage, t))
+      updateProgressDetail(progressEvent.current, progressEvent.total)
         })
         // loadedLevel.calculateTilePosition() // Skip - using our own position calculation in PositionTrackManager
 
@@ -571,6 +602,7 @@ export function useFileHandlers({
       setIsLoading(true)
       setLoadingProgress(0)
       setLoadingStatus(t("loading.parsingLevel"))
+      resetProgressDetail()
 
       const reader = new FileReader()
 

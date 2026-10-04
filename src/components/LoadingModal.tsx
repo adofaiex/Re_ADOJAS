@@ -6,6 +6,8 @@ interface LoadingModalProps {
   isOpen: boolean
   progress: number // 0-100
   status?: string // Optional status text
+  /** 进度明细，如 "6635/131072" */
+  detail?: string
   loadMethod?: LoadMethodType // Loading method (sync/async/worker)
   /** hitsound 分块合成的 worker 池状态（pacman -Syu 风格逐 worker 显示） */
   workers?: HitsoundSynthStatus | null
@@ -17,7 +19,7 @@ function miniBar(p: number, width: number = 10): string {
   return '█'.repeat(filled) + '░'.repeat(width - filled)
 }
 
-export function LoadingModal({ isOpen, progress, status, loadMethod, workers }: LoadingModalProps) {
+export function LoadingModal({ isOpen, progress, status, detail, loadMethod, workers }: LoadingModalProps) {
   const { t } = useI18n()
 
   if (!isOpen) return null
@@ -26,11 +28,11 @@ export function LoadingModal({ isOpen, progress, status, loadMethod, workers }: 
   const getLoadMethodText = (): string => {
     switch (loadMethod) {
       case 'sync':
-        return t("settings.loadMethodSync")
+        return t("settings.loadMethod.sync")
       case 'async':
-        return t("settings.loadMethodAsync")
+        return t("settings.loadMethod.async")
       case 'worker':
-        return t("settings.loadMethodWorker")
+        return t("settings.loadMethod.worker")
       default:
         return ''
     }
@@ -85,6 +87,7 @@ export function LoadingModal({ isOpen, progress, status, loadMethod, workers }: 
           {/* Status text */}
           <p className="text-sm text-slate-600 dark:text-slate-400">
             {status || t("loading.parsingLevel")}
+            {detail ? <span className="ml-2 font-mono text-purple-600 dark:text-purple-300">{detail}</span> : null}
           </p>
 
           {/* Hitsound worker pool（分块合成时的 pacman 风格逐 worker 状态） */}

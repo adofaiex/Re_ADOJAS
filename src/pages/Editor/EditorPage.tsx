@@ -39,6 +39,7 @@ export default function EditorPage() {
     isLoading,
     loadingProgress,
     loadingStatus,
+    loadingDetail,
     loadingWorkers,
     adofaiFile,
     mounted,
@@ -505,6 +506,7 @@ export default function EditorPage() {
         isOpen={isLoading}
         progress={loadingProgress}
         status={loadingStatus}
+        detail={loadingDetail}
         loadMethod={settings.loadMethod}
         workers={loadingWorkers}
       />
