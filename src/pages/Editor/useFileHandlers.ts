@@ -3,6 +3,7 @@ import * as ADOFAI from "adofai"
 import { Parsers, Structure } from "adofai"
 import type { ILevelData } from "@/lib/Player/types"
 import { Player } from "@/lib/Player/Player"
+import { LargeFileParser } from "@/lib/LargeFileParser"
 import type { HitsoundSynthStatus } from "@/lib/Player/HitsoundManager"
 import JSZip from "jszip"
 import { isAdojas, autoLoadAssets as adojasAutoLoadAssets, getLastFileDir } from "@/lib/fs"
@@ -13,11 +14,6 @@ type ParseProgressEvent = Structure.ParseProgressEvent;
 // 使用 StringParser 作为解析器（小文件）
 const StringParser = Parsers.StringParser
 const parser = new StringParser()
-
-// 大文件走官方 ArrayBufferParser：字节级状态机直接解析 ArrayBuffer，
-// 无需把整份 JSON 解码成字符串（避开 V8 字符串上限），也不是会丢数据的自制解析器。
-const ArrayBufferParser = Parsers.ArrayBufferParser
-const arrayBufferParser = new ArrayBufferParser()
 
 /**
  * 砖数超过该阈值时，上游库自动切换紧凑砖块存储（CompactTileStore）：
@@ -145,48 +141,74 @@ export function useFileHandlers({
 
   // 大文件加载 - 使用 LargeFileParser 直接从 ArrayBuffer 解析
   /**
-   * 大文件：用 ADOFAI 官方 ArrayBufferParser（字节级状态机）直接解析 ArrayBuffer。
-   * 不做整文件字符串解码（避开 V8 字符串上限），也不再使用自制 LargeFileParser
-   * （它曾丢科学计数法角度 1.17e-38 → 砖数缩短 → 后方 Twirl 丢失）。
+   * 大文件：用自制字节级 LargeFileParser 直接解析 ArrayBuffer。
+   * 官方 StringParser/ArrayBufferParser 都会把整份数据解码成一个字符串，
+   * 超过 V8 字符串上限（约 537M 字符 ≈ 512MB ASCII）的文件（如 611MB 谱面）
+   * 必然失败；LargeFileParser 全程按字节扫描、逐对象切片，不建整份字符串。
+   * 科学计数法角度（1.17e-38）已修复，不会再丢后方 Twirl。
    */
-  const loadFromArrayBuffer = async (arrayBuffer: ArrayBuffer, isVeryLargeFile: boolean = false): Promise<void> => {
-    console.log('[DEBUG] Using ArrayBufferParser for large file, isVeryLargeFile:', isVeryLargeFile)
-    setLoadingStatus("正在解析大文件...")
+  const loadLargeFile = async (arrayBuffer: ArrayBuffer, isVeryLargeFile: boolean = false): Promise<void> => {
+    console.log('[DEBUG] Using LargeFileParser for large file')
+    setLoadingStatus("正在预处理大文件...")
     setLoadingProgress(0)
 
-    const level = new ADOFAI.Level(arrayBuffer as any, arrayBufferParser, { compactTiles: COMPACT_TILES_THRESHOLD })
+    try {
+      // 创建大文件解析器
+      const largeFileParser = new LargeFileParser((stage, percent) => {
+        setLoadingStatus(getStageText(stage, t))
+        // 对于超大文件，解析进度 0-80%，对于普通大文件也是 0-80%
+        setLoadingProgress(Math.round(percent * 0.8))
+      })
 
-    // 监听进度事件
-    level.on("parse:progress", (progressEvent: ParseProgressEvent): void => {
-      setLoadingProgress(progressEvent.percent)
-      setLoadingStatus(getStageText(progressEvent.stage, t))
-      updateProgressDetail(progressEvent.current, progressEvent.total)
-    })
+      // 解析文件
+      const parsedData = largeFileParser.parse(arrayBuffer)
+      console.log('[DEBUG] LargeFileParser result:', {
+        hasAngleData: !!parsedData.angleData,
+        angleDataLength: parsedData.angleData?.length,
+        hasSettings: !!parsedData.settings,
+        hasActions: !!parsedData.actions,
+        actionsLength: parsedData.actions?.length
+      })
 
-    level.on("load", async (loadedLevel: any): Promise<void> => {
-      // 计算瓦片位置时也会触发进度事件
-      loadedLevel.on("parse:progress", (progressEvent: ParseProgressEvent): void => {
-        setLoadingProgress(progressEvent.percent)
+      // 使用解析后的数据创建 Level
+      const level = new ADOFAI.Level(parsedData, undefined, { compactTiles: COMPACT_TILES_THRESHOLD })
+
+      // 监听进度事件
+      level.on("parse:progress", (progressEvent: ParseProgressEvent): void => {
+        setLoadingProgress(80 + Math.round(progressEvent.percent * 0.05))
         setLoadingStatus(getStageText(progressEvent.stage, t))
       updateProgressDetail(progressEvent.current, progressEvent.total)
       })
-      // loadedLevel.calculateTilePosition() // Skip - using our own position calculation in PositionTrackManager
 
-      setLoadingProgress(95)
-      setLoadingStatus(t("loading.buildingScene"))
+      level.on("load", async (loadedLevel: any): Promise<void> => {
+        // 计算瓦片位置
+        loadedLevel.on("parse:progress", (progressEvent: ParseProgressEvent): void => {
+          setLoadingProgress(80 + Math.round(progressEvent.percent * 0.05))
+          setLoadingStatus(getStageText(progressEvent.stage, t))
+      updateProgressDetail(progressEvent.current, progressEvent.total)
+        })
+        // loadedLevel.calculateTilePosition() // Skip - using our own position calculation in PositionTrackManager
 
-      // Initialize player and synthesize hitsounds
-      await initializePlayerWithHitsounds(loadedLevel, isVeryLargeFile)
-      await adojasAutoLoad(loadedLevel)
+        setLoadingProgress(85)
+        setLoadingStatus(t("loading.buildingScene"))
 
-      setLoadingProgress(100)
-      window.showNotification?.("success", t("editor.notifications.loadSuccess"))
-      setIsLoading(false)
-      setLoadingProgress(0)
-      setLoadingStatus("")
-    })
+        // Initialize player and synthesize hitsounds
+        await initializePlayerWithHitsounds(loadedLevel, isVeryLargeFile)
+        await adojasAutoLoad(loadedLevel)
 
-    await level.load()
+        setLoadingProgress(100)
+        window.showNotification?.("success", t("editor.notifications.loadSuccess"))
+        setIsLoading(false)
+        setLoadingProgress(0)
+        setLoadingStatus("")
+      })
+
+      await level.load()
+
+    } catch (error) {
+      console.error('[DEBUG] LargeFileParser error:', error)
+      throw error
+    }
   }
 
   // Synchronous loading (blocks UI) - for small files
@@ -614,11 +636,12 @@ export function useFileHandlers({
           const isVeryLargeFile = fileSize > VERY_LARGE_FILE_THRESHOLD
           console.log('[DEBUG] Is very large file:', isVeryLargeFile, '(threshold:', VERY_LARGE_FILE_THRESHOLD, ')')
 
-          // 大文件：走官方 ArrayBufferParser（字节级解析，无需整文件字符串，
-          // 也不会像 LargeFileParser 那样丢科学计数法角度 → 后方 Twirl 丢失）。
+          // 大文件：走自制字节级 LargeFileParser（不整份解码成字符串；
+          // 611MB 这类超过 V8 字符串上限 ~537M 字符的谱面，官方 String/ArrayBufferParser
+          // 都会在 TextDecoder.decode 时直接失败）。科学计数法角度丢失已修复。
           if (isVeryLargeFile) {
-            console.log('[DEBUG] Using ArrayBufferParser')
-            await loadFromArrayBuffer(arrayBuffer, true)
+            console.log('[DEBUG] Using LargeFileParser')
+            await loadLargeFile(arrayBuffer, true)
             return
           }
 
