@@ -3186,6 +3186,14 @@ export class Player implements IPlayer {
           this.startTime += drift * 1000;
           this.elapsedTime = performance.now() - this.startTime;
         }
+        // 时钟刚被重新对齐到音乐：打拍音也重定位，否则它仍按旧时钟播放 → 与音乐恒定错位
+        this.restartHitsoundsAtCurrentTime();
+      }
+      // 马上就要切换到 AudioContext 时钟：先用当前 elapsedTime 重新锚定，
+      // 否则切基准瞬间 elapsedTime 会跳变、上面的漂移修正也会被旧锚点覆盖。
+      const syncCtx = getSharedAudioContext();
+      if (syncCtx) {
+        this.audioContextStartOffset = syncCtx.currentTime - this.elapsedTime / 1000;
       }
       this.audioDriftSynced = true;
       this.useAudioContextTime = true;
@@ -4152,6 +4160,21 @@ export class Player implements IPlayer {
         });
   }
 
+  /**
+   * 让打拍音轨道对齐到当前游戏时间（seek / 恢复 / 时钟漂移校正后调用）。
+   * buffer 时间轴 = tileStartTimes = timeInLevel 时间线。
+   */
+  private restartHitsoundsAtCurrentTime(): void {
+    if (!this.hitsoundManager || !this.hitsoundManager.isSynthesized()) return;
+    if (this.preStartHoldMs > 0) return; // 预启动倒计时期间由 GO 阶段启动
+    const timeInLevel = this.elapsedTime / 1000 - this.getTimeOrigin();
+    if (timeInLevel >= 0) {
+      this.hitsoundManager.startAtOffset(timeInLevel);
+    } else {
+      this.hitsoundManager.start(-timeInLevel);
+    }
+  }
+
   public pausePlay(): void {
     if (!this.isPlaying || this.isPaused) return;
     this.isPaused = true;
@@ -4174,6 +4197,9 @@ export class Player implements IPlayer {
     if (ctx) {
       this.audioContextStartOffset = ctx.currentTime - this.elapsedTime / 1000;
     }
+    // 恢复后重新做一次漂移校正：音乐元素 resume 可能引入启动延迟，
+    // 校正会同时重定位打拍音（restartHitsoundsAtCurrentTime）。
+    this.audioDriftSynced = false;
     // 预启动倒计时期间：音乐保持暂停，GO 时由 updatePlayer 统一播放
     if (this.preStartHoldMs <= 0 && this.music && (this.music as any).hasAudio ? this.music.hasAudio : false) {
       this.music.resume();
