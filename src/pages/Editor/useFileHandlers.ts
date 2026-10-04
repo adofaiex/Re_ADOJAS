@@ -7,9 +7,6 @@ import { LargeFileParser } from "@/lib/LargeFileParser"
 import type { HitsoundSynthStatus } from "@/lib/Player/HitsoundManager"
 import JSZip from "jszip"
 import { isAdojas, autoLoadAssets as adojasAutoLoadAssets, getLastFileDir } from "@/lib/fs"
-// @ts-ignore
-import LevelLoaderWorker from '../../lib/Player/levelLoaderWorker?worker&inline'
-import wasmLoaderBase64 from 'virtual:wasm-level-loader'
 
 // 类型导入
 type ParseProgressEvent = Structure.ParseProgressEvent;
@@ -275,94 +272,16 @@ export function useFileHandlers({
     await level.load()
   }
 
-  // Worker loading (background thread for precomputation)
-  // Parsing is done on the main thread to avoid esbuild destructuring issues with the adofai library
+  // "Worker" 加载方式。
+  //
+  // 历史上这里把整个已解析 level structured-clone 给 levelLoaderWorker 做
+  // precomputeLevelData，再连 levelData 一起 clone 回来 —— 而主线程从未使用该结果
+  // （Player 在 initializePlayerWithHitsounds 里全部自算）。对 100 万砖谱面，仅两次
+  // 克隆就是几百 MB，UI 还长时间停在 "loading.precomputing"（该 i18n key 甚至不存在）。
+  // 现在直接走异步解析路径。
   const loadWithWorker = async (content: string): Promise<void> => {
-    setLoadingProgress(0)
-    setLoadingStatus(t("loading.stage.start"))
-
-    try {
-      // Step 1: Parse the level on the main thread using adofai
-      const level = new ADOFAI.Level(content, parser)
-
-      level.on("parse:progress", (progressEvent: ParseProgressEvent): void => {
-        setLoadingProgress(progressEvent.percent * 0.9)
-        setLoadingStatus(getStageText(progressEvent.stage, t))
-      })
-
-      const parsedLevel = await new Promise<any>((resolve) => {
-        level.on("load", (lvl: any) => {
-          lvl.on("parse:progress", (progressEvent: ParseProgressEvent): void => {
-            setLoadingProgress(progressEvent.percent * 0.9)
-            setLoadingStatus(getStageText(progressEvent.stage, t))
-          })
-          resolve(lvl)
-        })
-        level.load()
-      })
-
-      // Calculate tile positions (needed by precomputeLevelData in the worker)
-      parsedLevel.calculateTilePosition()
-
-      // Extract necessary data
-      const levelData = {
-        settings: parsedLevel.settings || {},
-        tiles: parsedLevel.tiles || [],
-        actions: parsedLevel.actions || [],
-        angleData: parsedLevel.angleData || [],
-      }
-
-      setLoadingProgress(90)
-      setLoadingStatus(t("loading.precomputing"))
-
-      // Step 2: Send parsed data to worker for precomputation
-      const worker = new LevelLoaderWorker()
-
-      worker.onmessage = async (e: MessageEvent) => {
-        const { type, data, error } = e.data
-
-        if (type === 'result') {
-          setLoadingProgress(95)
-          setLoadingStatus(t("loading.buildingScene"))
-
-          // Create player and synthesize hitsounds
-          await initializePlayerWithHitsounds(parsedLevel)
-          await adojasAutoLoad(parsedLevel)
-
-          setLoadingProgress(100)
-          window.showNotification?.("success", t("editor.notifications.loadSuccess"))
-          setIsLoading(false)
-          setLoadingProgress(0)
-          setLoadingStatus("")
-
-          worker.terminate()
-        } else if (type === 'error') {
-          console.error('Worker error:', error)
-          window.showNotification?.("error", `${t("editor.notifications.loadError")}: ${error}`)
-          setIsLoading(false)
-          setLoadingProgress(0)
-          setLoadingStatus("")
-          worker.terminate()
-        }
-      }
-
-      worker.onerror = (error: ErrorEvent) => {
-        console.error('Worker onerror:', error.message, error.filename, error.lineno)
-        window.showNotification?.("error", `Worker failed: ${error.message}`)
-        setIsLoading(false)
-        setLoadingProgress(0)
-        setLoadingStatus("")
-        worker.terminate()
-      }
-
-      // Start precomputation in worker
-      worker.postMessage({ type: 'load', levelData, wasmBase64: wasmLoaderBase64 })
-
-    } catch (error) {
-      console.error('Failed to create worker:', error)
-      // Fallback to async loading
-      await loadAsync(content)
-    }
+    console.log('[DEBUG] loadMethod=worker → 直接异步加载（预计算 worker 已移除）')
+    return loadAsync(content)
   }
 
   // ZIP file loading - extract and auto-load level, audio, and decorations

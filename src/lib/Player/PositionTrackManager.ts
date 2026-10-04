@@ -53,6 +53,7 @@ export class PositionTrackManager {
     private workStick: Uint8Array | null = null;
 
     private computed: boolean = false;
+    private computedEditorMode: boolean | null = null;
     private tileCount: number = 0;
 
     constructor(levelData: Level) {
@@ -137,6 +138,10 @@ export class PositionTrackManager {
      * 多次调用会重算（editorMode 影响 editorOnly 事件，语义同旧实现）。
      */
     public computeTransforms(isEditorMode: boolean = false): void {
+        // 结果只取决于 angleData/actions/isEditorMode：同一模式下重复调用（例如每次
+        // 退出播放的 reapplyPositionTrackTransforms）直接复用，避免百万砖重算 + 36MB
+        // typed array 重新分配。setEditorMode 切换模式时才真正重算。
+        if (this.computed && this.computedEditorMode === isEditorMode) return;
         const tiles = this.levelData.tiles || [];
         const tileCount = tiles.length;
         const rawAngleData = this.levelData.angleData || [];
@@ -180,6 +185,7 @@ export class PositionTrackManager {
             this.workOpacity = null;
             this.workStick = null;
             this.computed = true;
+            this.computedEditorMode = isEditorMode;
             return;
         }
 
@@ -281,6 +287,7 @@ export class PositionTrackManager {
         this.workOpacity = workOpacity;
         this.workStick = workStick;
         this.computed = true;
+        this.computedEditorMode = isEditorMode;
     }
 
     private ensureComputed(): void {

@@ -293,7 +293,7 @@ export class TileColorManager {
   private tileRecolorConfigs: (TileColorConfig | null)[] = [];
 
   private trackColorEvent: ShiftType[] = [];
-  private colorInfluencing: number[] = [];
+  private colorInfluencing: Int32Array = new Int32Array(0);
   private recolorTimes: [number, number][] = [];
   private recolorRecord: number = 0;
 
@@ -320,12 +320,18 @@ export class TileColorManager {
     const defaultAnimDur = settings.trackColorAnimDuration || 2;
     const defaultPulseLen = settings.trackPulseLength || 10;
 
-    this.tileColors = new Array(totalTiles);
-    this.tileRecolorConfigs = new Array(totalTiles).fill(null);
-    this.colorInfluencing = new Array(totalTiles).fill(0);
+    // 数组复用：退出播放时会再次调用 initTileColors（Singularity 100 万砖），
+    // 避免每次重新分配 3 个百万级数组。
+    if (this.tileColors.length !== totalTiles) this.tileColors = new Array(totalTiles);
+    if (this.tileRecolorConfigs.length !== totalTiles) this.tileRecolorConfigs = new Array(totalTiles);
+    if (this.colorInfluencing.length !== totalTiles) this.colorInfluencing = new Int32Array(totalTiles);
+    else this.colorInfluencing.fill(0);
     this.trackColorEvent = [];
     this.recolorTimes = [];
     this.recolorRecord = 0;
+    // 重来时清掉运行期的颜色渐变/音量脉冲状态
+    this.colorFades.clear();
+    this.volumePulseMap.clear();
 
     // --- Event index 0: settings default ---
     this.trackColorEvent[0] = this.createShiftType(settings, 0);
@@ -335,12 +341,23 @@ export class TileColorManager {
       .filter((e: any) => e.eventType === 'ColorTrack' && !e.justThisTile && isEventActive(e))
       .sort((a: any, b: any) => a.floor - b.floor);
 
+    // 非 justThisTile 事件是"从 floor 起持续生效"：对任一砖 i，生效的是 floor <= i 的
+    // 最后一个事件（后应用覆盖先应用）。按 floor 分段 [floor_k, floor_{k+1}) 填充即可，
+    // 总写入 O(n)。原实现对每个事件 fill(floor, totalTiles)：1486 个 ColorTrack 在
+    // 100 万砖上累计 ~7 亿次写入，正是退出播放时重大卡顿的来源。
     let eventOrder = 1;
-    for (const event of colorTrackEvents) {
-      const floor = event.floor;
-      this.trackColorEvent[eventOrder] = this.createShiftType(event, floor);
-      this.colorInfluencing.fill(eventOrder, floor, totalTiles);
+    for (let k = 0; k < colorTrackEvents.length; k++) {
+      const floorRaw = colorTrackEvents[k].floor ?? 0;
+      let last = k;
+      while (last + 1 < colorTrackEvents.length && (colorTrackEvents[last + 1].floor ?? 0) === floorRaw) last++;
+      const ev = colorTrackEvents[last];
+      this.trackColorEvent[eventOrder] = this.createShiftType(ev, ev.floor ?? 0);
+      const start = Math.max(0, Math.min(floorRaw, totalTiles));
+      const nextFloor = last + 1 < colorTrackEvents.length ? (colorTrackEvents[last + 1].floor ?? totalTiles) : totalTiles;
+      const end = Math.max(start, Math.min(nextFloor, totalTiles));
+      this.colorInfluencing.fill(eventOrder, start, end);
       eventOrder++;
+      k = last;
     }
 
     // --- justThisTile ColorTrack events ---
@@ -360,38 +377,33 @@ export class TileColorManager {
     // 按 colorInfluencing 分段共享对象：100 万砖逐砖 new config + color 会占
     // 200-400MB（Singularity 99.7 万砖实测）。这些字段只由 shift 决定，同段所有砖
     // 完全一致；运行期 setTileRecolorConfig / setTileColor 都是"替换引用"，
-    // 不会原地修改共享对象。
+    // 不会原地修改共享对象。整段用原生 fill 写引用（O(段数)，而不是 100 万次逐砖写）。
     const defaultOpacity = parseHexAlpha(defaultColor);
-    let sharedEvtIdx = -2;
-    let sharedCfg: TileColorConfig | null = null;
-    let sharedColor: { color: string; secondaryColor: string } | null = null;
-    for (let i = 0; i < totalTiles; i++) {
-      const evtIdx = this.colorInfluencing[i];
-      if (evtIdx !== sharedEvtIdx || !sharedCfg) {
-        const shift = this.trackColorEvent[evtIdx];
-        sharedCfg = {
-          trackStyle: shift.floortype,
-          trackColorType: shift.onType,
-          trackColor: '#' + shift.colorString,
-          secondaryTrackColor: '#' + shift.seccolorString,
-          trackColorPulse: shift.pulsecal.type,
-          trackColorAnimDuration: shift.pulsecal.animationLength,
-          trackPulseLength: shift.pulsecal.pulseLength,
-          trackOpacity: shift.alpha,
-          trackGlowIntensity: shift.glowIntensity * 100,
-          startFloor: 0
-        };
-        sharedColor = null;
-        sharedEvtIdx = evtIdx;
-      }
-      this.tileRecolorConfigs[i] = sharedCfg;
-      if (!sharedColor) {
-        // getTileRenderer 的 id 只影响 Volume 幅度 / startFloor 缺省，而 init 时
-        // 幅度表为空、startFloor 固定 0 → 同段渲染结果一致，可整体共享。
-        const rendered = this.getTileRenderer(i, 0, sharedCfg);
-        sharedColor = { color: rendered.color, secondaryColor: rendered.bgcolor };
-      }
-      this.tileColors[i] = sharedColor;
+    let segStart = 0;
+    while (segStart < totalTiles) {
+      const evtIdx = this.colorInfluencing[segStart];
+      let segEnd = segStart + 1;
+      while (segEnd < totalTiles && this.colorInfluencing[segEnd] === evtIdx) segEnd++;
+      const shift = this.trackColorEvent[evtIdx];
+      const cfg: TileColorConfig = {
+        trackStyle: shift.floortype,
+        trackColorType: shift.onType,
+        trackColor: '#' + shift.colorString,
+        secondaryTrackColor: '#' + shift.seccolorString,
+        trackColorPulse: shift.pulsecal.type,
+        trackColorAnimDuration: shift.pulsecal.animationLength,
+        trackPulseLength: shift.pulsecal.pulseLength,
+        trackOpacity: shift.alpha,
+        trackGlowIntensity: shift.glowIntensity * 100,
+        startFloor: 0
+      };
+      // getTileRenderer 的 id 只影响 Volume 幅度 / startFloor 缺省，而 init 时
+      // 幅度表为空、startFloor 固定 0 → 同段渲染结果一致，整段共享同一对象。
+      const rendered = this.getTileRenderer(segStart, 0, cfg);
+      const colorObj = { color: rendered.color, secondaryColor: rendered.bgcolor };
+      this.tileRecolorConfigs.fill(cfg, segStart, segEnd);
+      this.tileColors.fill(colorObj, segStart, segEnd);
+      segStart = segEnd;
     }
 
     // --- RecolorTrack events ---

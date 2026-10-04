@@ -3821,9 +3821,13 @@ export class Player implements IPlayer {
         if (this.moveTrackManager) {
           this.moveTrackManager.reset();
           this.moveTrackManager.fastForwardTo(0);
-          for (const idx of this.timelineManager.getAllTileIndices()) {
-            this.dirtyTiles.add(idx);
-          }
+          // 只把"当前有 mesh（有实例）的砖"标脏：动画砖索引可能覆盖整谱，
+          // 但缓存外的砖没有实例，塞进 dirtyTiles 只会让 syncInstancedTiles 空转。
+          const animated = this.timelineManager.getAllTileIndices();
+          this.tiles.forEach((_, id) => {
+            const i = parseInt(id, 10);
+            if (animated.has(i)) this.dirtyTiles.add(i);
+          });
           this.syncInstancedTiles();
         }
     
