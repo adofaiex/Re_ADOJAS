@@ -20,8 +20,6 @@ export class MoveTrackManager {
     private currentTime: number = 0;
     private activeTileIndices: Set<number> = new Set();
     private pendingFinalApply: Set<number> = new Set();
-    /** 诊断：已记录过"首次激活"的砖（排查 MoveTrack 生效时机/范围；上限 200 条）。 */
-    private _loggedActive: Set<number> = new Set();
 
     private static playCounter: number = 0;
     private debugPlayId: number = 0;
@@ -95,12 +93,6 @@ export class MoveTrackManager {
             newActiveIndices.add(tileIdx);
 
             const dirty = this.timelineManager.applyToTileMesh(tileIdx, mesh, time);
-            if (!this._loggedActive.has(tileIdx) && this._loggedActive.size < 200) {
-                this._loggedActive.add(tileIdx);
-                debugLog('[MoveTrackApply] tile=' + tileIdx + ' t=' + time.toFixed(3)
-                    + ' pos=' + mesh.position.x.toFixed(4) + ',' + mesh.position.y.toFixed(4)
-                    + ' rot=' + mesh.rotation.z.toFixed(4));
-            }
             if (dirty && this.tileTransformChanged) {
                 this.tileTransformChanged(
                     tileIdx,
@@ -170,10 +162,15 @@ export class MoveTrackManager {
         this.currentTime = targetTime;
         if (!this.tiles) return;
 
+        // 反向 seek 也要能把"未来的姿态"退回：对**当前有 mesh 的每一块砖**按目标
+        // 时间重采样（采样在首个关键帧之前会钳到首值，因此回退有效）。
+        // 以前是遍历时间轴上全部动画砖（MM2 有 6636 块），拖时间轴时每次 seek 都
+        // 跑全量；改为遍历本管理器持有的砖表（上限 maxCachedTiles），并用 Set 过滤。
+        // 不在表里的砖（已被缓存裁剪）重建时由 refreshTile 补状态，语义等价。
         const animatedIndices = this.timelineManager.getAnimatedTileIndices();
-        for (const tileIdx of animatedIndices) {
-            const mesh = this.tiles.get(tileIdx.toString());
-            if (!mesh) continue;
+        for (const [tileId, mesh] of this.tiles) {
+            const tileIdx = parseInt(tileId, 10);
+            if (isNaN(tileIdx) || !animatedIndices.has(tileIdx)) continue;
             const dirty = this.timelineManager.applyToTileMesh(tileIdx, mesh, targetTime);
             if (dirty && this.tileTransformChanged) {
                 this.tileTransformChanged(
@@ -221,7 +218,6 @@ export class MoveTrackManager {
         this.debugPlayId = ++MoveTrackManager.playCounter;
         this.activeTileIndices.clear();
         this.pendingFinalApply.clear();
-        this._loggedActive.clear();
         const playLabel = `[MoveTrackManager][Play#${this.debugPlayId}]`;
 
         if (this.tiles) {

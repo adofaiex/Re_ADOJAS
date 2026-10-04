@@ -87,14 +87,8 @@ export class Player implements IPlayer {
     this._perfSamples++;
     if (this._perfLastLog === 0) { this._perfLastLog = nowMs; return; }
     if (nowMs - this._perfLastLog < 2000) return;
-    const n = this._perfSamples || 1;
-    const parts = Object.entries(this._perf)
-      .filter(([k]) => k !== 'total')
-      .sort((a, b) => b[1] - a[1])
-      .map(([k, v]) => `${k}=${(v / n).toFixed(2)}`)
-      .join(' ');
-    const total = (this._perf.total ?? 0) / n;
-    debugLog(`[Perf] frame=${total.toFixed(2)}ms | ${parts}`);
+    // 只按 2 秒归零本窗口的累计值（快照由 __adojasPerf() 读取）；
+    // 不再 debugLog 打印，避免刷屏。需要看数值时手动调 __adojasPerf()。
     this._perf = {};
     this._perfSamples = 0;
     this._perfLastLog = nowMs;

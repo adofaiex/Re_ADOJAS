@@ -350,6 +350,10 @@ export class InstancedMeshManager {
                     oldShapeData.instancedMesh.geometry.attributes.iOpacity!.needsUpdate = true;
                     oldShapeData.instances.delete(tileIndex);
                 }
+                // 变更形状后旧形状可能已空：回收，避免残留空批。
+                if (oldShapeData.instances.size === 0) {
+                    this.evictShape(oldShapeData);
+                }
             }
         }
 
@@ -551,8 +555,10 @@ export class InstancedMeshManager {
         if (scaleChanged) instance.scale.copy(scale);
         if (opacityChanged) instance.opacity = opacity;
 
-        // Find in instanced meshes
-        for (const shapeData of this.instancedMeshes.values()) {
+        // O(1)：实例自己记录了所属形状（旧实现是扫描整张形状表，
+        // 长谱上形状数可达上千 → 单砖操作变成上千次迭代）。
+        const shapeData = this.shapeForTile(tileIndex);
+        if (shapeData) {
             const instanceIndex = shapeData.instances.get(tileIndex);
             if (instanceIndex !== undefined) {
                 const { instancedMesh, dummy } = shapeData;
@@ -574,7 +580,6 @@ export class InstancedMeshManager {
                     instancedMesh.geometry.attributes.iOpacity!.setX(instanceIndex, opacity!);
                     instancedMesh.geometry.attributes.iOpacity!.needsUpdate = true;
                 }
-                break;
             }
         }
     }
@@ -602,8 +607,9 @@ export class InstancedMeshManager {
         if (colorChanged) instance.color.copy(newColor);
         if (bgColorChanged) instance.bgColor.copy(newBgColor);
 
-        // Find in instanced meshes
-        for (const shapeData of this.instancedMeshes.values()) {
+        // O(1)：实例自己记录了所属形状。
+        const shapeData = this.shapeForTile(tileIndex);
+        if (shapeData) {
             const instanceIndex = shapeData.instances.get(tileIndex);
             if (instanceIndex !== undefined) {
                 const { instancedMesh } = shapeData;
@@ -627,33 +633,28 @@ export class InstancedMeshManager {
 
                 if (colorChanged) instancedMesh.geometry.attributes.iColor!.needsUpdate = true;
                 if (bgColorChanged) instancedMesh.geometry.attributes.iBgColor!.needsUpdate = true;
-                break;
             }
         }
     }
 
     public setFloorIconType(tileIndex: number, iconType: number): void {
-        for (const shapeData of this.instancedMeshes.values()) {
-            const instanceIndex = shapeData.instances.get(tileIndex);
-            if (instanceIndex !== undefined) {
-                const attr = shapeData.instancedMesh.geometry.attributes.iFloorIconType!;
-                attr.setX(instanceIndex, iconType);
-                attr.needsUpdate = true;
-                break;
-            }
-        }
+        const shapeData = this.shapeForTile(tileIndex);
+        if (!shapeData) return;
+        const instanceIndex = shapeData.instances.get(tileIndex);
+        if (instanceIndex === undefined) return;
+        const attr = shapeData.instancedMesh.geometry.attributes.iFloorIconType!;
+        attr.setX(instanceIndex, iconType);
+        attr.needsUpdate = true;
     }
 
     public setFloorIconAngle(tileIndex: number, angle: number): void {
-        for (const shapeData of this.instancedMeshes.values()) {
-            const instanceIndex = shapeData.instances.get(tileIndex);
-            if (instanceIndex !== undefined) {
-                const attr = shapeData.instancedMesh.geometry.attributes.iFloorIconAngle!;
-                attr.setX(instanceIndex, angle);
-                attr.needsUpdate = true;
-                break;
-            }
-        }
+        const shapeData = this.shapeForTile(tileIndex);
+        if (!shapeData) return;
+        const instanceIndex = shapeData.instances.get(tileIndex);
+        if (instanceIndex === undefined) return;
+        const attr = shapeData.instancedMesh.geometry.attributes.iFloorIconAngle!;
+        attr.setX(instanceIndex, angle);
+        attr.needsUpdate = true;
     }
 
     /**
@@ -667,15 +668,13 @@ export class InstancedMeshManager {
             if (Math.abs(instance.glow - glow) < 1e-6) return;
             instance.glow = glow;
         }
-        for (const shapeData of this.instancedMeshes.values()) {
-            const instanceIndex = shapeData.instances.get(tileIndex);
-            if (instanceIndex !== undefined) {
-                const attr = shapeData.glowMesh.geometry.attributes.iGlow!;
-                attr.setX(instanceIndex, glow);
-                attr.needsUpdate = true;
-                break;
-            }
-        }
+        const shapeData = this.shapeForTile(tileIndex);
+        if (!shapeData) return;
+        const instanceIndex = shapeData.instances.get(tileIndex);
+        if (instanceIndex === undefined) return;
+        const attr = shapeData.glowMesh.geometry.attributes.iGlow!;
+        attr.setX(instanceIndex, glow);
+        attr.needsUpdate = true;
     }
 
     public setIconAtlas(texture: Texture, atlasCols: number, iconSize: number): void {
@@ -825,24 +824,53 @@ export class InstancedMeshManager {
 
         this.tileInstances.delete(tileIndex);
 
-        // Find and remove from shape instanced mesh
-        for (const shapeData of this.instancedMeshes.values()) {
-            const instanceIndex = shapeData.instances.get(tileIndex);
-            if (instanceIndex !== undefined) {
-                // Mark instance as invisible (we'll handle compaction later)
-                const opacityAttr = shapeData.instancedMesh.geometry.attributes.iOpacity;
-                opacityAttr.setX(instanceIndex, 0);
-                opacityAttr.needsUpdate = true;
-                // 同时熄灭辉光（否则叠加层会残留）
-                const glowAttr = shapeData.glowMesh.geometry.attributes.iGlow;
-                if (glowAttr) {
-                    glowAttr.setX(instanceIndex, 0);
-                    glowAttr.needsUpdate = true;
-                }
-                shapeData.instances.delete(tileIndex);
-                break;
+        // O(1)：实例自己记录了所属形状。
+        const shapeData = this.instancedMeshes.get(instance.shapeKey);
+        if (!shapeData) return;
+        const instanceIndex = shapeData.instances.get(tileIndex);
+        if (instanceIndex !== undefined) {
+            // Mark instance as invisible (we'll handle compaction later)
+            const opacityAttr = shapeData.instancedMesh.geometry.attributes.iOpacity;
+            opacityAttr.setX(instanceIndex, 0);
+            opacityAttr.needsUpdate = true;
+            // 同时熄灭辉光（否则叠加层会残留）
+            const glowAttr = shapeData.glowMesh.geometry.attributes.iGlow;
+            if (glowAttr) {
+                glowAttr.setX(instanceIndex, 0);
+                glowAttr.needsUpdate = true;
             }
+            shapeData.instances.delete(tileIndex);
         }
+
+        // 形状空了就整体回收。否则长谱上每种 (方向对 × trackStyle) 都留下一个
+        // 预分配了 100 实例缓冲的 InstancedMesh，永不释放（实测 6 分钟涨到 1000+，
+        // GPU 几何 348→4712），且所有按砖操作都要遍历形状表 → 帧率持续下降。
+        if (shapeData.instances.size === 0) {
+            this.evictShape(shapeData);
+        }
+    }
+
+    /** 回收一个已无实例的形状（从场景与形状表移除并释放 GPU 资源）。 */
+    private evictShape(shapeData: ShapeInstancedMesh): void {
+        this.instancedMeshes.delete(shapeData.shapeKey);
+        this.scene.remove(shapeData.instancedMesh);
+        shapeData.instancedMesh.geometry.dispose();
+        if (shapeData.instancedMesh.material instanceof Material) {
+            shapeData.instancedMesh.material.dispose();
+        }
+        this.scene.remove(shapeData.glowMesh);
+        shapeData.glowMesh.geometry.dispose();
+        if (shapeData.glowMesh.material instanceof Material) {
+            shapeData.glowMesh.material.dispose();
+        }
+        shapeData.instances.clear();
+    }
+
+    /** tileIndex → 所属形状（O(1)，替代对形状表的全量扫描）。 */
+    private shapeForTile(tileIndex: number): ShapeInstancedMesh | undefined {
+        const inst = this.tileInstances.get(tileIndex);
+        if (!inst) return undefined;
+        return this.instancedMeshes.get(inst.shapeKey);
     }
 
     /**
@@ -855,8 +883,9 @@ export class InstancedMeshManager {
         if (instance.visible === visible) return;
         instance.visible = visible;
 
-        // Find in instanced meshes
-        for (const shapeData of this.instancedMeshes.values()) {
+        // O(1)：实例自己记录了所属形状。
+        const shapeData = this.instancedMeshes.get(instance.shapeKey);
+        if (shapeData) {
             const instanceIndex = shapeData.instances.get(tileIndex);
             if (instanceIndex !== undefined) {
                 const { instancedMesh, dummy } = shapeData;
@@ -902,7 +931,6 @@ export class InstancedMeshManager {
                     instancedMesh.geometry.attributes.iOpacity!.setX(instanceIndex, 0);
                     instancedMesh.geometry.attributes.iOpacity!.needsUpdate = true;
                 }
-                break;
             }
         }
     }
@@ -924,7 +952,9 @@ export class InstancedMeshManager {
         if (!instance || instance.layerZ === layerZ) return;
         instance.layerZ = layerZ;
 
-        for (const shapeData of this.instancedMeshes.values()) {
+        // O(1)：实例自己记录了所属形状。
+        const shapeData = this.instancedMeshes.get(instance.shapeKey);
+        if (shapeData) {
             const instanceIndex = shapeData.instances.get(tileIndex);
             if (instanceIndex !== undefined) {
                 const { instancedMesh, dummy } = shapeData;
@@ -937,7 +967,6 @@ export class InstancedMeshManager {
                 }
                 dummy.updateMatrix();
                 this.setInstanceMatrix(shapeData, instanceIndex, dummy.matrix);
-                break;
             }
         }
     }
