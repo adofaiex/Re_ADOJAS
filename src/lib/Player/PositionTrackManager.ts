@@ -42,9 +42,6 @@ export class PositionTrackManager {
     private static TILE_SIZE = 1.0;
 
     // ── 紧凑数组（tileCount 长度）───────────────────────────────
-    /** 基础位置（仅由 angleData 递推） */
-    private baseX: Float64Array | null = null;
-    private baseY: Float64Array | null = null;
     /** 应用 PositionTrack 事件后的位置 */
     private workX: Float64Array | null = null;
     private workY: Float64Array | null = null;
@@ -176,9 +173,6 @@ export class PositionTrackManager {
             px += Math.cos(rad) * TILE_SIZE;
             py += Math.sin(rad) * TILE_SIZE;
         }
-
-        this.baseX = baseX;
-        this.baseY = baseY;
 
         const defaultStick = isEnabled(this.levelData.settings?.stickToFloors, true);
 
@@ -334,11 +328,11 @@ export class PositionTrackManager {
         this.ensureComputed();
         const wx = this.workX, wy = this.workY;
         if (!wx || !wy) return;
-        const n = Math.min(pos.x.length, wx.length);
-        for (let i = 0; i < n; i++) {
-            pos.x[i] = wx[i];
-            pos.y[i] = wy[i];
-        }
+        // 共享引用（不拷贝）：computeTransforms 重算时会生成新的 work 数组，
+        // 调用方在每次重算后都会再调 copyTo，引用保持最新 —— 省一份
+        // 6.7M×2×8B 的常驻拷贝。
+        pos.x = wx;
+        pos.y = wy;
     }
 
     /** 把最终位置写回 tiles[i].position（存在数组则原地写，避免再造 100 万个数组）。 */
@@ -363,9 +357,9 @@ export class PositionTrackManager {
     /** 基础位置（角度递推、不含事件），供需要"原始起点"的逻辑使用。 */
     public getBasePosition(index: number): { x: number; y: number } | undefined {
         this.ensureComputed();
-        if (!this.baseX || !this.baseY) return undefined;
-        if (index < 0 || index >= this.baseX.length) return undefined;
-        return { x: this.baseX[index], y: this.baseY[index] };
+        if (!this.workX || !this.workY) return undefined;
+        if (index < 0 || index >= this.workX.length) return undefined;
+        return { x: this.workX[index], y: this.workY[index] };
     }
 
     public getRotationDeg(index: number): number {
@@ -449,7 +443,6 @@ export class PositionTrackManager {
 
     public dispose(): void {
         this.positionTrackEvents.clear();
-        this.baseX = this.baseY = null;
         this.workX = this.workY = null;
         this.workRot = this.workScale = this.workOpacity = null;
         this.workStick = null;

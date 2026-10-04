@@ -123,6 +123,8 @@ export class Player implements IPlayer {
 
   // Spatial indexing for fast visibility checks
   private spatialGrid: Map<number, number[]> = new Map();
+  /** 空间网格是否已构建（播放路径不需要网格；编辑/预览首次查询时惰性构建）。 */
+  private _spatialGridBuilt = false;
   private spatialGridSize: number = 5; // Grid cell size in world units
   // Hitsound
   private hitsoundManager: HitsoundManager;
@@ -706,8 +708,9 @@ export class Player implements IPlayer {
     
     this.initRenderer();
     
-    // Build spatial index for fast visibility checks
-    this.buildSpatialIndex();
+    // 空间网格改为按需构建（编辑/预览首次查询时）；播放路径直接扫描索引窗口，
+    // 不再为 677 万砖建 Map/索引数组（省约 200MB，加载也少一遍全谱循环）。
+    this._spatialGridBuilt = false;
     
     // Apply base state to any tiles already created (appear keyframes set initial state
     // at time 0, but preview should show full tiles)
@@ -4048,6 +4051,7 @@ export class Player implements IPlayer {
     // Re-calculate all tile positions with new editor mode
     if (this.positionTrackManager) {
       this.positionTrackManager.computeTransforms(this.isEditorMode);
+      this.positionTrackManager.copyTo(this.tilePositions);
       this.tiles.forEach((mesh, id) => {
         const index = parseInt(id);
         const transform = this.positionTrackManager!.getTileTransform(index);
@@ -4112,6 +4116,7 @@ export class Player implements IPlayer {
     
     // Recompute compact transforms, then apply to cached tiles on demand.
     this.positionTrackManager.computeTransforms(this.isEditorMode);
+    this.positionTrackManager.copyTo(this.tilePositions);
     
     this.tiles.forEach((mesh, id) => {
       const index = parseInt(id);
@@ -4772,27 +4777,39 @@ export class Player implements IPlayer {
     
     const margin = 2.0;
     const newVisibleSet = new Set<number>();
-
-    // 播放时只渲染"沿路径索引窗口"内的砖：troll/赫兹谱的路径会在同一片区域反复
-    // 绕圈，5×5 网格单元里能堆几万块历史砖 —— 空间查询会把它们全部要求建 mesh。
-    // 视图内的砖若索引离当前砖太远（旧圈数/极远处），要么已被越过、要么与当前
-    // 路径重叠（视觉上是重复的），跳过可把每帧工作量限制在窗口内。
-    const indexWindow = this.isPlaying ? Player.VISIBLE_INDEX_WINDOW : Infinity;
     const curIdx = this.currentTileIndex;
 
-    const minCellX = Math.floor((left - margin) / this.spatialGridSize);
-    const maxCellX = Math.floor((right + margin) / this.spatialGridSize);
-    const minCellY = Math.floor((bottom - margin) / this.spatialGridSize);
-    const maxCellY = Math.floor((top + margin) / this.spatialGridSize);
+    if (this.isPlaying) {
+      // 播放路径：只扫描"沿路径索引窗口"，用坐标数组直接判可见 —— 不依赖空间网格
+      // （为 677 万砖建网格 Map + 索引数组约 200MB，且加载时多一遍全谱循环）。
+      // 自我重叠的谱面里，窗口外同屏幕位置的砖是旧圈数/重复的，跳过；
+      // 窗口内有界（2×4096），每帧成本固定。
+      const from = Math.max(0, curIdx - Player.VISIBLE_INDEX_WINDOW);
+      const to = Math.min(totalTiles - 1, curIdx + Player.VISIBLE_INDEX_WINDOW);
+      const l = left - margin, r = right + margin, b = bottom - margin, t = top + margin;
+      for (let i = from; i <= to; i++) {
+        const x = this.tilePositions.getX(i);
+        const y = this.tilePositions.getY(i);
+        if (x >= l && x <= r && y >= b && y <= t) newVisibleSet.add(i);
+      }
+    } else {
+      // 编辑/预览：按需惰性建网格（播放过的谱面从不为它分配内存）
+      if (!this._spatialGridBuilt) {
+        this.buildSpatialIndex();
+        this._spatialGridBuilt = true;
+      }
+      const minCellX = Math.floor((left - margin) / this.spatialGridSize);
+      const maxCellX = Math.floor((right + margin) / this.spatialGridSize);
+      const minCellY = Math.floor((bottom - margin) / this.spatialGridSize);
+      const maxCellY = Math.floor((top + margin) / this.spatialGridSize);
 
-    for (let cx = minCellX; cx <= maxCellX; cx++) {
-      for (let cy = minCellY; cy <= maxCellY; cy++) {
-        const tileIndices = this.spatialGrid.get(cx * 4194304 + (cy + 2097152));
-        if (tileIndices) {
-          for (let i = 0; i < tileIndices.length; i++) {
-            const idx = tileIndices[i];
-            if (indexWindow !== Infinity && (idx < curIdx - indexWindow || idx > curIdx + indexWindow)) continue;
-            newVisibleSet.add(idx);
+      for (let cx = minCellX; cx <= maxCellX; cx++) {
+        for (let cy = minCellY; cy <= maxCellY; cy++) {
+          const tileIndices = this.spatialGrid.get(cx * 4194304 + (cy + 2097152));
+          if (tileIndices) {
+            for (let i = 0; i < tileIndices.length; i++) {
+              newVisibleSet.add(tileIndices[i]);
+            }
           }
         }
       }
