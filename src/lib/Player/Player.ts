@@ -234,6 +234,12 @@ export class Player implements IPlayer {
   private tileCameraEvents: Map<number, any[]> = new Map();
   private tileSetHitsoundEvents: Map<number, any[]> = new Map();
   private tilePlayHitsoundEvents: Map<number, any[]> = new Map();
+  /**
+   * Twirl 事件位图。百万砖谱面里 Twirl 往往每砖一条（如 605 万条），
+   * 进 tileEvents Map 会变成数百万个 Map 项 + 数组；而它只表示"该砖翻转方向"，
+   * 一个 Uint8 位图即可，方向在 calculateCumulativeRotations 中逐砖翻转。
+   */
+  private twirlAt: Uint8Array = new Uint8Array(0);
   private timelineManager: TimelineManager;
 
   // Per-tile hitsound overrides (from SetHitsound events)
@@ -353,6 +359,7 @@ export class Player implements IPlayer {
 
     // Parse actions if available
     if (this.levelData.actions) {
+      this.twirlAt = new Uint8Array(this.levelData.tiles?.length ?? 0);
       this.levelData.actions.forEach(action => {
         const floor = action.floor;
         if (action.eventType === 'MoveCamera') {
@@ -360,6 +367,9 @@ export class Player implements IPlayer {
                 this.tileCameraEvents.set(floor, []);
             }
             this.tileCameraEvents.get(floor)!.push(action);
+        } else if (action.eventType === 'Twirl') {
+            // 只记位图，不进 tileEvents（见 twirlAt 字段注释）
+            if (floor >= 0 && floor < this.twirlAt.length) this.twirlAt[floor] = 1;
         } else if (action.eventType === 'MoveTrack') {
             // handled by TimelineManager during build
         } else if (action.eventType === 'SetHitsound') {
@@ -1861,6 +1871,8 @@ export class Player implements IPlayer {
 
     // We iterate through tiles to calculate the rotation/time to reach the NEXT tile.
     for (let i = 0; i < n - 1; i++) {
+        // Twirl 位图：先在当前砖翻转方向（等价于原事件序里的 Twirl）
+        if (this.twirlAt[i]) isCW = !isCW;
         // Process events for current tile
         let extraRotation = 0;
         const events = this.tileEvents.get(i);
@@ -1960,6 +1972,7 @@ export class Player implements IPlayer {
     // Handle the last tile
     if (n > 0) {
         const lastIndex = n - 1;
+        if (this.twirlAt[lastIndex]) isCW = !isCW;
         let extraRotation = 0;
         const events = this.tileEvents.get(lastIndex);
         if (events) {
@@ -5014,13 +5027,13 @@ export class Player implements IPlayer {
     // Add event icons (Twirl, SetSpeed, End) using PNG sprites
     const decoZ = 0.002;
     const initialOpacity = (tileMesh.userData.opacity ?? 1) * (tileMesh.userData.trackColorOpacity ?? 1);
-    let hasTwirl = false;
+    // Twirl 图标：直接查位图（Twirl 不再进 tileEvents）
+    const hasTwirl = this.twirlAt[index] === 1;
     let hasSetSpeed = false;
 
     if (this.tileEvents.has(index)) {
         const events = this.tileEvents.get(index)!;
         events.forEach(e => {
-            if (e.eventType === 'Twirl') hasTwirl = true;
             if (e.eventType === 'SetSpeed') hasSetSpeed = true;
         });
     }
