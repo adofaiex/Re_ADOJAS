@@ -78,6 +78,29 @@ function mixHitInto(
   }
 }
 
+/**
+ * 离线包络限幅器（linked stereo）：阈值 TH，快 attack（2ms）、慢 release（80ms）。
+ * 只在超出阈值时平滑压低增益，不产生 tanh 硬饱和那种持续削波失真
+ * （"音质炸"的根因：密集段被 tanh 压成恒定 ±0.9 的饱和墙）。
+ */
+function limitBuffer(L: Float32Array, R: Float32Array, len: number, sampleRate: number, TH: number = 0.9): number {
+  const attackCoef = 1 - Math.exp(-1 / Math.max(1, Math.floor(sampleRate * 0.002)));
+  const releaseCoef = 1 - Math.exp(-1 / Math.max(1, Math.floor(sampleRate * 0.080)));
+  let env = 0;
+  let peak = 0;
+  for (let i = 0; i < len; i++) {
+    const l = L[i], r = R[i];
+    const al = l < 0 ? -l : l;
+    const ar = r < 0 ? -r : r;
+    const a = al > ar ? al : ar;
+    if (a > peak) peak = a;
+    env = a > env ? env + (a - env) * attackCoef : env + (a - env) * releaseCoef;
+    const g = env > TH ? TH / env : 1;
+    if (g < 1) { L[i] = l * g; R[i] = r * g; }
+  }
+  return peak;
+}
+
 export type HitsoundType =
   | 'Kick' | 'KickHouse' | 'KickChroma' | 'KickRupture'
   | 'Snare' | 'SnareHouse' | 'SnareVapor'
@@ -400,22 +423,8 @@ export class HitsoundManager {
         await new Promise(r => setTimeout(r, 0));
       }
 
-      // 整条 buffer 统一 tanh 限幅（峰值 ≤0.9 不动）
-      let foldPeak = 0;
-      for (let i = 0; i < bufferLength; i++) {
-        const al = foldL[i] < 0 ? -foldL[i] : foldL[i];
-        if (al > foldPeak) foldPeak = al;
-        const ar = foldR[i] < 0 ? -foldR[i] : foldR[i];
-        if (ar > foldPeak) foldPeak = ar;
-      }
-      const FTH = 0.9;
-      if (foldPeak > FTH) {
-        const inv = 1 / FTH;
-        for (let i = 0; i < bufferLength; i++) {
-          foldL[i] = FTH * Math.tanh(foldL[i] * inv);
-          foldR[i] = FTH * Math.tanh(foldR[i] * inv);
-        }
-      }
+      // 整条 buffer 统一包络限幅（平滑压增益，无 tanh 饱和失真）
+      const foldPeak = limitBuffer(foldL, foldR, bufferLength, sampleRate);
       this.synthesizedBuffer = foldBuffer;
       this.compressedBuffer = null;
       this.compressedOGGBlob = null;
@@ -477,18 +486,9 @@ export class HitsoundManager {
 
     console.log(`[HitsoundManager] Mixed ${processedHits} hits in ${((performance.now() - startTime) / 1000).toFixed(2)}s, peak=${peakAmplitude.toFixed(2)}`);
 
-    // tanh 软限幅（与分块/worker 路径一致）：峰值 ≤0.9 时完全不动；超过则平滑饱和。
-    // 旧逻辑"整曲按峰值缩放到 0.9"会把高密度段整体压暗（听不到打拍音），
-    // 只 softClip 又会在 |x|≥1.5 处硬平台化（爆音）。
+    // 整曲包络限幅（平滑压增益，无 tanh 饱和失真）
     if (onProgress) onProgress(95);
-    const TH = 0.9;
-    if (peakAmplitude > TH) {
-      const invTH = 1 / TH;
-      for (let ch = 0; ch < numChannels; ch++) {
-        const d = outputData[ch];
-        for (let i = 0; i < d.length; i++) d[i] = TH * Math.tanh(d[i] * invTH);
-      }
-    }
+    limitBuffer(outputData[0], outputData[1], bufferLength, sampleRate);
 
     this.synthesizedBuffer = outputBuffer;
 

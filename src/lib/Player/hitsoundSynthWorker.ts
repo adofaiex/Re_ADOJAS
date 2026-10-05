@@ -131,24 +131,13 @@ self.onmessage = (event: MessageEvent): void => {
     }
     (self as any).postMessage({ type: 'progress', chunkIndex, progress: 1 });
 
-    // ── 峰值诊断 + tanh 软限幅 ────────────────────────────────
-    // 旧逻辑"整块按峰值缩到 0.9"会把密集块里的稀疏段一起压暗（听不到打拍音）；
-    // 只靠 softClip 又会在 |x|≥1.5 处硬平台化（爆音/噪声门感）。tanh 对小信号
-    // 近似透明、对大信号平滑饱和；峰值 ≤0.9 的块完全不动（普通谱面零影响）。
+    // 只测峰值供诊断；限幅交给主线程折叠后统一做（避免"每块饱和+整体再饱和"的双重失真）
     let peak = 0;
     for (let i = 0; i < bufferLength; i++) {
       const al = outL[i] < 0 ? -outL[i] : outL[i];
       if (al > peak) peak = al;
       const ar = outR[i] < 0 ? -outR[i] : outR[i];
       if (ar > peak) peak = ar;
-    }
-    const TH = 0.9;
-    if (peak > TH) {
-      const invTH = 1 / TH;
-      for (let i = 0; i < bufferLength; i++) {
-        outL[i] = TH * Math.tanh(outL[i] * invTH);
-        outR[i] = TH * Math.tanh(outR[i] * invTH);
-      }
     }
 
     (self as any).postMessage(
