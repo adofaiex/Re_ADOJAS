@@ -352,24 +352,75 @@ export class HitsoundManager {
     // 时长超限时切换为分块按需合成（见字段注释）。
     if (totalHits > HitsoundManager.CHUNK_MODE_HIT_THRESHOLD
         || totalDuration > HitsoundManager.CHUNK_MODE_DURATION_THRESHOLD) {
-      this.chunkMode = true;
+      // ── 并行分块合成 → 折叠成一条连续 buffer ─────────────────────
+      // 之前"按需调度/流式调度"的竞态反复出问题（轮到某块没合成→静音；
+      // 迟到块 max(now,when) 叠播→爆音）。这里换最简单的思路：
+      //   把整首谱按 10s 切块，轮流丢给 worker 池并行合成；
+      //   每块合成完按 10s 时间线叠加进唯一的连续 buffer；
+      //   最后统一限幅一次；播放就是普通单个 AudioBuffer。
+      // 不存在任何播放期合成/调度，因而结构上不可能缺段。
+      this.chunkMode = false;
       this.chunkGroups = stillActive;
       this.chunkDuration = totalDuration;
       this.chunkTypeBuffers = typeBuffers;
-      this.synthesizedBuffer = null;
+      this.synthTotalChunks = Math.ceil(totalDuration / HitsoundManager.CHUNK_SEC) + 1;
+      this.synthCompletedChunks = 0;
+
+      const foldBuffer = ctx.createBuffer(numChannels, bufferLength, sampleRate);
+      const foldL = foldBuffer.getChannelData(0);
+      const foldR = foldBuffer.getChannelData(1);
+      const useWorkers = await this.ensureWorkers();
+      const chunkCount = this.synthTotalChunks;
+      const wave = useWorkers ? Math.max(1, this.workers?.length ?? 1) : 1;
+      console.log(`[HitsoundManager] Parallel chunk synthesis → fold: ${totalHits} hits, ${totalDuration.toFixed(1)}s, chunks=${chunkCount}, workers=${this.workers?.length ?? 0}`);
+
+      for (let base = 0; base < chunkCount; base += wave) {
+        const jobs: Promise<AudioBuffer | null>[] = [];
+        const end = Math.min(base + wave, chunkCount);
+        for (let k = base; k < end; k++) {
+          jobs.push(useWorkers ? this.synthesizeChunkWorker(k) : Promise.resolve(this.synthesizeChunk(k)));
+        }
+        const results = await Promise.all(jobs);
+        for (let i = 0; i < results.length; i++) {
+          const buf = results[i];
+          if (!buf) continue;
+          const at = Math.floor((base + i) * HitsoundManager.CHUNK_SEC * sampleRate);
+          const len = Math.min(buf.length, bufferLength - at);
+          if (len <= 0) continue;
+          const l = buf.getChannelData(0);
+          const r = buf.numberOfChannels > 1 ? buf.getChannelData(1) : l;
+          for (let j = 0; j < len; j++) {
+            foldL[at + j] += l[j];
+            foldR[at + j] += r[j];
+          }
+        }
+        this.synthCompletedChunks = end;
+        this.emitWorkerStatus(true);
+        if (onProgress) onProgress(5 + (end / chunkCount) * 90);
+        await new Promise(r => setTimeout(r, 0));
+      }
+
+      // 整条 buffer 统一 tanh 限幅（峰值 ≤0.9 不动）
+      let foldPeak = 0;
+      for (let i = 0; i < bufferLength; i++) {
+        const al = foldL[i] < 0 ? -foldL[i] : foldL[i];
+        if (al > foldPeak) foldPeak = al;
+        const ar = foldR[i] < 0 ? -foldR[i] : foldR[i];
+        if (ar > foldPeak) foldPeak = ar;
+      }
+      const FTH = 0.9;
+      if (foldPeak > FTH) {
+        const inv = 1 / FTH;
+        for (let i = 0; i < bufferLength; i++) {
+          foldL[i] = FTH * Math.tanh(foldL[i] * inv);
+          foldR[i] = FTH * Math.tanh(foldR[i] * inv);
+        }
+      }
+      this.synthesizedBuffer = foldBuffer;
       this.compressedBuffer = null;
       this.compressedOGGBlob = null;
-      this.synthTotalChunks = Math.ceil(totalDuration / HitsoundManager.CHUNK_SEC);
-      this.synthCompletedChunks = 0;
-      this.chunkCache.clear();
-      console.log(`[HitsoundManager] Chunked synthesis mode: ${totalHits} hits, ${totalDuration.toFixed(1)}s, ${stillActive.length} groups`);
-      // 加载期就用 worker 池预热前若干块：加载窗口显示逐 worker 进度，
-      // 播放开始时已有现成块可用（不再有首帧合成卡顿）。
-      await this.warmUpChunks(onProgress);
-      this.emitWorkerStatus(true);
-      // 加载完成后断开 UI 回调：播放期的按需调度绝不能再触发 React setState
-      //（否则每泵一次 = 一次整页重渲染）。
       this.onWorkerStatus = null;
+      console.log(`[HitsoundManager] Fold complete, peak=${foldPeak.toFixed(2)}`);
       if (onProgress) onProgress(100);
       return;
     }
