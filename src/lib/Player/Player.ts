@@ -1795,8 +1795,11 @@ export class Player implements IPlayer {
     // Process each tile
     for (let i = 1; i < this.tileStartTimes.length; i++) {
       const t = this.tileStartTimes[i];
-      const tileAngleVal = tileAngle(this.levelData.tiles, i);
-      if (i < tileCountOf(this.levelData.tiles) && tileAngleVal !== 0) {
+      // 官方 scrConductor.PlayHitTimes：除 midspin 砖外每块砖都有打拍音。
+      // 之前用 "angle !== 0" 过滤是错的——0° 砖没有音，而高 BPM 段几乎全是 0° 砖，
+      // 所以那些段落整段静音（与合成策略无关）。这里改为只跳过 midspin。
+      const isMidspin = i < tileCountOf(this.levelData.tiles) && tileDirection(this.levelData.tiles, i) === 999;
+      if (i < tileCountOf(this.levelData.tiles) && !isMidspin) {
         const override = this.tileHitsounds[i];
         if (override) {
           const key = `${override.type}_${override.volume}`;
@@ -1880,8 +1883,11 @@ export class Player implements IPlayer {
 
     for (let i = 1; i < this.tileStartTimes.length; i++) {
       const t = this.tileStartTimes[i];
-      const tileAngleVal = tileAngle(this.levelData.tiles, i);
-      if (i < tileCountOf(this.levelData.tiles) && tileAngleVal !== 0) {
+      // 官方 scrConductor.PlayHitTimes：除 midspin 砖外每块砖都有打拍音。
+      // 之前用 "angle !== 0" 过滤是错的——0° 砖没有音，而高 BPM 段几乎全是 0° 砖，
+      // 所以那些段落整段静音（与合成策略无关）。这里改为只跳过 midspin。
+      const isMidspin = i < tileCountOf(this.levelData.tiles) && tileDirection(this.levelData.tiles, i) === 999;
+      if (i < tileCountOf(this.levelData.tiles) && !isMidspin) {
         const override = this.tileHitsounds[i];
         if (override) {
           const key = `${override.type}_${override.volume}`;
