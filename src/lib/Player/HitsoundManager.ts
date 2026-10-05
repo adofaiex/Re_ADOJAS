@@ -64,12 +64,19 @@ async function loadOGGBlob(blob: Blob): Promise<AudioBuffer> {
   return getSharedAudioContext().decodeAudioData(arrayBuffer);
 }
 
-const softClip = (x: number): number => {
-  const absX = x < 0 ? -x : x;
-  if (absX < 0.5) return x;
-  if (absX < 1.5) return x * (1 - x * x / 3);
-  return x < 0 ? -1 : 1;
-};
+/** 把一段命中音轨按 gain 叠加到输出（限幅交给后续 tanh，不做逐样本裁剪）。 */
+function mixHitInto(
+  outL: Float32Array, outR: Float32Array,
+  srcL: Float32Array, srcR: Float32Array,
+  hitLen: number, startSample: number, gain: number, bufferLength: number
+): void {
+  if (startSample < 0) return;
+  const len = Math.min(hitLen, bufferLength - startSample);
+  for (let i = 0; i < len; i++) {
+    outL[startSample + i] += srcL[i] * gain;
+    outR[startSample + i] += srcR[i] * gain;
+  }
+}
 
 export type HitsoundType =
   | 'Kick' | 'KickHouse' | 'KickChroma' | 'KickRupture'
@@ -417,19 +424,16 @@ export class HitsoundManager {
 
     console.log(`[HitsoundManager] Mixed ${processedHits} hits in ${((performance.now() - startTime) / 1000).toFixed(2)}s, peak=${peakAmplitude.toFixed(2)}`);
 
-    // Normalize
+    // tanh 软限幅（与分块/worker 路径一致）：峰值 ≤0.9 时完全不动；超过则平滑饱和。
+    // 旧逻辑"整曲按峰值缩放到 0.9"会把高密度段整体压暗（听不到打拍音），
+    // 只 softClip 又会在 |x|≥1.5 处硬平台化（爆音）。
     if (onProgress) onProgress(95);
-    const TARGET_HEADROOM = 0.9;
-    const gain = peakAmplitude > TARGET_HEADROOM ? TARGET_HEADROOM / peakAmplitude : 1.0;
-    for (let ch = 0; ch < numChannels; ch++) {
-      const d = outputData[ch];
-      if (gain < 1.0) {
-        for (let i = 0; i < d.length; i++) d[i] = softClip(d[i] * gain);
-      } else {
-        for (let i = 0; i < d.length; i++) {
-          const absVal = d[i] < 0 ? -d[i] : d[i];
-          if (absVal > 0.5) d[i] = softClip(d[i]);
-        }
+    const TH = 0.9;
+    if (peakAmplitude > TH) {
+      const invTH = 1 / TH;
+      for (let ch = 0; ch < numChannels; ch++) {
+        const d = outputData[ch];
+        for (let i = 0; i < d.length; i++) d[i] = TH * Math.tanh(d[i] * invTH);
       }
     }
 
@@ -835,23 +839,19 @@ export class HitsoundManager {
     }
 
     const windows: { group: TimestampGroup; start: number; end: number }[] = [];
-    let windowHits = 0;
     for (const group of this.chunkGroups) {
       const ts = group.timestamps;
       const start = lowerBoundTime(ts, chunkStart);
       const end = lowerBoundTime(ts, chunkEnd);
-      if (end > start) {
-        windows.push({ group, start, end });
-        windowHits += (end - start);
-      }
+      if (end > start) windows.push({ group, start, end });
     }
-    if (windowHits === 0) return null;
+    if (windows.length === 0) return null;
 
-    const stride = Math.max(1, Math.ceil(windowHits / HitsoundManager.MAX_HITS_PER_CHUNK));
     const bufferLength = Math.ceil((CHUNK + maxHitDuration + 0.1) * sampleRate);
     const outputBuffer = ctx.createBuffer(2, bufferLength, sampleRate);
     const outL = outputBuffer.getChannelData(0);
     const outR = outputBuffer.getChannelData(1);
+    const bucketSamples = Math.max(1, Math.floor(sampleRate * 0.001)); // 1ms 密度桶
 
     for (const w of windows) {
       const buf = this.chunkTypeBuffers.get(w.group.type);
@@ -861,21 +861,36 @@ export class HitsoundManager {
       const srcR = buf.numberOfChannels > 1 ? buf.getChannelData(1) : srcL;
       const hitLen = Math.floor(buf.duration * sampleRate);
       const ts = w.group.timestamps;
-      for (let idx = w.start; idx < w.end; idx += stride) {
+
+      // 密度合并（与 worker 路径一致）：同一 1ms 桶只混一次、振幅 ×1/√k。
+      // 不再按 stride 抽稀（那会直接漏音）；低 BPM（间隔 >1ms）逐击混音不变。
+      let curBucket = -1;
+      let curCount = 0;
+      let curSample = -1;
+      for (let idx = w.start; idx < w.end; idx++) {
         const t = ts[idx];
         if (t < chunkStart) continue;
         const startSample = Math.floor((t - chunkStart) * sampleRate);
         if (startSample >= bufferLength) break;
-        const len = Math.min(hitLen, bufferLength - startSample);
-        for (let i = 0; i < len; i++) {
-          outL[startSample + i] += srcL[i] * volScale;
-          outR[startSample + i] += srcR[i] * volScale;
+        const bucket = Math.floor(startSample / bucketSamples);
+        if (bucket !== curBucket) {
+          if (curCount > 0) {
+            mixHitInto(outL, outR, srcL, srcR, hitLen, curSample, volScale / Math.sqrt(curCount), bufferLength);
+          }
+          curBucket = bucket;
+          curCount = 1;
+          curSample = startSample;
+        } else {
+          curCount++;
         }
+      }
+      if (curCount > 0) {
+        mixHitInto(outL, outR, srcL, srcR, hitLen, curSample, volScale / Math.sqrt(curCount), bufferLength);
       }
     }
 
-    // 限密度 + 峰值归一化 + 软削波：与 worker 路径一致。只做 softClip 会在
-    // 高密度段把波形削成 ±1 平台（听起来像消音）；先缩到峰值 0.9 再削。
+    // tanh 软限幅：峰值 ≤0.9 的块完全不动；超过则平滑饱和。
+    // （旧逻辑按峰值整体缩放会把稀疏段一起压暗 → 听不到；只 softClip 会硬削波 → 爆音。）
     let peak = 0;
     for (let i = 0; i < bufferLength; i++) {
       const al = outL[i] < 0 ? -outL[i] : outL[i];
@@ -883,14 +898,13 @@ export class HitsoundManager {
       const ar = outR[i] < 0 ? -outR[i] : outR[i];
       if (ar > peak) peak = ar;
     }
-    const gain = peak > 0.9 ? 0.9 / peak : 1;
-    for (let i = 0; i < bufferLength; i++) {
-      const vl = gain < 1 ? outL[i] * gain : outL[i];
-      const al = vl < 0 ? -vl : vl;
-      if (al > 0.5) outL[i] = softClip(vl);
-      const vr = gain < 1 ? outR[i] * gain : outR[i];
-      const ar = vr < 0 ? -vr : vr;
-      if (ar > 0.5) outR[i] = softClip(vr);
+    const TH = 0.9;
+    if (peak > TH) {
+      const invTH = 1 / TH;
+      for (let i = 0; i < bufferLength; i++) {
+        outL[i] = TH * Math.tanh(outL[i] * invTH);
+        outR[i] = TH * Math.tanh(outR[i] * invTH);
+      }
     }
     this.recordChunkPeak(chunkIndex, peak);
 
