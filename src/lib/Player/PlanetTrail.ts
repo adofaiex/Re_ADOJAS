@@ -1,6 +1,6 @@
 import {
   Mesh, BufferGeometry, ShaderMaterial, BufferAttribute, Color, CustomBlending,
-  OneFactor,
+  OneFactor, OneMinusSrcAlphaFactor,
 } from 'three';
 
 /**
@@ -14,7 +14,9 @@ import {
 
 // 拖尾常量（yf/Nb/Bb/Ub/Vb/Gb/Xl/zb/jb）
 const TRAIL_LIFETIME = 0.74;        // yf = 74e4 µs
-const ALPHA_BASE = 0.22;            // Nb
+// Nb：不透明度基准。原版拖尾在白底上清晰可见，这里从 0.22 提到 0.35，
+// 配合下面的预乘 alpha 混合（加法混合在白底上永远显不出颜色）。
+const ALPHA_BASE = 0.35;
 const SCATTER_COUNT = 3;            // Bb
 // Ub：单个软点尺寸倍率。1.28 在本项目世界单位下偏窄（球直径 0.44），
 // 这里放大到 2.2 让拖尾宽度接近球径。
@@ -25,8 +27,8 @@ const EMIT_MIN_DIST = 0.058;        // $l
 /** 单帧内最多补几个发射点（Hb=2 偏小，这里放宽一点让轨迹连续）。 */
 const MAX_SUB_EMIT = 6;
 const SPREAD_LIFETIME = 0.7;        // Gb
-const BRIGHT_START = 0.5;           // Xl
-const BRIGHT_END = 0.3;             // zb
+const BRIGHT_START = 0.85;          // Xl（原 0.5：白底上太淡，提亮贴近原版）
+const BRIGHT_END = 0.45;            // zb（原 0.3）
 const SIZE_DECAY = 0.503937;        // jb
 
 const VERT = `
@@ -80,13 +82,14 @@ export class PlanetTrail {
       vertexShader: VERT,
       fragmentShader: FRAG,
       transparent: true,
-      // 片元输出预乘 alpha；拖尾是发光带 → 加法混合（One/One），重叠处叠加变亮
-      // （否则 One/OneMinusSrcAlpha 会是一条很暗的带子，看着"不明显"）。
+      // 片元输出预乘 alpha；用预乘的"普通 alpha 混合"（One / OneMinusSrcAlpha）：
+      // 拖尾颜色盖在背景上，白底/黑底都能看清。
+      // （旧版用 One/One 加法混合——白底 + 颜色仍为白，所以拖尾在白底上"消失"。）
       blending: CustomBlending,
       blendSrc: OneFactor,
-      blendDst: OneFactor,
+      blendDst: OneMinusSrcAlphaFactor,
       blendSrcAlpha: OneFactor,
-      blendDstAlpha: OneFactor,
+      blendDstAlpha: OneMinusSrcAlphaFactor,
       depthTest: false,
       depthWrite: false,
     });
