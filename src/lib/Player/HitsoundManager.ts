@@ -241,6 +241,8 @@ export class HitsoundManager {
   private chunkCache: Map<number, AudioBuffer> = new Map();
   /** 最近若干块的峰值（诊断高 BPM 段是否被削平/异常）。 */
   private _chunkPeaks: { chunk: number; peak: number }[] = [];
+  /** 全量合成下因播放头追上而丢弃的迟到块数（诊断；正常应为 0）。 */
+  private _lateChunksDropped: number = 0;
 
   constructor(private defaultType: HitsoundType = 'Kick', private defaultVolume: number = 100, useOGGCompression: boolean = false) {
     this.useOGGCompression = useOGGCompression;
@@ -580,9 +582,10 @@ export class HitsoundManager {
     try {
       const useWorkers = await this.ensureWorkers();
       let didWork = false;
+      // 全量合成：不再只看播放头前方 N 块，后台一路合成到结尾并按时排好。
+      // （按需合成在密集段"轮到该块时还没合成出来"会整段静音；全量合成把该风险归零。）
       while (this._schedState === st && st.gen === this.chunkGeneration) {
-        const limit = Math.min(st.totalChunks, st.playheadChunk + HitsoundManager.SCHEDULE_LOOKAHEAD_CHUNKS);
-        if (st.nextChunk > limit) break;
+        if (st.nextChunk >= st.totalChunks) break;
         didWork = true;
         const k = st.nextChunk;
         let buf: AudioBuffer | null = this.chunkCache.get(k) ?? null;
@@ -729,6 +732,13 @@ export class HitsoundManager {
 
   private scheduleChunkSource(chunkIndex: number, buf: AudioBuffer, offset: number, startWall: number): void {
     const ctx = getSharedAudioContext();
+    const when = startWall + (chunkIndex * HitsoundManager.CHUNK_SEC - offset);
+    // 全量合成下唯一可能的异常：某块合成完成时它的起播时刻已经过去（播放头追上了）。
+    // 这时直接丢弃——绝不能 max(now, when) 起播，否则多个迟到块会叠在一起（爆音）。
+    if (when < ctx.currentTime - 0.05) {
+      this._lateChunksDropped++;
+      return;
+    }
     const src = ctx.createBufferSource();
     src.buffer = buf;
     src.connect(this.getGainNode());
@@ -738,8 +748,7 @@ export class HitsoundManager {
       const i = this.chunkSources.indexOf(src);
       if (i >= 0) this.chunkSources.splice(i, 1);
     };
-    const when = startWall + (chunkIndex * HitsoundManager.CHUNK_SEC - offset);
-    src.start(Math.max(ctx.currentTime, when));
+    src.start(when);
     this.chunkSources.push(src);
   }
 
