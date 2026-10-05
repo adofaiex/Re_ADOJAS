@@ -206,23 +206,6 @@ export class HitsoundManager {
   /** 按需调度前瞻块数：只合成/调度播放头前方这么多块（每块 10s）。 */
   private static readonly SCHEDULE_LOOKAHEAD_CHUNKS = 3;
 
-  // ── 流式逐击调度（替代分块合成；见 preSynthesize 注释）────────────
-  private streamMode: boolean = false;
-  private streamGroups: TimestampGroup[] = [];
-  private streamTypeBuffers: Map<HitsoundType, AudioBuffer> = new Map();
-  private streamDuration: number = 0;
-  private streamSources: AudioBufferSourceNode[] = [];
-  private streamPointers: number[] = [];
-  private streamActive: boolean = false;
-  private streamVoiceCount: number = 0;
-  private streamDropped: number = 0;
-  /** 调度前瞻（秒）：只安排播放头前方这么多。 */
-  private static readonly STREAM_LOOKAHEAD = 0.6;
-  /** 同时存在的音源上限（超过则丢弃本帧剩余命中，避免爆内存）。 */
-  private static readonly STREAM_MAX_VOICES = 1024;
-  /** 每帧最多安排的音源数（防止单帧调度过多）。 */
-  private static readonly STREAM_MAX_PER_UPDATE = 256;
-
   // 分块合成的 worker 池：把逐采样混音移出主线程（每块 10s 窗口一个 job，
   // 最多 pool 个块并行合成）。初始化失败时降级为主线程同步合成。
   private workers: Worker[] | null = null;
@@ -296,11 +279,6 @@ export class HitsoundManager {
    */
   async preSynthesize(groups: TimestampGroup[], totalDuration: number, onProgress?: (percent: number) => void, onWorkerStatus?: (s: HitsoundSynthStatus) => void): Promise<void> {
     this.onWorkerStatus = onWorkerStatus ?? null;
-    // 重新加载时清空上一次的流式状态
-    this.stopStreaming();
-    this.streamMode = false;
-    this.streamGroups = [];
-    this.streamTypeBuffers = new Map();
     if (!this.enabled) {
       if (onProgress) onProgress(100);
       return;
@@ -372,24 +350,24 @@ export class HitsoundManager {
     // 时长超限时切换为分块按需合成（见字段注释）。
     if (totalHits > HitsoundManager.CHUNK_MODE_HIT_THRESHOLD
         || totalDuration > HitsoundManager.CHUNK_MODE_DURATION_THRESHOLD) {
-      // ── 流式逐击调度（替代"先混整块 + 按块调度"）────────────────
-      // 旧策略的致命问题：
-      //   1) 中段（最密处）合成跟不上播放头时，迟到的块以 max(now, when) 同时起播
-      //      → 叠加爆音；块干脆没合成出来 → 整段静音；
-      //   2) 每块成本 = 命中数 × 音长，密集段越来越慢，恶性循环。
-      // 新策略不预混任何整块：播放时只在前方 LOOKAHEAD 秒内逐击调度音源
-      // （同一 1ms 桶合并、振幅 ×1/√k）。成本 O(命中数)、与音长无关；掉帧/seek
-      // 时直接跳过过期命中，绝不补播堆叠 → 无爆音、无整段静音。
-      this.streamMode = true;
-      this.chunkMode = false;
-      this.streamGroups = stillActive;
-      this.streamTypeBuffers = typeBuffers;
-      this.streamDuration = totalDuration;
+      this.chunkMode = true;
+      this.chunkGroups = stillActive;
+      this.chunkDuration = totalDuration;
+      this.chunkTypeBuffers = typeBuffers;
       this.synthesizedBuffer = null;
       this.compressedBuffer = null;
       this.compressedOGGBlob = null;
+      this.synthTotalChunks = Math.ceil(totalDuration / HitsoundManager.CHUNK_SEC);
+      this.synthCompletedChunks = 0;
+      this.chunkCache.clear();
+      console.log(`[HitsoundManager] Chunked synthesis mode: ${totalHits} hits, ${totalDuration.toFixed(1)}s, ${stillActive.length} groups`);
+      // 加载期就用 worker 池预热前若干块：加载窗口显示逐 worker 进度，
+      // 播放开始时已有现成块可用（不再有首帧合成卡顿）。
+      await this.warmUpChunks(onProgress);
+      this.emitWorkerStatus(true);
+      // 加载完成后断开 UI 回调：播放期的按需调度绝不能再触发 React setState
+      //（否则每泵一次 = 一次整页重渲染）。
       this.onWorkerStatus = null;
-      console.log(`[HitsoundManager] Streaming hit scheduling: ${totalHits} hits, ${totalDuration.toFixed(1)}s, ${stillActive.length} groups`);
       if (onProgress) onProgress(100);
       return;
     }
@@ -477,82 +455,6 @@ export class HitsoundManager {
     console.log(`[HitsoundManager] Pre-synthesis complete, duration=${totalDuration.toFixed(2)}s`);
   }
 
-  /** 流式模式：重置指针并激活（offset = timeInLevel 秒）。 */
-  private startStreaming(offset: number): void {
-    this.stopStreaming();
-    this.streamPointers = this.streamGroups.map(g => lowerBoundTime(g.timestamps, Math.max(0, offset - 0.25)));
-    this.streamVoiceCount = 0;
-    this.streamDropped = 0;
-    this.streamActive = true;
-  }
-
-  /** 停掉所有流式音源并失活。 */
-  private stopStreaming(): void {
-    this.streamActive = false;
-    for (const s of this.streamSources) {
-      try { s.stop(); } catch (e) { }
-      try { s.disconnect(); } catch (e) { }
-    }
-    this.streamSources = [];
-    this.streamVoiceCount = 0;
-  }
-
-  /**
-   * 流式调度推进（每帧）：把前方 LOOKAHEAD 秒内尚未安排的命中变成独立音源。
-   * 已过期的命中直接跳过（掉帧/seek 后不补播、不堆叠）。
-   */
-  private updateStream(timeInLevelSec: number): void {
-    if (!this.streamActive) return;
-    const ctx = getSharedAudioContext();
-    const ahead = timeInLevelSec + HitsoundManager.STREAM_LOOKAHEAD;
-    let scheduled = 0;
-    for (let gi = 0; gi < this.streamGroups.length; gi++) {
-      if (scheduled >= HitsoundManager.STREAM_MAX_PER_UPDATE) break;
-      const group = this.streamGroups[gi];
-      const buf = this.streamTypeBuffers.get(group.type);
-      if (!buf) continue;
-      const ts = group.timestamps;
-      let p = this.streamPointers[gi] ?? 0;
-      // seek/掉帧：跳过已经过时的命中（-0.25s 之前的全部丢弃）
-      const stale = lowerBoundTime(ts, timeInLevelSec - 0.25);
-      if (p < stale) p = stale;
-      const groupGain = group.volume / 100;
-      while (p < ts.length && ts[p] < ahead) {
-        if (scheduled >= HitsoundManager.STREAM_MAX_PER_UPDATE) break;
-        if (this.streamVoiceCount >= HitsoundManager.STREAM_MAX_VOICES) {
-          this.streamDropped += ts.length - p;
-          p = ts.length;
-          break;
-        }
-        const t = ts[p];
-        // 1ms 桶合并：同一桶内多次命中只发一个音源，振幅 ×1/√k
-        let k = 1;
-        const bucketEnd = t + 0.001;
-        while (p + k < ts.length && ts[p + k] < bucketEnd) k++;
-        const src = ctx.createBufferSource();
-        src.buffer = buf;
-        const gain = ctx.createGain();
-        gain.gain.value = groupGain / Math.sqrt(k);
-        src.connect(gain);
-        gain.connect(this.getGainNode());
-        const when = ctx.currentTime + Math.max(0.002, t - timeInLevelSec);
-        src.start(when);
-        src.onended = () => {
-          try { src.disconnect(); } catch (e) { }
-          try { gain.disconnect(); } catch (e) { }
-          const i = this.streamSources.indexOf(src);
-          if (i >= 0) this.streamSources.splice(i, 1);
-          this.streamVoiceCount--;
-        };
-        this.streamSources.push(src);
-        this.streamVoiceCount++;
-        p += k;
-        scheduled++;
-      }
-      this.streamPointers[gi] = p;
-    }
-  }
-
   start(delay: number = 0): void {
     if (!this.enabled) return;
     this.stop();
@@ -560,11 +462,6 @@ export class HitsoundManager {
     const ctx = getSharedAudioContext();
     if (ctx.state === 'suspended') ctx.resume();
 
-    if (this.streamMode) {
-      // 流式：无需延迟启动，update() 按播放头逐帧调度（delay 对应 timeInLevel<0 区间）
-      this.startStreaming(0);
-      return;
-    }
     if (this.chunkMode) {
       this.startChunked(0, delay);
       return;
@@ -592,10 +489,6 @@ export class HitsoundManager {
     const ctx = getSharedAudioContext();
     if (ctx.state === 'suspended') ctx.resume();
 
-    if (this.streamMode) {
-      this.startStreaming(Math.max(0, offset));
-      return;
-    }
     if (this.chunkMode) {
       this.startChunked(Math.max(0, offset), 0);
       return;
@@ -623,7 +516,6 @@ export class HitsoundManager {
     // 取消分块调度循环并停掉所有块音源
     this.chunkGeneration++;
     this._schedState = null;
-    this.stopStreaming();
     if (this.chunkSources.length > 0) {
       for (const s of this.chunkSources) {
         try { s.stop(); s.disconnect(); } catch (e) { }
@@ -637,7 +529,6 @@ export class HitsoundManager {
   }
 
   isSynthesized(): boolean {
-    if (this.streamMode) return this.streamGroups.length > 0;
     if (this.chunkMode) return this.chunkGroups.length > 0;
     return this.synthesizedBuffer !== null || this.compressedBuffer !== null;
   }
@@ -664,7 +555,6 @@ export class HitsoundManager {
 
   /** 播放推进时调用（每帧）：把调度泵到 playhead + 前瞻块数。 */
   public update(timeInLevelSec: number): void {
-    if (this.streamMode) { this.updateStream(timeInLevelSec); return; }
     const st = this._schedState;
     if (!st || !this.chunkMode) return;
     st.playheadChunk = Math.floor(timeInLevelSec / HitsoundManager.CHUNK_SEC);
@@ -1030,11 +920,6 @@ export class HitsoundManager {
   /** 诊断快照：__adojasHitsound() 用（分块模式/缓存/音源/各块峰值）。 */
   public debugSnapshot(): any {
     return {
-      streamMode: this.streamMode,
-      streamActive: this.streamActive,
-      streamVoices: this.streamVoiceCount,
-      streamDropped: this.streamDropped,
-      streamRemaining: this.streamGroups.reduce((n, g, i) => n + Math.max(0, g.timestamps.length - (this.streamPointers[i] ?? 0)), 0),
       chunkMode: this.chunkMode,
       durationSec: +this.chunkDuration.toFixed(1),
       totalChunks: this.synthTotalChunks,
