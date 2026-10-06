@@ -34,7 +34,8 @@ import {
 import { JudgmentDisplay } from './JudgmentDisplay';
 import { HitErrorMeter } from './HitErrorMeter';
 import { HoldRenderer } from './HoldRenderer';
-import { getIconTypeIndex, getTwirlTexture, getSetSpeedTexture, IconType, buildIconAtlas, ICON_ATLAS_SIZE, getPlanetTexture, getTintedPlanetTexture, ensureTintedPlanetTexture, getHoldTexture } from './IconLoader';
+import { MultiPlanetIndicator } from './MultiPlanetIndicator';
+import { getIconTypeIndex, getTwirlTexture, getSetSpeedTexture, IconType, buildIconAtlas, ICON_ATLAS_SIZE, ICON_TYPES, iconScaleForIndex, isDlcEventIconIndex, getPlanetTexture, getTintedPlanetTexture, ensureTintedPlanetTexture, getHoldTexture } from './IconLoader';
 import Stats from 'three/examples/jsm/libs/stats.module.js';
 import type { Bloom, Flash, RecolorTrack } from 'adofai/event';
 import { Level } from 'adofai';
@@ -132,7 +133,7 @@ export class Player implements IPlayer {
   private _layoutX: Float64Array = new Float64Array(8);
   private _layoutY: Float64Array = new Float64Array(8);
   private currentPivotPosition: { x: number; y: number } = { x: 0, y: 0 };
-  /** 长按期间摄像机跟随偏移（官方 SetHoldOffset(holdOffsetPos)）= 滑动圆心 − 砖心。 */
+  /** 长按期间摄像机跟随偏移（滑动圆心 − 砖心）。 */
   private holdSlideOffset: { x: number; y: number } = { x: 0, y: 0 };
 
   // Tile Management
@@ -190,6 +191,8 @@ export class Player implements IPlayer {
   private hitErrorMeter: HitErrorMeter | null = null; // 准度条
   /** Hold 长按带：每块 Hold 砖一个 mesh（一次性构建，逐帧只改 uniform）。 */
   private holdRenderers: Map<number, HoldRenderer> = new Map();
+  /** MultiPlanet 变多砖的虚线多边形指示器（按砖索引）。 */
+  private mpIndicators: Map<number, MultiPlanetIndicator> = new Map();
   /** Hold 带构建时起点砖的位置（用于跟随起点砖的运行时移动：MoveTrack 时整体平移）。 */
   private holdStartBase: Map<number, { x: number; y: number }> = new Map();
   /** 设置项：是否显示准度条（创建时应用，运行中实时切换）。 */
@@ -316,6 +319,11 @@ export class Player implements IPlayer {
    * 一个 Uint8 位图即可，方向在 calculateCumulativeRotations 中逐砖翻转。
    */
   private twirlAt: Uint8Array = new Uint8Array(0);
+  /**
+   * 每砖图标相关事件顺序（Twirl / SetSpeed / Hold / MultiPlanet）：
+   * 同一块砖上按事件顺序，最先出现的图标获胜。
+   */
+  private tileIconOrder: Map<number, string[]> = new Map();
   private timelineManager: TimelineManager;
 
   // Per-tile hitsound overrides (from SetHitsound events)
@@ -467,6 +475,14 @@ export class Player implements IPlayer {
       }
       this.levelData.actions.forEach(action => {
         const floor = action.floor;
+        // 图标优先级顺序：需要 Twirl（它不进 tileEvents），所以在这里按文件顺序单独记一份。
+        if (typeof floor === 'number' && floor >= 0 && isEventActive(action) &&
+            (action.eventType === 'Twirl' || action.eventType === 'SetSpeed' ||
+             action.eventType === 'Hold' || action.eventType === 'MultiPlanet')) {
+            let order = this.tileIconOrder.get(floor);
+            if (!order) { order = []; this.tileIconOrder.set(floor, order); }
+            order.push(action.eventType);
+        }
         if (action.eventType === 'MoveCamera') {
             if (!this.tileCameraEvents.has(floor)) {
                 this.tileCameraEvents.set(floor, []);
@@ -532,7 +548,8 @@ export class Player implements IPlayer {
     // Initialize icon atlas for UV-based floor icons
     buildIconAtlas().then(atlas => {
         if (this.instancedMeshManager) {
-            this.instancedMeshManager.setIconAtlas(atlas, 8, 0.44);
+            // 图标尺寸保持 0.44；新增事件图标通过逐实例 iIconScale 放大（1.5×）
+            this.instancedMeshManager.setIconAtlas(atlas, ICON_TYPES.length, 0.44);
         }
     }).catch(e => console.warn('[Player] Icon atlas build failed:', e));
     
@@ -579,6 +596,8 @@ export class Player implements IPlayer {
     this.applyRadiusScaleOffsets();
     // Hold：为每块 Hold 砖建长按带（一次性；进度逐帧改 uniform）
     this.buildHoldRenderers();
+    // MultiPlanet：为球数变多的砖建流动虚线多边形（到达后淡出）
+    this.buildMultiPlanetIndicators();
 
     // 基础值访问器：位置直接引用 PositionTrackManager 的 typed array；
     // 旋转/缩放/透明度按需读取 —— 不再按砖构造 Vector2[] base 数组。
@@ -1321,10 +1340,10 @@ export class Player implements IPlayer {
       }
     }
 
-    // Hold 位置偏移（官方 scnGame 620/758-761）：Hold 砖 x 使砖 x+1 **及其后所有砖**
-    // 沿 exitangle 方向偏移 holdDistance —— 官方把它累加进 val（val += val3），
-    // 每砖结尾 val2 = val 继续向后传递：x+1 被推远后整条后续轨道必须一起平移，
-    // 否则轨道会在 x+2 处断开/错位（近零/整圈砖 holdDistance=0，不产生偏移）。
+    // Hold 位置偏移：Hold 砖 x 使砖 x+1 **及其后所有砖** 沿 exitangle 方向
+    // 累计偏移 holdDistance（偏移进入累积量并逐砖向后传递）：x+1 被推远后
+    // 整条后续轨道必须一起平移，否则轨道会在 x+2 处断开/错位
+    // （近零/整圈砖 holdDistance=0，不产生偏移）。
     let hx = 0;
     let hy = 0;
     for (let i = 1; i < n; i++) {
@@ -1345,8 +1364,7 @@ export class Player implements IPlayer {
     // 注意：这里**不重算** tileStartDist/tileEndDist。球的轨道半径恒为
     // tileSize×radiusScale（官方 cosmeticRadius），绝不能跟随砖间实际距离，
     // 否则 PositionTrack/Hold 造成的位移会把球半径"拉大"。
-    // bases（MoveTrack/appear 动画基准）= 含偏移的最终砖位：官方 startPos 在
-    // 偏移 pass 之后刷新（scnGame 1849），动画都从含偏移的位置起算。
+    // bases（MoveTrack/appear 动画基准）= 含偏移的最终砖位（动画从最终位置起算）。
     this.positionTrackManager?.setFinalPositions(this.tilePositions.x, this.tilePositions.y);
     this._tileOffsetsApplied = true;
   }
@@ -1456,6 +1474,67 @@ export class Player implements IPlayer {
     }
     this.holdRenderers.clear();
     this.holdStartBase.clear();
+  }
+
+  /**
+   * 为球数变多的砖（本砖 > 上一砖，且 >= 3）建闭合虚线多边形。
+   * 顶点 = 该砖的 formation：外接圆半径 r = tileSize/(2·sin(π/n))，圆心沿
+   * entry 角偏移 r，n 个顶点均布（其中一个顶点就是砖心）。
+   */
+  private buildMultiPlanetIndicators(): void {
+    this.disposeMultiPlanetIndicators();
+    const n = tileCountOf(this.levelData.tiles);
+    if (n === 0 || this.tileNumPlanets.length === 0) return;
+    for (let i = 0; i < n; i++) {
+      const oldN = i > 0 ? (this.tileNumPlanets[i - 1] || 2) : 2;
+      const newN = this.tileNumPlanets[i] || 2;
+      if (newN <= oldN || newN < 3) continue;
+
+      const px = this.tilePositions.getX(i);
+      const py = this.tilePositions.getY(i);
+      const d = this.tileRadiusScale[i] ?? 1;
+      const dirSign = this.tileIsCW[i] ? -1 : 1;
+      const inv = Math.PI * (newN - 2) / newN;
+      const thetaC = (this.tileStartAngle[i] ?? 0) + dirSign * inv / 2;
+      const r = d / (2 * Math.sin(Math.PI / newN));
+      const cx = px + Math.cos(thetaC) * r;
+      const cy = py + Math.sin(thetaC) * r;
+      const pts: { x: number; y: number }[] = [];
+      for (let k = 0; k <= newN; k++) { // 末点 = 首点，闭合
+        const th = thetaC + dirSign * 2 * Math.PI * ((1 - k) - newN / 2) / newN;
+        pts.push({ x: cx + Math.cos(th) * r, y: cy + Math.sin(th) * r });
+      }
+      const ind = new MultiPlanetIndicator(pts);
+      ind.render(this.scene);
+      this.mpIndicators.set(i, ind);
+    }
+  }
+
+  private disposeMultiPlanetIndicators(): void {
+    for (const ind of this.mpIndicators.values()) {
+      ind.removeFromScene(this.scene);
+      ind.dispose();
+    }
+    this.mpIndicators.clear();
+  }
+
+  /** 虚线持续流动；玩到该砖后 0.5s 淡出（预览/未到达时保持可见）。 */
+  private updateMultiPlanetIndicators(): void {
+    if (this.mpIndicators.size === 0) return;
+    const now = performance.now() / 1000;
+    for (const [floor, ind] of this.mpIndicators) {
+      ind.update(now);
+      if (this.isPlaying && this.currentTileIndex >= floor) {
+        if (ind.fadeStart === null) ind.fadeStart = now;
+        const a = Math.max(0, 1 - (now - ind.fadeStart) / 0.5);
+        ind.setOpacity(a);
+        ind.setVisible(a > 0);
+      } else {
+        ind.fadeStart = null;
+        ind.setOpacity(1);
+        ind.setVisible(true);
+      }
+    }
   }
 
   /**
@@ -3740,7 +3819,7 @@ export class Player implements IPlayer {
         );
         this.instancedMeshManager!.setTileVisibility(index, effectiveOpacity > 0.001);
         // Always sync floor icon type and direction angle
-        this.instancedMeshManager!.setFloorIconType(index, mesh.userData.floorIconType ?? 0);
+        this.instancedMeshManager!.setFloorIconType(index, mesh.userData.floorIconType ?? 0, iconScaleForIndex(mesh.userData.floorIconType ?? 0));
         this.instancedMeshManager!.setFloorIconAngle(index, mesh.userData.floorIconAngle ?? 0);
         // 砖块辉度依赖砖自身 alpha，随 transform/透明度一并刷新。
         this.instancedMeshManager!.setTileGlow(
@@ -4980,7 +5059,8 @@ export class Player implements IPlayer {
                     tileMesh.position, tileMesh.rotation as Euler, tileMesh.scale,
                     rendered.color, rendered.bgcolor, rendered.opacity, true, texSeed,
                     tileMesh.userData.floorIconType ?? 0,
-                    tileMesh.userData.floorIconAngle ?? 0
+                    tileMesh.userData.floorIconAngle ?? 0,
+                    iconScaleForIndex(tileMesh.userData.floorIconType ?? 0)
                 );
             }
         }
@@ -5463,7 +5543,7 @@ export class Player implements IPlayer {
         mcy = py + (endCY - py) * hp;
       }
       void clampedProgress; void startDist; void endDist;
-      // Hold 段枢轴（chosen）也随圆心滑动（官方 holdOffsetPos 同样作用于枢轴球）
+      // Hold 段枢轴（chosen）也随圆心滑动（圆心平移同样作用于枢轴球）
       px = mcx;
       py = mcy;
       mx = mcx + Math.cos(ca) * orbitR;
@@ -5809,7 +5889,7 @@ export class Player implements IPlayer {
         } else {
           this.scene.add(tileMesh);
           this.instancedMeshManager.setTileVisibility(idx, true);
-          this.instancedMeshManager.setFloorIconType(idx, tileMesh.userData.floorIconType ?? 0);
+          this.instancedMeshManager.setFloorIconType(idx, tileMesh.userData.floorIconType ?? 0, iconScaleForIndex(tileMesh.userData.floorIconType ?? 0));
           this.instancedMeshManager.setFloorIconAngle(idx, tileMesh.userData.floorIconAngle ?? 0);
         }
         this.tileVisible[idx] = 1;
@@ -6061,30 +6141,97 @@ export class Player implements IPlayer {
         if (customIconEvent.trackIconAngle !== undefined && customIconEvent.trackIconAngle !== null) {
             customIconAngleDeg = Number(customIconEvent.trackIconAngle);
         }
-    } else if (index === tileCount - 1) {
-        iconTypeIdx = getIconTypeIndex('End');
-    } else if (hasTwirl) {
-        const tileAngle = tileAngleOr(this.levelData.tiles, index, 180);
-        const dir = this.tileIsCW[index] ? 1 : -1;
-        iconTypeIdx = getIconTypeIndex(getTwirlTexture(tileAngle, dir));
-    } else if (hasSetSpeed) {
-        const currentBPM = this.tileBPM[index];
-        const prevBPM = index > 0 ? this.tileBPM[index - 1] : (this.levelData.settings.bpm || 100);
-        const ratio = currentBPM / prevBPM;
-        if (ratio > 1.05 || ratio < 0.95) {
-            iconTypeIdx = getIconTypeIndex(getSetSpeedTexture(ratio));
+    } else {
+        // 图标优先级：SetSpeed / Twirl / Hold / MultiPlanet 同级，按事件顺序
+        // 最先出现的获胜；之后才是落点 Release，最后是末砖 End。
+        let iconPicked = false;
+        const iconOrder = this.tileIconOrder.get(index);
+        if (iconOrder) {
+            for (const evType of iconOrder) {
+                if (evType === 'Twirl') {
+                    if (!hasTwirl) continue;
+                    const tileAngle = tileAngleOr(this.levelData.tiles, index, 180);
+                    const dir = this.tileIsCW[index] ? 1 : -1;
+                    iconTypeIdx = getIconTypeIndex(getTwirlTexture(tileAngle, dir));
+                    iconIsSwirl = true;
+                    iconPicked = true;
+                    break;
+                }
+                if (evType === 'SetSpeed') {
+                    const currentBPM = this.tileBPM[index];
+                    const prevBPM = index > 0 ? this.tileBPM[index - 1] : (this.levelData.settings.bpm || 100);
+                    const ratio = currentBPM / prevBPM;
+                    if (ratio > 1.05 || ratio < 0.95) {
+                        iconTypeIdx = getIconTypeIndex(getSetSpeedTexture(ratio));
+                    }
+                    // SetSpeed 事件无条件占优先级（速度不变时暂无图标，但也不让
+                    // 落点 Release 覆盖速度砖）。
+                    iconPicked = true;
+                    break;
+                }
+                if (evType === 'Hold') {
+                    // holdLength 0 → 短按图标，其余（>0 / -1）→ 长按图标
+                    const hl = this.tileHoldLength[index] ?? -1;
+                    iconTypeIdx = getIconTypeIndex(hl === 0 ? 'HoldShort' : 'HoldLong');
+                    iconPicked = true;
+                    break;
+                }
+                if (evType === 'MultiPlanet') {
+                    // new==2 → 两颗；new > old → 变多图标 (b)；new <= old → 变少图标 (a)。
+                    // old = 上一砖的球数（首砖按 1 计）。
+                    const oldN = index > 0 ? (this.tileNumPlanets[index - 1] || 1) : 1;
+                    const newN = this.tileNumPlanets[index] || 1;
+                    if (newN === 2) iconTypeIdx = getIconTypeIndex('Planets2');
+                    else if (newN > oldN) iconTypeIdx = getIconTypeIndex('Planets3B');
+                    else if (newN <= oldN) iconTypeIdx = getIconTypeIndex('Planets3A');
+                    iconPicked = true;
+                    break;
+                }
+            }
+        }
+        // 紧凑模式（Twirl 事件被库剥离）兜底：无顺序数据时按 Twirl → SetSpeed 处理
+        if (!iconPicked && hasTwirl) {
+            const tileAngle = tileAngleOr(this.levelData.tiles, index, 180);
+            const dir = this.tileIsCW[index] ? 1 : -1;
+            iconTypeIdx = getIconTypeIndex(getTwirlTexture(tileAngle, dir));
+            iconIsSwirl = true;
+            iconPicked = true;
+        }
+        if (!iconPicked && hasSetSpeed) {
+            const currentBPM = this.tileBPM[index];
+            const prevBPM = index > 0 ? this.tileBPM[index - 1] : (this.levelData.settings.bpm || 100);
+            const ratio = currentBPM / prevBPM;
+            if (ratio > 1.05 || ratio < 0.95) {
+                iconTypeIdx = getIconTypeIndex(getSetSpeedTexture(ratio));
+            }
+            iconPicked = true;
+        }
+        // 上一砖有 Hold → 本砖为落点砖，显示 Release（holdLength 0 → short）
+        if (!iconPicked && index > 0) {
+            const prevHold = this.tileHoldLength[index - 1] ?? -1;
+            if (prevHold >= 0) {
+                iconTypeIdx = getIconTypeIndex(prevHold === 0 ? 'ReleaseShort' : 'ReleaseLong');
+                iconPicked = true;
+            }
+        }
+        if (!iconPicked && index === tileCount - 1) {
+            iconTypeIdx = getIconTypeIndex('End');
         }
     }
-    // Hide 事件：hideIcon → 该砖不显示图标（官方 SetIconScale(0)）
+    // Hide 事件：hideIcon → 该砖不显示图标（SetIconScale(0)）
     if (this.tileHideIcon[index]) iconTypeIdx = 0;
     tileMesh.userData.floorIconType = iconTypeIdx;
 
     // Compute floor icon angle for shader
     // SetIconAngle(-angle)；我们的 shader 内部对 vFloorIconAngle 取负，
     // 所以这里对 SetFloorIcon 的 trackIconAngle 直接传 +angle（弧度）。
+    // Hold/Release/MultiPlanet 图标不随砖块 entry/exit 朝向旋转（角 = 0）；
+    // MoveTrack 对砖块的旋转仍会经实例矩阵整体带动图标。
     const floorIconAngle = customIconAngleDeg !== null
         ? customIconAngleDeg * Math.PI / 180
-        : this.getFloorIconAngle(index, customIconEvent ? iconIsSwirl : hasTwirl);
+        : isDlcEventIconIndex(iconTypeIdx)
+            ? 0
+            : this.getFloorIconAngle(index, customIconEvent ? iconIsSwirl : hasTwirl);
     tileMesh.userData.floorIconAngle = floorIconAngle;
 
     // Update instanced mesh with icon type and direction angle
@@ -6103,6 +6250,7 @@ export class Player implements IPlayer {
             texSeed,
             iconTypeIdx,
             floorIconAngle,
+            iconScaleForIndex(iconTypeIdx),
             this.computeTileGlow(index, index <= this._litThroughFloorIndex)
         );
     }
@@ -6136,6 +6284,8 @@ export class Player implements IPlayer {
     this.updateScalePlanets(timeInLevel);
     // Hold：更新长按带完成度/主色
     this.updateHoldRenderers(timeInLevel);
+    // MultiPlanet：虚线多边形流动/淡出
+    this.updateMultiPlanetIndicators();
     
     if (timeInLevel < 0) {
         // Countdown phase - handled by standard logic
@@ -6285,8 +6435,8 @@ export class Player implements IPlayer {
         const currentAngle = startAngle + totalAngle * easedProgress + pauseOffset;
 
         void startDist; void endDist;
-        // 轨道半径恒为 tileSize×radiusScale（官方 cosmeticRadius），**不跟随砖间实际距离**；
-        // 段内按官方 Mathf.Lerp(radiusScale[i], radiusScale[i+1], easedPerc) 插值。
+        // 轨道半径恒为 tileSize×radiusScale（cosmeticRadius），**不跟随砖间实际距离**；
+        // 段内按 radiusScale[i] → radiusScale[i+1] 插值。
         // Hold 段圆心从砖位平移到 tail − rTail·dir(exit)（与 HoldRenderer 同一几何，球贴合长按带）。
         const r0 = this.tileRadiusScale[tileIndex] ?? 1;
         const rTail = this.tileRadiusScale[tileIndex + 1] ?? r0;
@@ -6303,8 +6453,7 @@ export class Player implements IPlayer {
             layoutCX = pivotPos.x + (endCX - pivotPos.x) * hp;
             layoutCY = pivotPos.y + (endCY - pivotPos.y) * hp;
         }
-        // 官方 camy.SetHoldOffset(holdOffsetPos)：长按期间相机目标随滑动圆心平移；
-        // 非长按砖 layout 圆心 = 砖心 → 偏移归零。
+        // 长按期间相机目标随滑动圆心平移；非长按砖 layout 圆心 = 砖心 → 偏移归零。
         this.holdSlideOffset.x = layoutCX - pivotPos.x;
         this.holdSlideOffset.y = layoutCY - pivotPos.y;
 
@@ -6323,8 +6472,8 @@ export class Player implements IPlayer {
       const timeInLevel = this.elapsedTime / 1000 - this.getTimeOrigin();
       const currentBPM = (this.tileBPM && this.tileBPM[this.currentTileIndex]) || 100;
 
-      // 长按跟随：官方 scrPlanet 每帧 camy.SetHoldOffset(holdOffsetPos)（仅 followMode）。
-      // 进入长按砖时 updateFollowCam 捕获 topos = 砖心，holdOffset 让目标随滑动圆心平移。
+      // 长按跟随：长按期间每帧把跟随目标偏移到滑动圆心（仅 followMode 生效）。
+      // 进入长按砖时 updateFollowCam 捕获 topos = 砖心，holdOffset 让目标随圆心平移。
       this.cameraController.setHoldOffset(this.holdSlideOffset.x, this.holdSlideOffset.y);
 
       // Two-layer camera update: rig (camParent) tween + local follow Lerp.

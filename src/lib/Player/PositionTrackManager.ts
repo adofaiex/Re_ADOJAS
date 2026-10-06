@@ -349,8 +349,7 @@ export class PositionTrackManager {
 
     /**
      * 记录 Player 叠加 Hold/ScaleRadius 偏移后的最终砖位。
-     * 官方 startPos 在偏移 pass 之后刷新（scnGame 1849），MoveTrack/appear 动画
-     * 都以"含偏移的最终位置"为基准，因此 getBases() 优先使用这里的引用。
+     * MoveTrack/appear 动画都以"含偏移的最终位置"为基准，因此 getBases() 优先使用这里的引用。
      */
     public setFinalPositions(x: Float64Array, y: Float64Array): void {
         this.finalX = x;

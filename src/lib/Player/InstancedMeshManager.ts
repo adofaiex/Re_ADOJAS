@@ -263,6 +263,11 @@ export class InstancedMeshManager {
             new Float32Array(maxInstances),
             1
         );
+        // 图标尺寸倍率：新增事件图标 1.5×（逐实例；其余图标 = 1）
+        const iIconScale = new InstancedBufferAttribute(
+            new Float32Array(maxInstances).fill(1),
+            1
+        );
 
         instancedMesh.geometry.setAttribute('iColor', iColor);
         instancedMesh.geometry.setAttribute('iBgColor', iBgColor);
@@ -270,6 +275,7 @@ export class InstancedMeshManager {
         instancedMesh.geometry.setAttribute('iTexSeed', iTexSeed);
         instancedMesh.geometry.setAttribute('iFloorIconType', iFloorIconType);
         instancedMesh.geometry.setAttribute('iFloorIconAngle', iFloorIconAngle);
+        instancedMesh.geometry.setAttribute('iIconScale', iIconScale);
 
         instancedMesh.instanceMatrix.needsUpdate = true;
 
@@ -347,6 +353,7 @@ export class InstancedMeshManager {
         texSeed: number = 0,
         floorIconType: number = 0,
         floorIconAngle: number = 0,
+        iconScale: number = 1,
         glow: number = 0
     ): void {
         if (!this.useInstancedMesh) return;
@@ -476,6 +483,7 @@ export class InstancedMeshManager {
         instancedMesh.geometry.attributes.iTexSeed!.setX(instanceIndex, texSeed);
         instancedMesh.geometry.attributes.iFloorIconType!.setX(instanceIndex, floorIconType);
         instancedMesh.geometry.attributes.iFloorIconAngle!.setX(instanceIndex, floorIconAngle);
+        instancedMesh.geometry.attributes.iIconScale!.setX(instanceIndex, iconScale);
         const glowAttr = shapeData.glowMesh.geometry.attributes.iGlow! as InstancedBufferAttribute;
         glowAttr.setX(instanceIndex, instance.glow);
         glowAttr.needsUpdate = true;
@@ -487,6 +495,7 @@ export class InstancedMeshManager {
         instancedMesh.geometry.attributes.iTexSeed!.needsUpdate = true;
         instancedMesh.geometry.attributes.iFloorIconType!.needsUpdate = true;
         instancedMesh.geometry.attributes.iFloorIconAngle!.needsUpdate = true;
+        instancedMesh.geometry.attributes.iIconScale!.needsUpdate = true;
     }
 
     /**
@@ -598,7 +607,7 @@ export class InstancedMeshManager {
         }
     }
 
-    public setFloorIconType(tileIndex: number, iconType: number): void {
+    public setFloorIconType(tileIndex: number, iconType: number, iconScale: number = 1): void {
         const shapeData = this.shapeForTile(tileIndex);
         if (!shapeData) return;
         const instanceIndex = shapeData.instances.get(tileIndex);
@@ -606,6 +615,11 @@ export class InstancedMeshManager {
         const attr = shapeData.instancedMesh.geometry.attributes.iFloorIconType!;
         attr.setX(instanceIndex, iconType);
         attr.needsUpdate = true;
+        const scaleAttr = shapeData.instancedMesh.geometry.attributes.iIconScale;
+        if (scaleAttr) {
+            scaleAttr.setX(instanceIndex, iconScale);
+            scaleAttr.needsUpdate = true;
+        }
     }
 
     public setFloorIconAngle(tileIndex: number, angle: number): void {
@@ -708,6 +722,10 @@ export class InstancedMeshManager {
             new Float32Array(newMax),
             1
         );
+        const iIconScale = new InstancedBufferAttribute(
+            new Float32Array(newMax).fill(1),
+            1
+        );
 
         // Copy old data
         for (let i = 0; i < oldMax; i++) {
@@ -737,6 +755,11 @@ export class InstancedMeshManager {
             iFloorIconAngle.setX(i,
                 oldMesh.geometry.attributes.iFloorIconAngle!.getX(i)
             );
+            if (oldMesh.geometry.attributes.iIconScale) {
+                iIconScale.setX(i,
+                    oldMesh.geometry.attributes.iIconScale.getX(i)
+                );
+            }
         }
 
         newMesh.geometry.setAttribute('iColor', iColor);
@@ -745,6 +768,7 @@ export class InstancedMeshManager {
         newMesh.geometry.setAttribute('iTexSeed', iTexSeed);
         newMesh.geometry.setAttribute('iFloorIconType', iFloorIconType);
         newMesh.geometry.setAttribute('iFloorIconAngle', iFloorIconAngle);
+        newMesh.geometry.setAttribute('iIconScale', iIconScale);
 
         // Replace old mesh
         this.scene.remove(oldMesh);

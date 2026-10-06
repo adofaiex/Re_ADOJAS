@@ -4,6 +4,7 @@ attribute float iOpacity;
 attribute float iTexSeed;
 attribute float iFloorIconType;
 attribute float iFloorIconAngle;
+attribute float iIconScale;
 
 varying vec3 vColor;
 varying vec3 vInstanceColor;
@@ -14,6 +15,7 @@ varying float vTexSeed;
 varying float vFloorIconType;
 varying vec2 vIconLocalPos;
 varying float vFloorIconAngle;
+varying float vIconScale;
 
 void main() {
     vColor = color;
@@ -23,6 +25,7 @@ void main() {
     vTexSeed = iTexSeed;
     vFloorIconType = iFloorIconType;
     vFloorIconAngle = iFloorIconAngle;
+    vIconScale = iIconScale;
     vIconLocalPos = position.xy;
 
     vec4 worldPos = modelMatrix * instanceMatrix * vec4(position, 1.0);

@@ -9,16 +9,29 @@ import twirlR1Url from '@/assets/events/TwirlR1.json';
 import planetRedUrl from '@/assets/planets/planet_red.json';
 import planetBlueUrl from '@/assets/planets/planet_blue.json';
 import holdTextureUrl from '@/assets/hold/hold_texture.json';
+import dlcHoldShortUrl from '@/assets/dlc/hold_short.json';
+import dlcHoldLongUrl from '@/assets/dlc/hold_long.json';
+import dlcReleaseShortUrl from '@/assets/dlc/release_short.json';
+import dlcReleaseLongUrl from '@/assets/dlc/release_long.json';
+import dlcPlanets2Url from '@/assets/dlc/planets_2.json';
+import dlcPlanets3aUrl from '@/assets/dlc/planets_3a.json';
+import dlcPlanets3bUrl from '@/assets/dlc/planets_3b.json';
 
-export type IconType = 'End' | 'Speed+' | 'Speed-' | 'DoubleSnail' | 'TwirlB1' | 'TwirlB-1' | 'TwirlR1' | 'TwirlR-1';
+export type IconType =
+    | 'End' | 'Speed+' | 'Speed-' | 'DoubleSnail'
+    | 'TwirlB1' | 'TwirlB-1' | 'TwirlR1' | 'TwirlR-1'
+    | 'HoldShort' | 'HoldLong' | 'ReleaseShort' | 'ReleaseLong'
+    | 'Planets2' | 'Planets3A' | 'Planets3B';
 
 export const ICON_TYPES: IconType[] = [
     'End', 'Speed+', 'Speed-', 'DoubleSnail',
     'TwirlB1', 'TwirlB-1', 'TwirlR1', 'TwirlR-1',
+    'HoldShort', 'HoldLong', 'ReleaseShort', 'ReleaseLong',
+    'Planets2', 'Planets3A', 'Planets3B',
 ];
 
 export const ICON_ATLAS_SIZE = 128;
-const ATLAS_COLS = 8;
+const ATLAS_COLS = ICON_TYPES.length;
 
 let _atlasTexture: Texture | null = null;
 
@@ -52,6 +65,13 @@ export async function buildIconAtlas(): Promise<Texture> {
         ['TwirlB-1', twirlB1Url, true],
         ['TwirlR1', twirlR1Url, false],
         ['TwirlR-1', twirlR1Url, true],
+        ['HoldShort', dlcHoldShortUrl, false],
+        ['HoldLong', dlcHoldLongUrl, false],
+        ['ReleaseShort', dlcReleaseShortUrl, false],
+        ['ReleaseLong', dlcReleaseLongUrl, false],
+        ['Planets2', dlcPlanets2Url, false],
+        ['Planets3A', dlcPlanets3aUrl, false],
+        ['Planets3B', dlcPlanets3bUrl, false],
     ];
 
     const images = await Promise.all(urls.map(([, url]) => loadImage(url)));
@@ -91,6 +111,19 @@ export function getIconAtlas(): Texture | null {
 
 export function getIconTypeIndex(type: IconType): number {
     return ICON_TYPES.indexOf(type) + 1;
+}
+
+/** 新增事件图标（Hold / Release / MultiPlanet）的渲染尺寸倍率，其余图标保持 1。 */
+export const DLC_ICON_SCALE = 1.5;
+const DLC_ICON_INDEX_MIN = ICON_TYPES.indexOf('HoldShort') + 1; // getIconTypeIndex 从 1 开始
+
+export function iconScaleForIndex(iconTypeIndex: number): number {
+    return iconTypeIndex >= DLC_ICON_INDEX_MIN ? DLC_ICON_SCALE : 1;
+}
+
+/** 是否为新增事件图标（Hold / Release / MultiPlanet）——它们不随砖块 entry/exit 朝向旋转。 */
+export function isDlcEventIconIndex(iconTypeIndex: number): boolean {
+    return iconTypeIndex >= DLC_ICON_INDEX_MIN;
 }
 
 export function getTwirlTexture(angle: number, dir: number): IconType {
@@ -155,6 +188,8 @@ export function getIconTexture(type: IconType): Texture {
         case 'TwirlB-1': return _tb1n();
         case 'TwirlR1': return _tr1();
         case 'TwirlR-1': return _tr1n();
+        // 新事件图标只用于图集（UV）渲染；装饰贴图请求回退到 End
+        default: return _e();
     }
 }
 

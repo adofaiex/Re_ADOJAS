@@ -14,6 +14,7 @@ varying float vTexSeed;
 varying float vFloorIconType;
 varying vec2 vIconLocalPos;
 varying float vFloorIconAngle;
+varying float vIconScale;
 
 void main() {
     vec3 finalColor = mix(vInstanceBgColor, vInstanceColor, vColor.r);
@@ -40,7 +41,7 @@ void main() {
             vIconLocalPos.x * c - vIconLocalPos.y * s,
             vIconLocalPos.x * s + vIconLocalPos.y * c
         );
-        vec2 iconUv = clamp(rotatedPos / uIconSize + 0.5, 0.0, 1.0);
+        vec2 iconUv = clamp(rotatedPos / (uIconSize * max(vIconScale, 0.0001)) + 0.5, 0.0, 1.0);
         iconUv.x = iconUv.x / uIconAtlasCols + (vFloorIconType - 1.0) / uIconAtlasCols;
         vec4 iconColor = texture2D(uIconAtlas, iconUv);
         if (iconColor.a > 0.1) {
