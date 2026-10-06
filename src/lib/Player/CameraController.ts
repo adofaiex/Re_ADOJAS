@@ -630,4 +630,14 @@ export class CameraController {
             this.timer = 0;
         }
     }
+
+    /**
+     * 官方 scrCamera.SetHoldOffset：长按期间摄像机跟随目标 = topos + holdOffset。
+     * topos 是进入长按砖时捕获的砖心，holdOffset 是圆心滑动量（每帧更新，
+     * 因此相机随长按带中心平移，而不是钉在起点砖上；长按结束前归零）。
+     */
+    public setHoldOffset(x: number, y: number): void {
+        this.holdOffset.x = x;
+        this.holdOffset.y = y;
+    }
 }

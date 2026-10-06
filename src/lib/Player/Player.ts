@@ -132,6 +132,8 @@ export class Player implements IPlayer {
   private _layoutX: Float64Array = new Float64Array(8);
   private _layoutY: Float64Array = new Float64Array(8);
   private currentPivotPosition: { x: number; y: number } = { x: 0, y: 0 };
+  /** 长按期间摄像机跟随偏移（官方 SetHoldOffset(holdOffsetPos)）= 滑动圆心 − 砖心。 */
+  private holdSlideOffset: { x: number; y: number } = { x: 0, y: 0 };
 
   // Tile Management
   private tiles: Map<string, Mesh> = new Map();
@@ -6145,6 +6147,8 @@ export class Player implements IPlayer {
              const pivotY = this.tilePositions.getY(lastIndex);
              this.currentPivotPosition.x = pivotX;
              this.currentPivotPosition.y = pivotY;
+             this.holdSlideOffset.x = 0;
+             this.holdSlideOffset.y = 0;
              
              let startAngle = 0;
              if (lastIndex > 0) {
@@ -6276,6 +6280,10 @@ export class Player implements IPlayer {
             layoutCX = pivotPos.x + (endCX - pivotPos.x) * hp;
             layoutCY = pivotPos.y + (endCY - pivotPos.y) * hp;
         }
+        // 官方 camy.SetHoldOffset(holdOffsetPos)：长按期间相机目标随滑动圆心平移；
+        // 非长按砖 layout 圆心 = 砖心 → 偏移归零。
+        this.holdSlideOffset.x = layoutCX - pivotPos.x;
+        this.holdSlideOffset.y = layoutCY - pivotPos.y;
 
         // 官方多行星布局；角进方向 s = isCW ? −1 : +1，偏移含 midspin 修正
         this.applyMultiPlanetLayout(tileIndex, layoutCX, layoutCY, currentAngle, orbitR, this.tileIsCW[tileIndex] ? -1 : 1, this.getMultiPlanetAngleOffset(tileIndex));
@@ -6291,6 +6299,10 @@ export class Player implements IPlayer {
 
       const timeInLevel = this.elapsedTime / 1000 - this.getTimeOrigin();
       const currentBPM = (this.tileBPM && this.tileBPM[this.currentTileIndex]) || 100;
+
+      // 长按跟随：官方 scrPlanet 每帧 camy.SetHoldOffset(holdOffsetPos)（仅 followMode）。
+      // 进入长按砖时 updateFollowCam 捕获 topos = 砖心，holdOffset 让目标随滑动圆心平移。
+      this.cameraController.setHoldOffset(this.holdSlideOffset.x, this.holdSlideOffset.y);
 
       // Two-layer camera update: rig (camParent) tween + local follow Lerp.
       this.cameraController.update({
