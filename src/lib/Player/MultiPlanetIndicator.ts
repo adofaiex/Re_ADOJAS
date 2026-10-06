@@ -36,6 +36,9 @@ void main() {
 }
 `;
 
+/** 虚线基础不透明度（官方线色 alpha = 0.5）：淡出在此之上再乘 0..1 的系数。 */
+const BASE_OPACITY = 0.5;
+
 export class MultiPlanetIndicator {
   public readonly mesh: Mesh;
   private readonly material: ShaderMaterial;
@@ -49,7 +52,7 @@ export class MultiPlanetIndicator {
       fragmentShader: FRAG,
       uniforms: {
         uColor: { value: new Vector3(1, 1, 1) },
-        uOpacity: { value: 1 },
+        uOpacity: { value: BASE_OPACITY },
         uDashSize: { value: 0.13 },
         uGapSize: { value: 0.1 },
         uDashOffset: { value: 0 },
@@ -121,7 +124,7 @@ export class MultiPlanetIndicator {
   }
 
   public setOpacity(v: number): void {
-    this.material.uniforms.uOpacity.value = Math.max(0, Math.min(1, v));
+    this.material.uniforms.uOpacity.value = Math.max(0, Math.min(1, v)) * BASE_OPACITY;
   }
 
   public setVisible(v: boolean): void {
