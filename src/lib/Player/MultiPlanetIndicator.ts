@@ -50,8 +50,8 @@ export class MultiPlanetIndicator {
       uniforms: {
         uColor: { value: new Vector3(1, 1, 1) },
         uOpacity: { value: 1 },
-        uDashSize: { value: 0.26 },
-        uGapSize: { value: 0.2 },
+        uDashSize: { value: 0.13 },
+        uGapSize: { value: 0.1 },
         uDashOffset: { value: 0 },
       },
       transparent: true,
@@ -116,7 +116,7 @@ export class MultiPlanetIndicator {
   }
 
   /** 虚线沿折线方向流动。dashSpeed 单位：世界单位/秒。 */
-  public update(timeSeconds: number, dashSpeed: number = 0.9): void {
+  public update(timeSeconds: number, dashSpeed: number = 0.45): void {
     this.material.uniforms.uDashOffset.value = (timeSeconds * dashSpeed) % 1024;
   }
 
