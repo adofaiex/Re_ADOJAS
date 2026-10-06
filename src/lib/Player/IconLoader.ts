@@ -8,6 +8,7 @@ import twirlB1Url from '@/assets/events/TwirlB1.json';
 import twirlR1Url from '@/assets/events/TwirlR1.json';
 import planetRedUrl from '@/assets/planets/planet_red.json';
 import planetBlueUrl from '@/assets/planets/planet_blue.json';
+import holdTextureUrl from '@/assets/hold/hold_texture.json';
 
 export type IconType = 'End' | 'Speed+' | 'Speed-' | 'DoubleSnail' | 'TwirlB1' | 'TwirlB-1' | 'TwirlR1' | 'TwirlR-1';
 
@@ -176,6 +177,12 @@ export function createIconSprite(tex: Texture, opacity = 1, size = 0.22): Sprite
 // 用红色贴图 × planetColor 染色。见 createPlanetVisual / planetTexturePathForObject。
 const _planetRed = () => loadLegacy('planet_red', planetRedUrl);
 const _planetBlue = () => loadLegacy('planet_blue', planetBlueUrl);
+
+/** Hold 长按带贴图（官方 dlc/holdTex.png：彩虹带 + 中央白线）。 */
+const _holdTex = () => loadLegacy('hold_tex', holdTextureUrl);
+export function getHoldTexture(): Texture {
+    return _holdTex();
+}
 
 /** 取行星本体贴图：DefaultBlue → blue.png，其它（含 Custom/undefined）→ red.png。 */
 export function getPlanetTexture(planetColorType: string | undefined): Texture {

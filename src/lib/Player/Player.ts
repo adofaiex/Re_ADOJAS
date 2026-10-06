@@ -33,7 +33,8 @@ import {
 } from './Judge';
 import { JudgmentDisplay } from './JudgmentDisplay';
 import { HitErrorMeter } from './HitErrorMeter';
-import { getIconTypeIndex, getTwirlTexture, getSetSpeedTexture, IconType, buildIconAtlas, ICON_ATLAS_SIZE, getPlanetTexture, getTintedPlanetTexture, ensureTintedPlanetTexture } from './IconLoader';
+import { HoldRenderer } from './HoldRenderer';
+import { getIconTypeIndex, getTwirlTexture, getSetSpeedTexture, IconType, buildIconAtlas, ICON_ATLAS_SIZE, getPlanetTexture, getTintedPlanetTexture, ensureTintedPlanetTexture, getHoldTexture } from './IconLoader';
 import Stats from 'three/examples/jsm/libs/stats.module.js';
 import type { Bloom, Flash, RecolorTrack } from 'adofai/event';
 import { Level } from 'adofai';
@@ -185,6 +186,8 @@ export class Player implements IPlayer {
   private inputAttached: boolean = false;
   private judgmentDisplay: JudgmentDisplay | null = new JudgmentDisplay();
   private hitErrorMeter: HitErrorMeter | null = null; // 准度条
+  /** Hold 长按带：每块 Hold 砖一个 mesh（一次性构建，逐帧只改 uniform）。 */
+  private holdRenderers: Map<number, HoldRenderer> = new Map();
   /** 设置项：是否显示准度条（创建时应用，运行中实时切换）。 */
   private showHitErrorMeter: boolean = true;
   /** 设置项：录制模式（隐藏判定统计等次要 HUD）。 */
@@ -567,6 +570,8 @@ export class Player implements IPlayer {
     this.buildScalePlanetEvents();
     // ScaleRadius：把累积偏移叠加到砖位（需要 entryangle = tileStartAngle）
     this.applyRadiusScaleOffsets();
+    // Hold：为每块 Hold 砖建长按带（一次性；进度逐帧改 uniform）
+    this.buildHoldRenderers();
 
     // 基础值访问器：位置直接引用 PositionTrackManager 的 typed array；
     // 旋转/缩放/透明度按需读取 —— 不再按砖构造 Vector2[] base 数组。
@@ -1317,6 +1322,53 @@ export class Player implements IPlayer {
       });
     }
     this.scalePlanetEvents.sort((x, y) => x.start - y.start);
+  }
+
+  /** 为每块 Hold 砖建一条 band（一次性；进度只改 uniform，避免官方式全量重画）。 */
+  private buildHoldRenderers(): void {
+    this.disposeHoldRenderers();
+    const n = tileCountOf(this.levelData.tiles);
+    if (n === 0 || this.tileHoldLength.length === 0) return;
+    let tex: any = null;
+    for (let i = 0; i < n; i++) {
+      if ((this.tileHoldLength[i] ?? -1) < 0) continue;
+      if (!tex) tex = getHoldTexture();
+      const radius = this.tileRadiusScale[i] ?? 1;
+      const renderer = new HoldRenderer(
+        this.tilePositions.getX(i), this.tilePositions.getY(i),
+        radius,
+        this.tileStartAngle[i] ?? 0,
+        this.tileTotalAngle[i] ?? 0,
+        Math.max(0.22, 0.32 * radius),
+        tex,
+      );
+      renderer.render(this.scene);
+      this.holdRenderers.set(i, renderer);
+    }
+  }
+
+  /** 每帧更新长按带完成度与主色（完成度 = 砖内时间进度）。 */
+  private updateHoldRenderers(timeInLevel: number): void {
+    if (this.holdRenderers.size === 0) return;
+    for (const [floor, renderer] of this.holdRenderers) {
+      const start = this.tileStartTimes[floor] ?? 0;
+      const end = this.tileStartTimes[floor + 1] ?? start;
+      const p = end > start ? (timeInLevel - start) / (end - start) : 0;
+      renderer.setCompletion(p);
+      const info = this.getTilePlanetInfo(floor);
+      const moverId = info.ids[(info.pivotPos + 1) % info.ids.length];
+      const planet = this.planetsById[moverId];
+      if (planet) renderer.setColor(planet.color);
+      renderer.setVisible(true);
+    }
+  }
+
+  private disposeHoldRenderers(): void {
+    for (const r of this.holdRenderers.values()) {
+      r.removeFromScene(this.scene);
+      r.dispose();
+    }
+    this.holdRenderers.clear();
   }
 
   /**
@@ -5974,6 +6026,8 @@ export class Player implements IPlayer {
     const timeInLevel = currentTimeInSeconds - this.getTimeOrigin();
     // ScalePlanets：逐帧应用行星缩放（含拖尾）
     this.updateScalePlanets(timeInLevel);
+    // Hold：更新长按带完成度/主色
+    this.updateHoldRenderers(timeInLevel);
     
     if (timeInLevel < 0) {
         // Countdown phase - handled by standard logic
@@ -6634,6 +6688,7 @@ export class Player implements IPlayer {
       this.hitErrorMeter.dispose();
       this.hitErrorMeter = null;
     }
+    this.disposeHoldRenderers();
 
     if (this.music) {
       this.music.dispose();
