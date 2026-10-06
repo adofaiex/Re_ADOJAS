@@ -1431,7 +1431,7 @@ export class Player implements IPlayer {
         rTail,
         this.tileStartAngle[i] ?? 0,
         this.tileTotalAngle[i] ?? 0,
-        Math.max(0.3, 0.55 * ((radius + rTail) / 2)),
+        Math.max(0.15, 0.275 * ((radius + rTail) / 2)),
         tex,
       );
       renderer.render(this.scene);

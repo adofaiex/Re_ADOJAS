@@ -32,9 +32,12 @@ void main() {
   vec4 tex = texture2D(uMap, vUv);
   float filled = vUv.y <= uCompletion ? 1.0 : 0.0;
   vec3 base = tex.rgb;
-  // 官方未填充部分也保持鲜艳彩虹（不压暗太多）；完成部分更亮、轻微带球色。
+  // 未填充部分也保持鲜艳彩虹（不压暗太多）；完成部分更亮、轻微带球色。
   vec3 col = base * mix(0.55, 1.15, filled);
   col = mix(col, col * uColor, 0.35 * filled);
+  // 中央白线高亮：沿带宽方向的高亮核（完成度越高越亮）
+  float core = smoothstep(0.4, 0.0, abs(vUv.x - 0.5));
+  col = mix(col, vec3(1.0), core * mix(0.25, 0.5, filled));
   float a = tex.a * uOpacity;
   if (a <= 0.003) discard;
   gl_FragColor = vec4(col, a);
