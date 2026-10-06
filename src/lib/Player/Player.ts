@@ -210,6 +210,9 @@ export class Player implements IPlayer {
   private tileMarginScales: Float32Array = new Float32Array(0);       // 各砖块判定窗口倍率（ScaleMargin 事件）
   private tileHideJudgment: Uint8Array = new Uint8Array(0);            // Hide 事件：隐藏判定文字（逐砖继承）
   private tileHideIcon: Uint8Array = new Uint8Array(0);                // Hide 事件：隐藏砖块图标（逐砖继承）
+  /** ScalePlanets：每个行星当前缩放（应用于 Planet.setRadius，拖尾随之缩放）。 */
+  private planetScaleApplied: number[] = new Array(8).fill(1);
+  private scalePlanetEvents: { start: number; duration: number; target: number; ids: number[]; ease: string }[] = [];
   private hitErrorSamples: number[] = [];        // 手打有效命中的按键时机偏移（ms，正=晚/慢，负=早/快）
 
   // Camera settings
@@ -547,6 +550,8 @@ export class Player implements IPlayer {
 
     // Calculate cumulative rotations
     this.calculateCumulativeRotations();
+    // ScalePlanets（时间轴）：预计算事件列表（需要 tileStartTimes / tileBPM）
+    this.buildScalePlanetEvents();
 
     // 基础值访问器：位置直接引用 PositionTrackManager 的 typed array；
     // 旋转/缩放/透明度按需读取 —— 不再按砖构造 Vector2[] base 数组。
@@ -1158,6 +1163,58 @@ export class Player implements IPlayer {
   private showJudgment(floorIndex: number, tile: unknown, margin: HitMargin): void {
     if (this.tileHideJudgment[floorIndex]) return;
     this.judgmentDisplay?.show(tile as never, margin);
+  }
+
+  /**
+   * ScalePlanets（官方 ffxScalePlanetsPlus）：`targetPlanet`（FirePlanet/IcePlanet/GreenPlanet/All）、
+   * `scale/100`、`duration`（拍 → 秒，按事件砖 BPM 换算）、`ease`。预计算成时间轴事件。
+   */
+  private buildScalePlanetEvents(): void {
+    this.scalePlanetEvents = [];
+    const actions = this.levelData.actions;
+    if (!actions) return;
+    for (const a of actions) {
+      if (a?.eventType !== 'ScalePlanets') continue;
+      const floor = Math.max(0, Math.floor(a.floor ?? 0));
+      const bpm = this.tileBPM[floor] || this.levelData.settings.bpm || 100;
+      const beats = typeof a.duration === 'number' ? a.duration : 0;
+      const tp = typeof a.targetPlanet === 'string' ? a.targetPlanet : 'All';
+      const ids = tp === 'FirePlanet' ? [0] : tp === 'IcePlanet' ? [1] : tp === 'GreenPlanet' ? [2] : [];
+      this.scalePlanetEvents.push({
+        start: this.tileStartTimes[floor] ?? 0,
+        duration: Math.max(0, beats) * 60 / bpm,
+        target: (typeof a.scale === 'number' ? a.scale : 100) / 100,
+        ids, // 空数组 = All（当前激活的全部行星）
+        ease: typeof a.ease === 'string' ? a.ease : 'Linear',
+      });
+    }
+    this.scalePlanetEvents.sort((x, y) => x.start - y.start);
+  }
+
+  /**
+   * 每帧全量求值并应用行星缩放：对每颗激活行星按事件链推进
+   * （完成的取 target，进行中的按 ease 插值）。全量重算 → seek/回退天然正确。
+   */
+  private updateScalePlanets(timeInLevel: number): void {
+    if (this.scalePlanetEvents.length === 0) return;
+    for (const id of this.activePlanetIds) {
+      let scale = 1;
+      for (const ev of this.scalePlanetEvents) {
+        if (ev.start > timeInLevel) break;
+        if (ev.ids.length > 0 && ev.ids.indexOf(id) < 0) continue;
+        if (ev.duration <= 1e-9 || timeInLevel >= ev.start + ev.duration) {
+          scale = ev.target;
+        } else {
+          const p = Math.max(0, Math.min(1, (timeInLevel - ev.start) / ev.duration));
+          const easeFn = EasingFunctions[ev.ease] || EasingFunctions.Linear;
+          scale = scale + (ev.target - scale) * easeFn(p);
+        }
+      }
+      if (Math.abs((this.planetScaleApplied[id] ?? 1) - scale) > 1e-4) {
+        this.planetScaleApplied[id] = scale;
+        this.planetsById[id]?.setRadius(0.22 * scale);
+      }
+    }
   }
 
   /**
@@ -4991,6 +5048,7 @@ export class Player implements IPlayer {
     this.planetRed = null;
     this.planetBlue = null;
     this._appliedPlanetListRef = -1;
+    this.planetScaleApplied = new Array(8).fill(1);
 
     this.ensurePlanet(0);
     this.ensurePlanet(1);
@@ -5772,6 +5830,8 @@ export class Player implements IPlayer {
     const offset = this.music.hasAudio ? (this.levelData.settings.offset || 0) : 0;
     
     const timeInLevel = currentTimeInSeconds - this.getTimeOrigin();
+    // ScalePlanets：逐帧应用行星缩放（含拖尾）
+    this.updateScalePlanets(timeInLevel);
     
     if (timeInLevel < 0) {
         // Countdown phase - handled by standard logic
