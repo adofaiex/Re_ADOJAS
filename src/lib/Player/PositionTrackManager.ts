@@ -57,6 +57,9 @@ export class PositionTrackManager {
     private _tmpTransform: TileTransform | null = null;
     /** getBases 缓存的访问器（computeTransforms 重算时失效）。 */
     private _bases: TileBases | null = null;
+    /** Player 叠加 Hold/ScaleRadius 偏移后的最终砖位（官方 startPos 含偏移）。 */
+    private finalX: Float64Array | null = null;
+    private finalY: Float64Array | null = null;
 
     constructor(levelData: Level) {
         this.levelData = levelData;
@@ -335,6 +338,29 @@ export class PositionTrackManager {
         pos.y = wy;
     }
 
+    /**
+     * copyTo 是共享引用；调用方若要在位置上原地叠加偏移（Hold/ScaleRadius），
+     * 必须先据此判断并分离出私有副本，否则偏移会写进缓存 work 数组，
+     * 退出播放重算时被重复叠加（砖位错乱）。
+     */
+    public sharesPositionArrays(x: Float64Array, y: Float64Array): boolean {
+        return this.workX === x && this.workY === y;
+    }
+
+    /**
+     * 记录 Player 叠加 Hold/ScaleRadius 偏移后的最终砖位。
+     * 官方 startPos 在偏移 pass 之后刷新（scnGame 1849），MoveTrack/appear 动画
+     * 都以"含偏移的最终位置"为基准，因此 getBases() 优先使用这里的引用。
+     */
+    public setFinalPositions(x: Float64Array, y: Float64Array): void {
+        this.finalX = x;
+        this.finalY = y;
+        if (this._bases) {
+            this._bases.posX = x;
+            this._bases.posY = y;
+        }
+    }
+
     /** 把最终位置写回 tiles[i].position（存在数组则原地写，避免再造 100 万个数组）。 */
     public applyPositionsToTiles(tiles: any[]): void {
         this.ensureComputed();
@@ -423,8 +449,8 @@ export class PositionTrackManager {
     public getBases(): TileBases {
         this.ensureComputed();
         if (!this._bases) {
-            const wx = this.workX!;
-            const wy = this.workY!;
+            const wx = this.finalX ?? this.workX!;
+            const wy = this.finalY ?? this.workY!;
             const wr = this.workRot;
             const ws = this.workScale;
             const wo = this.workOpacity;

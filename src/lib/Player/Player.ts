@@ -1272,6 +1272,26 @@ export class Player implements IPlayer {
     this.radiusOffsetX = new Float64Array(n);
     this.radiusOffsetY = new Float64Array(n);
     if (n < 2) return;
+
+    // 是否有任何偏移会真正写入（没有就不分离，保持与 PositionTrackManager 共享的
+    // 位置数组，百万砖谱面省一份常驻拷贝）。
+    let willOffset = false;
+    for (let i = 1; i < n; i++) {
+      if ((this.tileRadiusScale[i] ?? 1) !== 1) { willOffset = true; break; }
+      if ((this.tileHoldDistance[i - 1] ?? 0) !== 0) { willOffset = true; break; }
+    }
+    // copyTo 是共享引用：偏移若原地叠加，会把 PositionTrackManager 缓存的 work 数组
+    // 一起改掉；退出播放时 computeTransforms 命中缓存 + copyTo 交回同一份数组，
+    // 偏移 pass 再跑一遍就会**重复叠加**（砖块位置错乱）。有偏移时先拷贝成私有数组。
+    if (willOffset && this.positionTrackManager?.sharesPositionArrays(this.tilePositions.x, this.tilePositions.y)) {
+      const px = new Float64Array(this.tilePositions.x.length);
+      px.set(this.tilePositions.x);
+      const py = new Float64Array(this.tilePositions.y.length);
+      py.set(this.tilePositions.y);
+      this.tilePositions.x = px;
+      this.tilePositions.y = py;
+    }
+
     let any = false;
     for (let i = 1; i < n; i++) {
       if (this.tileRadiusScale[i] !== 1) { any = true; break; }
@@ -1325,6 +1345,9 @@ export class Player implements IPlayer {
     // 注意：这里**不重算** tileStartDist/tileEndDist。球的轨道半径恒为
     // tileSize×radiusScale（官方 cosmeticRadius），绝不能跟随砖间实际距离，
     // 否则 PositionTrack/Hold 造成的位移会把球半径"拉大"。
+    // bases（MoveTrack/appear 动画基准）= 含偏移的最终砖位：官方 startPos 在
+    // 偏移 pass 之后刷新（scnGame 1849），动画都从含偏移的位置起算。
+    this.positionTrackManager?.setFinalPositions(this.tilePositions.x, this.tilePositions.y);
     this._tileOffsetsApplied = true;
   }
 
