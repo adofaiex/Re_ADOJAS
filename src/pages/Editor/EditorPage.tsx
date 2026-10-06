@@ -528,7 +528,7 @@ export default function EditorPage() {
           <button
             className="shrink-0 flex items-center justify-center"
             style={{ width: 44, height: 44 }}
-            title={`判定难度：${judgeDifficulty === "Lenient" ? "宽" : judgeDifficulty === "Strict" ? "严" : "标"}（点击切换）`}
+            title={`Judge Difficulty: ${judgeDifficulty === "Lenient" ? "Lenient" : judgeDifficulty === "Strict" ? "Strict" : "Normal"} (Click to cycle)`}
             onClick={handleCycleJudgeDifficulty}
           >
             <img
@@ -544,7 +544,7 @@ export default function EditorPage() {
           <button
             className="shrink-0 flex items-center justify-center"
             style={{ width: 44, height: 44 }}
-            title={noFail ? "不死模式：开启（miss 自动矫正）" : "不死模式：关闭"}
+            title={noFail ? "No Fail On" : "No Fail Off"}
             onClick={handleToggleNoFail}
           >
             <img
@@ -559,8 +559,8 @@ export default function EditorPage() {
           {/* 自动播放（otto）：开 = 关闭手打 */}
           <button
             className="shrink-0 flex items-center justify-center"
-            style={{ width: 44, height: 44 }}
-            title={auto ? "自动播放：开启（点击关闭，进入手动判定）" : "自动播放：关闭（点击开启自动播放）"}
+            style={{ width: 67, height: 67 }}
+            title={auto ? "Auto Play On" : "AutoPlay Off"}
             onClick={handleToggleManualPlay}
             onMouseEnter={handleOttoPetEnter}
             onMouseMove={handleOttoPetMove}

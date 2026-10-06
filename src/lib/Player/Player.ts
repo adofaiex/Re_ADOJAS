@@ -203,6 +203,7 @@ export class Player implements IPlayer {
   private _judgeHitsoundPlayed: number = -1;    // 防重复 hitsound
   private _manualDead: boolean = false;         // 手动模式下玩家已死亡
   private _consecMisses: number = 0;            // 连续空敲/太慢数（累计达阈值杀）
+  private _keysDown: number = 0;                // 手动模式当前按住的键数（down/up 计数，长按判定用）
   private _lastAutoJudgedTile: number = -1;     // 自动播放：已展示判定的砖块
   private countdownText: string = '';           // 倒计时 HUD 文本（3/2/1/GO）
   private _lastCountdownTick: number = -1;      // 已播 sndHat 的 tick 计数
@@ -933,6 +934,7 @@ export class Player implements IPlayer {
     if (config?.hitMarginLimit !== undefined) this.judgeHitMarginLimit = config.hitMarginLimit;
     this._manualDead = false;
     this._consecMisses = 0;
+    this._keysDown = 0;
     this.inputQueue.attach();
     this.inputAttached = true;
     this.judgmentDisplay?.clear();
@@ -944,6 +946,7 @@ export class Player implements IPlayer {
     this.manualMode = false;
     this._manualDead = false;
     this._consecMisses = 0;
+    this._keysDown = 0;
     this.inputQueue.detach();
     this.inputQueue.clear();
     this.inputAttached = false;
@@ -999,6 +1002,7 @@ export class Player implements IPlayer {
   public retryManual(): void {
     this._manualDead = false;
     this._consecMisses = 0;
+    this._keysDown = 0;
     this.deaths = 0;
     this._judgeLastCorrectedTile = -1;
     this._judgeHitsoundPlayed = -1;
@@ -1728,9 +1732,16 @@ export class Player implements IPlayer {
     const events = this.inputQueue.drain();
     if (events.length === 0) return;
 
+    // 先维护按键计数（长按状态）：死亡/保护期也要保持计数正确，否则长按会误判
+    let hasDown = false;
+    for (const ev of events) {
+      if (ev.type === 'down') { this._keysDown++; hasDown = true; }
+      else this._keysDown = Math.max(0, this._keysDown - 1);
+    }
+
     // 死亡后按任意键 → 从开头重开
     if (this._manualDead) {
-      this.retryManual();
+      if (hasDown) this.retryManual();
       return;
     }
 
@@ -1744,10 +1755,129 @@ export class Player implements IPlayer {
 
     for (let i = 0; i < events.length; i++) {
       const ev = events[i];
-      if (ev.type !== 'down') continue;
-      const elapsedAtPress = this.getElapsedTimeAt(ev.perfTime);
-      const timeInLevel = elapsedAtPress / 1000 - timeOrigin;
-      this.judgePress(timeInLevel);
+      const elapsedAtEvent = this.getElapsedTimeAt(ev.perfTime);
+      const timeInLevel = elapsedAtEvent / 1000 - timeOrigin;
+      if (ev.type === 'down') {
+        this.judgePress(timeInLevel);
+      } else {
+        this.handleHoldRelease(timeInLevel);
+      }
+    }
+  }
+
+  /** 长按段允许提前松手的完成度（提前量 = Counted 角度边界对应的时长 / 长按段时长）。 */
+  private getHoldReleaseMargin(tileIndex: number): number {
+    const dur = this.tileDurations[tileIndex] || 0;
+    if (dur <= 0) return 0;
+    const bpmTimesSpeed = this.tileBPM[tileIndex] || 100;
+    const pitch = this.songPitch;
+    const marginScale = this.getTileMarginScale(tileIndex);
+    const bounds = getBoundariesInDeg(bpmTimesSpeed, pitch, marginScale, this.judgeConfig());
+    const countedSec = bounds.countedDeg / (3 * bpmTimesSpeed * pitch);
+    return Math.min(0.5, countedSec / dur);
+  }
+
+  /**
+   * 手动模式长按松手判定：
+   * - 松手时进度 < 1 − margin（提前太多）→ 失败（noFail 记 FailMiss 并矫正到落点砖）；
+   * - 否则把松手视为落点砖的判定（松手时机 = 落点砖命中时机）。
+   */
+  private handleHoldRelease(timeInLevel: number): void {
+    if (!this.manualMode || this._manualDead) return;
+    if (this._keysDown > 0) return; // 还有其它键按着
+    const x = this.currentTileIndex;
+    const n = this.levelData.tiles.length;
+    if (x < 0 || x >= n - 1) return;
+    if ((this.tileHoldLength[x] ?? -1) < 0) return; // 当前段不是长按
+    if (this.tileAuto[x]) return;                   // AutoPlayTiles 自动砖
+    if (this.isPreStartGraceActive()) return;
+
+    const dur = this.tileDurations[x] || 0;
+    if (dur <= 0) return;
+    const progress = (timeInLevel - (this.tileStartTimes[x] || 0)) / dur;
+    const releaseMargin = this.getHoldReleaseMargin(x);
+
+    if (progress < 1 - releaseMargin) {
+      // 提前松手
+      if (this.noFail) {
+        this.currentTileIndex = x + 1;
+        this._judgeLastCorrectedTile = x;
+        this._consecMisses = 0;
+        this.recordMargin(HitMargin.FailMiss);
+        this.showJudgment(x + 1, this.tiles.get(String(x + 1)) ?? null, HitMargin.FailMiss);
+        this.playHitForTile(x + 1);
+        this.onManualCorrect?.();
+      } else {
+        this.manualDie(HitMargin.TooEarly);
+      }
+      return;
+    }
+    // 落点窗口内松手 = 判定落点砖
+    this.judgeHoldRelease(x, timeInLevel);
+  }
+
+  /** 长按松手作为落点砖判定（与按键判定同一套 margin/统计/准度条）。 */
+  private judgeHoldRelease(x: number, timeInLevel: number): void {
+    const n = this.levelData.tiles.length;
+    if (x >= n - 1) return;
+    const perfectTime = (this.tileStartTimes[x] || 0) + (this.tileDurations[x] || 0);
+    const errorMs = (timeInLevel - perfectTime) * 1000;
+    const bpmTimesSpeed = this.tileBPM[x] || 100;
+    const pitch = this.songPitch;
+    const marginScale = this.getTileMarginScale(x);
+    const margin = getHitMarginFromErrorMs(errorMs, bpmTimesSpeed, pitch, marginScale, this.judgeConfig());
+    const landingTile = this.tiles.get(String(x + 1)) ?? null;
+    if (isValidHit(margin, this.judgeHitMarginLimit)) {
+      this.currentTileIndex = x + 1;
+      this._judgeLastCorrectedTile = -1;
+      this._consecMisses = 0;
+      this.recordMargin(margin);
+      this.showJudgment(x + 1, landingTile, margin);
+      this.playHitForTile(x + 1);
+      this.onManualHit?.();
+      this.hitErrorSamples.push(errorMs);
+      const errAngleDeg = (errorMs / 1000) * 3 * bpmTimesSpeed * pitch;
+      this.hitErrorMeter?.addHit(errAngleDeg, bpmTimesSpeed, pitch, marginScale, this.judgeConfig());
+    } else if (this.noFail) {
+      if (margin === HitMargin.TooLate) {
+        this.currentTileIndex = x + 1;
+        this._judgeLastCorrectedTile = -1;
+        this._consecMisses = 0;
+        this.recordMargin(HitMargin.FailMiss);
+        this.showJudgment(x + 1, landingTile, HitMargin.FailMiss);
+        this.playHitForTile(x + 1);
+        this.onManualCorrect?.();
+      } else {
+        this.recordMargin(margin);
+        this.showJudgment(x, this.tiles.get(String(x)) ?? null, margin);
+      }
+    } else {
+      this._consecMisses++;
+      this.recordMargin(margin);
+      this.showJudgment(x, this.tiles.get(String(x)) ?? null, margin);
+      if (this._consecMisses >= 8) {
+        this.manualDie(margin);
+      }
+    }
+  }
+
+  /**
+   * 长按中段必须保持按住：若中段发现按键已全部松开（含丢 up 事件的情况）→ 提前松手失败。
+   * 只作兜底；正常提前松手由 up 事件即时判定。
+   */
+  private checkHoldState(timeInLevel: number): void {
+    if (!this.manualMode || this._manualDead || this.noFail) return;
+    const x = this.currentTileIndex;
+    if (x < 0 || x >= this.levelData.tiles.length - 1) return;
+    if ((this.tileHoldLength[x] ?? -1) < 0) return;
+    if (this.tileAuto[x]) return;
+    if (this.isPreStartGraceActive()) return;
+    const dur = this.tileDurations[x] || 0;
+    if (dur <= 0) return;
+    const progress = (timeInLevel - (this.tileStartTimes[x] || 0)) / dur;
+    const releaseMargin = this.getHoldReleaseMargin(x);
+    if (progress > 0.02 && progress < 1 - releaseMargin && this._keysDown === 0) {
+      this.manualDie(HitMargin.TooEarly);
     }
   }
 
@@ -3591,6 +3721,7 @@ export class Player implements IPlayer {
       if (inGoPhase) {
         this.processAsyncInputs();
         this.checkManualTooLate(this.elapsedTime / 1000 - this.getTimeOrigin());
+        this.checkHoldState(this.elapsedTime / 1000 - this.getTimeOrigin());
       }
 
       if (done) {
@@ -3769,6 +3900,7 @@ export class Player implements IPlayer {
     if (this.manualMode) {
       this.processAsyncInputs();
       this.checkManualTooLate(t0);
+      this.checkHoldState(t0);
       // AutoPlayTiles: 手动模式下自动砖块无需按键，到达完美时刻即自动推进
       this.autoAdvanceAutoTiles(t0);
     }
@@ -4605,6 +4737,7 @@ export class Player implements IPlayer {
     this.isPaused = false;
     this._manualDead = false;
     this._consecMisses = 0;
+    this._keysDown = 0;
     this.deaths = 0;
     this.deselectTile();
     this.elapsedTime = 0;
