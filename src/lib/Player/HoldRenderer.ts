@@ -32,8 +32,9 @@ void main() {
   vec4 tex = texture2D(uMap, vUv);
   float filled = vUv.y <= uCompletion ? 1.0 : 0.0;
   vec3 base = tex.rgb;
-  vec3 col = base * mix(0.30, 1.0, filled);
-  col = mix(col, col * uColor, 0.55 * filled);
+  // 官方未填充部分也保持鲜艳彩虹（不压暗太多）；完成部分更亮、轻微带球色。
+  vec3 col = base * mix(0.55, 1.15, filled);
+  col = mix(col, col * uColor, 0.35 * filled);
   float a = tex.a * uOpacity;
   if (a <= 0.003) discard;
   gl_FragColor = vec4(col, a);
@@ -76,7 +77,7 @@ export class HoldRenderer {
         uMap: { value: texture },
         uCompletion: { value: 0 },
         uColor: { value: new Color(0xffffff) },
-        uOpacity: { value: 0.95 },
+        uOpacity: { value: 1.0 },
       },
       transparent: true,
       side: DoubleSide,
