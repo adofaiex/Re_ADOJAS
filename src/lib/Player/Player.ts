@@ -188,6 +188,8 @@ export class Player implements IPlayer {
   private hitErrorMeter: HitErrorMeter | null = null; // 准度条
   /** Hold 长按带：每块 Hold 砖一个 mesh（一次性构建，逐帧只改 uniform）。 */
   private holdRenderers: Map<number, HoldRenderer> = new Map();
+  /** Hold 带构建时起点砖的位置（用于跟随起点砖的运行时移动：MoveTrack 时整体平移）。 */
+  private holdStartBase: Map<number, { x: number; y: number }> = new Map();
   /** 设置项：是否显示准度条（创建时应用，运行中实时切换）。 */
   private showHitErrorMeter: boolean = true;
   /** 设置项：录制模式（隐藏判定统计等次要 HUD）。 */
@@ -1376,6 +1378,7 @@ export class Player implements IPlayer {
       );
       renderer.render(this.scene);
       this.holdRenderers.set(i, renderer);
+      this.holdStartBase.set(i, { x: px, y: py });
     }
   }
 
@@ -1392,6 +1395,17 @@ export class Player implements IPlayer {
       const planet = this.planetsById[moverId];
       if (planet) renderer.setColor(planet.color);
       renderer.setVisible(true);
+
+      // 官方把 hold 带挂在起点砖下：起点砖运行时移动（MoveTrack）→ 整条弧跟着平移，
+      // 画完定型、与 x−1/x+1 之后的位置变化无关。
+      const base = this.holdStartBase.get(floor);
+      if (base) {
+        let curX = this.tilePositions.getX(floor);
+        let curY = this.tilePositions.getY(floor);
+        const mt = this.moveTrackManager?.getTilePositionAtTime(floor, timeInLevel);
+        if (mt) { curX = mt.x; curY = mt.y; }
+        renderer.mesh.position.set(curX - base.x, curY - base.y, 0);
+      }
     }
   }
 
@@ -1401,6 +1415,7 @@ export class Player implements IPlayer {
       r.dispose();
     }
     this.holdRenderers.clear();
+    this.holdStartBase.clear();
   }
 
   /**
