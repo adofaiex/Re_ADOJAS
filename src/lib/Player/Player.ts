@@ -1492,7 +1492,8 @@ export class Player implements IPlayer {
 
       const px = this.tilePositions.getX(i);
       const py = this.tilePositions.getY(i);
-      const d = this.tileRadiusScale[i] ?? 1;
+      // 边长固定 1 个单位长度（= tileSize，不随 ScaleRadius 变化）
+      const d = 1;
       const dirSign = this.tileIsCW[i] ? -1 : 1;
       const inv = Math.PI * (newN - 2) / newN;
       const thetaC = (this.tileStartAngle[i] ?? 0) + dirSign * inv / 2;
@@ -1534,6 +1535,15 @@ export class Player implements IPlayer {
         ind.setOpacity(1);
         ind.setVisible(true);
       }
+    }
+  }
+
+  /** 退出播放等场景：复位虚线多边形（可见 + 清除淡出进度）。 */
+  private resetMultiPlanetIndicators(): void {
+    for (const ind of this.mpIndicators.values()) {
+      ind.fadeStart = null;
+      ind.setOpacity(1);
+      ind.setVisible(true);
     }
   }
 
@@ -3467,6 +3477,9 @@ export class Player implements IPlayer {
         this.syncVideo();
       }
 
+      // MultiPlanet 虚线多边形：预览/播放/暂停都要流动（淡出逻辑内部按播放状态判断）
+      this.updateMultiPlanetIndicators();
+
       {
         const tR = performance.now();
         this.renderPlayer(delta);
@@ -4609,6 +4622,8 @@ export class Player implements IPlayer {
     this.judgmentDisplay?.clear();
     this.hitErrorMeter?.clear();
     this.removePlanets();
+    // 退出播放：虚线多边形复位（避免停在淡出后的不可见状态）
+    this.resetMultiPlanetIndicators();
     
     if (this.music && (this.music as any).hasAudio ? this.music.hasAudio : false) {
       this.music.stop();
@@ -6284,8 +6299,6 @@ export class Player implements IPlayer {
     this.updateScalePlanets(timeInLevel);
     // Hold：更新长按带完成度/主色
     this.updateHoldRenderers(timeInLevel);
-    // MultiPlanet：虚线多边形流动/淡出
-    this.updateMultiPlanetIndicators();
     
     if (timeInLevel < 0) {
         // Countdown phase - handled by standard logic

@@ -64,28 +64,43 @@ export class MultiPlanetIndicator {
     this.mesh.renderOrder = 106; // 砖/长按带之上、行星之下
   }
 
-  /** 沿折线生成等宽带条；UV.y = 累计弧长（虚线相位）。 */
+  /** 沿折线生成等宽带条（miter 拐角，线宽一致）；UV.y = 累计弧长（虚线相位）。 */
   private buildGeometry(points: { x: number; y: number }[], z: number, width: number): BufferGeometry {
+    // points 为闭合环（末点 = 首点）：取不重复点集，按环取邻居
+    const n = points.length > 1 ? points.length - 1 : points.length;
     const half = width / 2;
+    const miterLimit = 2.5; // 尖角上限（半宽倍数），防止极端长刺
     const pos: number[] = [];
     const uv: number[] = [];
     const idx: number[] = [];
     let dist = 0;
-    for (let i = 0; i < points.length; i++) {
-      const p = points[i];
-      if (i > 0) dist += Math.hypot(p.x - points[i - 1].x, p.y - points[i - 1].y);
-      const prev = points[Math.max(0, i - 1)];
-      const next = points[Math.min(points.length - 1, i + 1)];
-      let tx = next.x - prev.x;
-      let ty = next.y - prev.y;
-      const tl = Math.hypot(tx, ty) || 1;
-      tx /= tl;
-      ty /= tl;
-      const nx = -ty;
-      const ny = tx;
-      pos.push(p.x - nx * half, p.y - ny * half, z);
+    for (let i = 0; i <= n; i++) {
+      const p = points[i % n];
+      const prev = points[(i - 1 + n) % n];
+      const next = points[(i + 1) % n];
+      // 进入/离开方向 → 左右法线 → miter 方向
+      let ix = p.x - prev.x, iy = p.y - prev.y;
+      let ox = next.x - p.x, oy = next.y - p.y;
+      const il = Math.hypot(ix, iy) || 1; ix /= il; iy /= il;
+      const ol = Math.hypot(ox, oy) || 1; ox /= ol; oy /= ol;
+      const nix = -iy, niy = ix;
+      const nox = -oy, noy = ox;
+      let mx = nix + nox, my = niy + noy;
+      const ml = Math.hypot(mx, my);
+      let miter = 1;
+      if (ml < 1e-6) {
+        mx = nix; my = niy; // 180° 反向：退化，直接用进入法线
+      } else {
+        mx /= ml; my /= ml;
+        const cosHalf = mx * nix + my * niy;
+        miter = Math.min(1 / Math.max(cosHalf, 1e-4), miterLimit);
+      }
+      if (i > 0) dist += Math.hypot(p.x - prev.x, p.y - prev.y);
+      const wx = mx * half * miter;
+      const wy = my * half * miter;
+      pos.push(p.x - wx, p.y - wy, z);
       uv.push(0, dist);
-      pos.push(p.x + nx * half, p.y + ny * half, z);
+      pos.push(p.x + wx, p.y + wy, z);
       uv.push(1, dist);
       if (i > 0) {
         const b = (i - 1) * 2;
