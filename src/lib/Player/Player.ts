@@ -219,6 +219,9 @@ export class Player implements IPlayer {
   private radiusOffsetY: Float64Array = new Float64Array(0);
   /** Hold：每砖 holdLength（-1 = 非 hold；>=0 = hold，值为额外圈数；官方 scnGame 1297） */
   private tileHoldLength: Int16Array = new Int16Array(0);
+  /** Hold：holdDistance（砖位偏移量，官方 scnGame 618）与 distanceMultiplier（%→比例）。 */
+  private tileHoldDistance: Float32Array = new Float32Array(0);
+  private tileHoldMult: Float32Array = new Float32Array(0);
   private hitErrorSamples: number[] = [];        // 手打有效命中的按键时机偏移（ms，正=晚/慢，负=早/快）
 
   // Camera settings
@@ -1208,6 +1211,8 @@ export class Player implements IPlayer {
   private buildHoldLengths(): void {
     const n = this.levelData.tiles?.length ?? 0;
     this.tileHoldLength = new Int16Array(n).fill(-1);
+    this.tileHoldDistance = new Float32Array(n);
+    this.tileHoldMult = new Float32Array(n).fill(1);
     const actions = this.levelData.actions;
     if (!actions) return;
     for (const a of actions) {
@@ -1216,6 +1221,9 @@ export class Player implements IPlayer {
       if (floor < 0 || floor >= n - 1) continue; // 需要有下一砖
       const duration = typeof a.duration === 'number' ? Math.trunc(a.duration) : -1;
       this.tileHoldLength[floor] = duration >= 0 ? duration : -1;
+      if (typeof a.distanceMultiplier === 'number') {
+        this.tileHoldMult[floor] = a.distanceMultiplier / 100;
+      }
     }
   }
 
@@ -1237,27 +1245,41 @@ export class Player implements IPlayer {
     for (let i = 1; i < n; i++) {
       if (this.tileRadiusScale[i] !== 1) { any = true; break; }
     }
-    if (!any) return;
 
-    let ox = 0;
-    let oy = 0;
-    for (let i = 1; i < n; i++) {
-      const r = this.tileRadiusScale[i] ?? 1;
-      if (r !== 1) {
-        // direction(entryangle)：指向上一砖；我们的角度约定 direction(θ) = (cos θ, sin θ)
-        const theta = this.tileStartAngle[i] ?? 0;
-        const off = 1 - r; // tileSize = 1
-        ox += Math.cos(theta) * off;
-        oy += Math.sin(theta) * off;
+    if (any) {
+      let ox = 0;
+      let oy = 0;
+      for (let i = 1; i < n; i++) {
+        const r = this.tileRadiusScale[i] ?? 1;
+        if (r !== 1) {
+          // direction(entryangle)：指向上一砖；我们的角度约定 direction(θ) = (cos θ, sin θ)
+          const theta = this.tileStartAngle[i] ?? 0;
+          const off = 1 - r; // tileSize = 1
+          ox += Math.cos(theta) * off;
+          oy += Math.sin(theta) * off;
+        }
+        this.radiusOffsetX[i] = ox;
+        this.radiusOffsetY[i] = oy;
       }
-      this.radiusOffsetX[i] = ox;
-      this.radiusOffsetY[i] = oy;
+      for (let i = 1; i < n; i++) {
+        this.tilePositions.set(
+          i,
+          this.tilePositions.getX(i) + this.radiusOffsetX[i],
+          this.tilePositions.getY(i) + this.radiusOffsetY[i],
+        );
+      }
     }
-    for (let i = 1; i < n; i++) {
+
+    // Hold 位置偏移（官方 scnGame 620/758-761）：Hold 砖 x 使砖 x+1 沿 exitangle 方向偏移
+    // holdDistance（只偏移下一砖；近零/整圈砖 holdDistance=0）。
+    for (let i = 1; i < n - 1; i++) {
+      const d = this.tileHoldDistance[i] ?? 0;
+      if (d === 0) continue;
+      const ex = (this.tileStartAngle[i] ?? 0) + (this.tileTotalAngle[i] ?? 0);
       this.tilePositions.set(
-        i,
-        this.tilePositions.getX(i) + this.radiusOffsetX[i],
-        this.tilePositions.getY(i) + this.radiusOffsetY[i],
+        i + 1,
+        this.tilePositions.getX(i + 1) + Math.cos(ex) * d,
+        this.tilePositions.getY(i + 1) + Math.sin(ex) * d,
       );
     }
   }
@@ -1611,7 +1633,7 @@ export class Player implements IPlayer {
       this.playHitForTile(tileIndex + 1);
       this.onManualHit?.();
       // 准度条：midspin 无限 margin → 0 误差
-      this.hitErrorMeter?.addHit(0, this.tileBPM[tileIndex] || 100, this.songPitch, this.getTileMarginScale(tileIndex), this.judgeConfig());
+      this.hitErrorMeter?.addHit(0, this.tileBPM[tileIndex] || 100, this.songPitch, this.getTileMarginScale(tileIndex + 1), this.judgeConfig());
       return;
     }
 
@@ -1684,7 +1706,7 @@ export class Player implements IPlayer {
 
       const bpmTimesSpeed = this.tileBPM[tileIndex] || 100;
       const pitch = this.songPitch;
-      const marginScale = this.getTileMarginScale(tileIndex);
+      const marginScale = this.getTileMarginScale(tileIndex + 1);
       const bounds = getBoundariesInDeg(bpmTimesSpeed, pitch, marginScale, this.judgeConfig());
       // 默认宽容 max(π, 2×Counted) 后才死；不死模式只过 Counted 即矫正
       const tooLateThreshold = this.noFail ? bounds.countedDeg : Math.max(Math.PI / 3 * 57.29578, bounds.countedDeg * 2);
@@ -2462,6 +2484,13 @@ export class Player implements IPlayer {
         // Hold：holdLength>0 → 扫角 += holdLength×2π（官方 CalculateSingleFloorAngleLength 757）。
         // 时长 = 扫角/π 拍，因此自动获得 +2×holdLength 拍（与官方 CalculateFloorEntryTimes 一致）。
         const holdLen = i > 0 ? (this.tileHoldLength[i] ?? -1) : -1;
+        if (holdLen >= 0 && i > 0) {
+          // 官方 scnGame 608-620：holdDistance = (duration×2+1) × distanceMultiplier/100；
+          // 近零/整圈砖（瞬时/turnaround）→ 0。applyRadiusScaleOffsets 用它偏移下一砖位置。
+          const TAU = 2 * Math.PI;
+          const nearZero = sweepAngle <= 1e-5 || Math.abs(sweepAngle - TAU) <= 1e-5;
+          this.tileHoldDistance[i] = nearZero ? 0 : (holdLen * 2 + 1) * (this.tileHoldMult[i] || 1);
+        }
         if (holdLen > 0) sweepAngle += holdLen * 2 * Math.PI;
 
         const dirSign = isCW ? -1 : 1;
@@ -4629,9 +4658,7 @@ export class Player implements IPlayer {
         const index = parseInt(id);
         const transform = this.positionTrackManager!.getTileTransform(index);
         if (transform) {
-          mesh.position.copy(transform.position);
-          mesh.position.x += this.radiusOffsetX[index] ?? 0;
-          mesh.position.y += this.radiusOffsetY[index] ?? 0;
+          mesh.position.set(this.tilePositions.getX(index), this.tilePositions.getY(index), transform.position.z);
           mesh.rotation.z = transform.rotation * (Math.PI / 180);
           mesh.scale.copy(transform.scale);
           
@@ -4699,9 +4726,7 @@ export class Player implements IPlayer {
       const transform = this.positionTrackManager!.getTileTransform(index);
       
       if (transform) {
-        mesh.position.copy(transform.position);
-        mesh.position.x += this.radiusOffsetX[index] ?? 0;
-        mesh.position.y += this.radiusOffsetY[index] ?? 0;
+        mesh.position.set(this.tilePositions.getX(index), this.tilePositions.getY(index), transform.position.z);
         mesh.rotation.z = transform.rotation * (Math.PI / 180);
         mesh.scale.copy(transform.scale);
         
@@ -5967,7 +5992,7 @@ export class Player implements IPlayer {
             const landedTile = this.tiles.get(String(this.currentTileIndex)) ?? null;
             this.showJudgment(this.currentTileIndex, landedTile, HitMargin.Auto);
             // 准度条：autoplay 0 误差（auto → AddHit(0)）
-            const ti = this.currentTileIndex - 1;
+            const ti = this.currentTileIndex;
             this.hitErrorMeter?.addHit(0, this.tileBPM[ti] || 100, this.songPitch, this.getTileMarginScale(ti), this.judgeConfig());
         }
     }
@@ -6405,7 +6430,7 @@ export class Player implements IPlayer {
       const landedTile = this.tiles.get(String(tileIndex + 1)) ?? null;
       this.showJudgment(tileIndex + 1, landedTile, HitMargin.Auto);
       this.playHitForTile(tileIndex + 1);
-      this.hitErrorMeter?.addHit(0, this.tileBPM[tileIndex] || 100, this.songPitch, this.getTileMarginScale(tileIndex), this.judgeConfig());
+      this.hitErrorMeter?.addHit(0, this.tileBPM[tileIndex] || 100, this.songPitch, this.getTileMarginScale(tileIndex + 1), this.judgeConfig());
     }
   }
 
