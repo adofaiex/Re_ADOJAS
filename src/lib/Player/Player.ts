@@ -1294,11 +1294,9 @@ export class Player implements IPlayer {
 
     // Hold 位置偏移（官方 scnGame 620/758-761）：Hold 砖 x 使砖 x+1 沿 exitangle 方向偏移
     // holdDistance（只偏移下一砖；近零/整圈砖 holdDistance=0）。
-    let anyOffset = any;
     for (let i = 1; i < n - 1; i++) {
       const d = this.tileHoldDistance[i] ?? 0;
       if (d === 0) continue;
-      anyOffset = true;
       const ex = (this.tileStartAngle[i] ?? 0) + (this.tileTotalAngle[i] ?? 0);
       this.tilePositions.set(
         i + 1,
@@ -1306,21 +1304,9 @@ export class Player implements IPlayer {
         this.tilePositions.getY(i + 1) + Math.sin(ex) * d,
       );
     }
-
-    // 偏移后重算砖间距离：长按把下一砖推远时，球的 endDist/startDist 必须跟上
-    // （等价官方 targetPosition = nextfloor.startPos − radiusScale·exitDir 的拉伸路径）。
-    if (anyOffset) {
-      for (let i = 0; i < n; i++) {
-        const px = this.tilePositions.getX(i);
-        const py = this.tilePositions.getY(i);
-        if (i > 0) {
-          this.tileStartDist[i] = Math.hypot(px - this.tilePositions.getX(i - 1), py - this.tilePositions.getY(i - 1));
-        }
-        if (i < n - 1) {
-          this.tileEndDist[i] = Math.hypot(this.tilePositions.getX(i + 1) - px, this.tilePositions.getY(i + 1) - py);
-        }
-      }
-    }
+    // 注意：这里**不重算** tileStartDist/tileEndDist。球的轨道半径恒为
+    // tileSize×radiusScale（官方 cosmeticRadius），绝不能跟随砖间实际距离，
+    // 否则 PositionTrack/Hold 造成的位移会把球半径"拉大"。
   }
 
   /**
@@ -6220,11 +6206,25 @@ export class Player implements IPlayer {
         }
         const currentAngle = startAngle + totalAngle * easedProgress + pauseOffset;
 
-        const clampedProgress = Math.max(0, Math.min(1, progress));
-        const currentDist = startDist + (endDist - startDist) * clampedProgress;
+        void startDist; void endDist;
+        // 轨道半径恒为 tileSize×radiusScale（官方 cosmeticRadius），**不跟随砖间实际距离**；
+        // Hold 段圆心从砖位平移到 tail − r·dir(exit)（与 HoldRenderer 同一几何，球贴合长按带）。
+        const orbitR = this.tileRadiusScale[tileIndex] ?? 1;
+        let layoutCX = pivotPos.x;
+        let layoutCY = pivotPos.y;
+        if ((this.tileHoldLength[tileIndex] ?? -1) >= 0) {
+            const tailX = this.tilePositions.getX(tileIndex + 1);
+            const tailY = this.tilePositions.getY(tileIndex + 1);
+            const exitDir = startAngle + totalAngle;
+            const endCX = tailX - Math.cos(exitDir) * orbitR;
+            const endCY = tailY - Math.sin(exitDir) * orbitR;
+            const hp = Math.max(0, Math.min(1, easedProgress));
+            layoutCX = pivotPos.x + (endCX - pivotPos.x) * hp;
+            layoutCY = pivotPos.y + (endCY - pivotPos.y) * hp;
+        }
 
         // 官方多行星布局；角进方向 s = isCW ? −1 : +1，偏移含 midspin 修正
-        this.applyMultiPlanetLayout(tileIndex, pivotPos.x, pivotPos.y, currentAngle, currentDist, this.tileIsCW[tileIndex] ? -1 : 1, this.getMultiPlanetAngleOffset(tileIndex));
+        this.applyMultiPlanetLayout(tileIndex, layoutCX, layoutCY, currentAngle, orbitR, this.tileIsCW[tileIndex] ? -1 : 1, this.getMultiPlanetAngleOffset(tileIndex));
         this.syncActivePlanets(tileIndex);
     }
     
