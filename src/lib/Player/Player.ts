@@ -691,9 +691,9 @@ export class Player implements IPlayer {
             mediumAmount: this.bloomEffect?.getMediumAmount?.() ?? null,
         };
     };
-    // Bloom 强度定标：__adojasBloomAmount(0.2) → 改官方 VideoBloom.MediumAmount（prefab 值读不到）。
-    // 官方合成 = 原图 + tint × mediumBloom × (0.5 × intensity/100 × MediumAmount)；
-    // 我们默认取组件默认 1，若比官方亮就是它偏大。
+    // Bloom 强度定标：__adojasBloomAmount(0.28) → 改 VideoBloom.MediumAmount。
+    // 合成 = 原图 + tint × mediumBloom × (0.5 × intensity/100 × MediumAmount)；
+    // 默认 MediumAmount = 0.28。
     (window as any).__adojasBloomAmount = (amount?: number) => {
         if (typeof amount === 'number' && Number.isFinite(amount)) this.bloomEffect?.setMediumAmount?.(amount);
         return this.bloomEffect?.getMediumAmount?.() ?? null;

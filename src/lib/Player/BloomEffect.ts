@@ -51,8 +51,8 @@ export class BloomEffect {
     private intensity: number = 0.5;
     /** 官方 Tint（sRGB 分量）。 */
     private bloomColor: Color = new Color(1, 1, 1);
-    /** 官方 VideoBloom.MediumAmount（prefab 值未知 → 可调，默认 1）。 */
-    private mediumAmount: number = 1;
+    /** 官方 VideoBloom.MediumAmount（定标值 0.28）。 */
+    private mediumAmount: number = 0.28;
     private quality: number = 1;
 
     private width: number = 1;
