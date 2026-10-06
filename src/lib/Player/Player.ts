@@ -208,6 +208,8 @@ export class Player implements IPlayer {
   private judgeDeadTiles: number = 0;           // 死亡次数（XAcc 权重）
   private deaths: number = 0;                   // 死亡次数（HUD 显示）
   private tileMarginScales: Float32Array = new Float32Array(0);       // 各砖块判定窗口倍率（ScaleMargin 事件）
+  private tileHideJudgment: Uint8Array = new Uint8Array(0);            // Hide 事件：隐藏判定文字（逐砖继承）
+  private tileHideIcon: Uint8Array = new Uint8Array(0);                // Hide 事件：隐藏砖块图标（逐砖继承）
   private hitErrorSamples: number[] = [];        // 手打有效命中的按键时机偏移（ms，正=晚/慢，负=早/快）
 
   // Camera settings
@@ -417,6 +419,8 @@ export class Player implements IPlayer {
 
     // 解析 ScaleMargin 事件：判定窗口倍率（floor.marginScale = scale/100，从事件 floor 起继承）
     this.buildTileMarginScales();
+    // 解析 Hide 事件：隐藏判定/图标（继承态；官方 scnGame 718-720）
+    this.buildHideFlags();
 
     // Initialize position track manager
     this.positionTrackManager = new PositionTrackManager(levelData);
@@ -1103,6 +1107,60 @@ export class Player implements IPlayer {
   }
 
   /**
+   * Hide 事件（官方 scnGame.cs 508/718/749）：两个继承态布尔量，
+   * `Hide` 事件读 `hideJudgment`（隐藏判定文字/失败标记）与 `hideTileIcon`（隐藏砖块图标），
+   * 从事件砖起一直继承到下一个 Hide 事件。
+   */
+  private buildHideFlags(): void {
+    const n = this.levelData.tiles?.length ?? 0;
+    this.tileHideJudgment = new Uint8Array(n);
+    this.tileHideIcon = new Uint8Array(n);
+    const actions = this.levelData.actions;
+    if (!actions || n === 0) return;
+
+    const events: { floor: number; hideJudgment: boolean; hideIcon: boolean }[] = [];
+    for (let i = 0; i < actions.length; i++) {
+      const a = actions[i];
+      if (a?.eventType === 'Hide' && isEventActive(a)) {
+        events.push({
+          floor: Math.max(0, Math.floor(a.floor ?? 0)),
+          hideJudgment: !!a.hideJudgment,
+          hideIcon: !!a.hideTileIcon,
+        });
+      }
+    }
+    if (events.length === 0) return;
+    events.sort((x, y) => x.floor - y.floor);
+
+    let hj = false;
+    let hi = false;
+    let idx = 0;
+    const apply = (i: number): void => {
+      if (hj) this.tileHideJudgment[i] = 1;
+      if (hi) this.tileHideIcon[i] = 1;
+    };
+    for (const ev of events) {
+      for (; idx < n && idx < ev.floor; idx++) apply(idx);
+      if (idx < n) {
+        hj = ev.hideJudgment;
+        hi = ev.hideIcon;
+        apply(idx);
+        idx++;
+      }
+    }
+    for (; idx < n; idx++) apply(idx);
+  }
+
+  /**
+   * 判定显示统一入口：hideJudgment 生效的砖跳过显示。
+   * 官方只隐藏判定文字与失败标记（marginTracker/准度条照常记录，见 scrPlanet 957-962）。
+   */
+  private showJudgment(floorIndex: number, tile: unknown, margin: HitMargin): void {
+    if (this.tileHideJudgment[floorIndex]) return;
+    this.judgmentDisplay?.show(tile as never, margin);
+  }
+
+  /**
    * SetPlanetRotation：解析每块砖的星球旋转缓速参数（planetEase*，逐砖继承）。
    * - ease：缓动曲线（Linear = 不缓速）
    * - easeParts：把该砖的旋转切成几段分别缓动
@@ -1293,7 +1351,7 @@ export class Player implements IPlayer {
     this.onManualFail?.();
     const tileIndex = this.currentTileIndex;
     const tile = (this.tiles.get(String(tileIndex)) ?? this.tiles.get(String(Math.max(tileIndex - 1, 0)))) ?? null;
-    this.judgmentDisplay?.show(tile, margin === HitMargin.TooEarly ? HitMargin.TooEarly : HitMargin.FailMiss);
+    this.showJudgment(this.currentTileIndex, tile, margin === HitMargin.TooEarly ? HitMargin.TooEarly : HitMargin.FailMiss);
     this.music.pause?.();
     if (this.music.hasAudio) {
       // 不 seek，保留位置便于回看
@@ -1385,8 +1443,8 @@ export class Player implements IPlayer {
       this.recordMargin(HitMargin.Perfect);
       this.recordMargin(HitMargin.Auto);
       // midspin 砖块本身展示 Perfect，后一个砖块展示 Auto（自动完美）
-      this.judgmentDisplay?.show(this.tiles.get(String(tileIndex)) ?? null, HitMargin.Perfect);
-      this.judgmentDisplay?.show(this.tiles.get(String(tileIndex + 1)) ?? null, HitMargin.Auto);
+      this.showJudgment(tileIndex, this.tiles.get(String(tileIndex)) ?? null, HitMargin.Perfect);
+      this.showJudgment(tileIndex + 1, this.tiles.get(String(tileIndex + 1)) ?? null, HitMargin.Auto);
       this.playHitForTile(tileIndex + 1);
       this.onManualHit?.();
       // 准度条：midspin 无限 margin → 0 误差
@@ -1408,7 +1466,7 @@ export class Player implements IPlayer {
       this._judgeLastCorrectedTile = -1;
       this._consecMisses = 0;
       this.recordMargin(margin);
-      this.judgmentDisplay?.show(landingTile, margin);
+      this.showJudgment(tileIndex + 1, landingTile, margin);
       this.playHitForTile(tileIndex + 1);
       this.onManualHit?.();
       // 记录按键时机偏移（正=晚/慢，负=早/快），用于死亡后估算最优音频延迟
@@ -1423,18 +1481,18 @@ export class Player implements IPlayer {
         this.currentTileIndex++;
         this._judgeLastCorrectedTile = -1;
         this.recordMargin(HitMargin.FailMiss);
-        this.judgmentDisplay?.show(landingTile, HitMargin.FailMiss);
+        this.showJudgment(tileIndex + 1, landingTile, HitMargin.FailMiss);
         this.playHitForTile(tileIndex + 1);
         this.onManualCorrect?.();
       } else {
         this.recordMargin(margin);
-        this.judgmentDisplay?.show(this.tiles.get(String(tileIndex)) ?? null, margin);
+        this.showJudgment(tileIndex, this.tiles.get(String(tileIndex)) ?? null, margin);
       }
     } else {
       // 太早太晚等无效命中：累积失误，达阈值即死
       this._consecMisses++;
       this.recordMargin(margin);
-      this.judgmentDisplay?.show(this.tiles.get(String(tileIndex)) ?? null, margin);
+      this.showJudgment(tileIndex, this.tiles.get(String(tileIndex)) ?? null, margin);
       if (this._consecMisses >= 8) {
         this.manualDie(margin);
       }
@@ -1481,13 +1539,13 @@ export class Player implements IPlayer {
           this._judgeLastCorrectedTile = tileIndex;
           this.recordMargin(HitMargin.FailMiss);
           this.recordMargin(HitMargin.Auto);
-          this.judgmentDisplay?.show(this.tiles.get(String(tileIndex + 1)) ?? null, HitMargin.FailMiss);
+          this.showJudgment(tileIndex + 1, this.tiles.get(String(tileIndex + 1)) ?? null, HitMargin.FailMiss);
           this.playHitForTile(tileIndex + 1);
         } else {
           this.currentTileIndex++;
           this._judgeLastCorrectedTile = tileIndex;
           this.recordMargin(HitMargin.FailMiss);
-          this.judgmentDisplay?.show(this.tiles.get(String(tileIndex + 1)) ?? null, HitMargin.FailMiss);
+          this.showJudgment(tileIndex + 1, this.tiles.get(String(tileIndex + 1)) ?? null, HitMargin.FailMiss);
           this.playHitForTile(tileIndex + 1);
         }
       } else {
@@ -5657,6 +5715,8 @@ export class Player implements IPlayer {
             iconTypeIdx = getIconTypeIndex(getSetSpeedTexture(ratio));
         }
     }
+    // Hide 事件：hideIcon → 该砖不显示图标（官方 SetIconScale(0)）
+    if (this.tileHideIcon[index]) iconTypeIdx = 0;
     tileMesh.userData.floorIconType = iconTypeIdx;
 
     // Compute floor icon angle for shader
@@ -5728,7 +5788,7 @@ export class Player implements IPlayer {
             this._lastAutoJudgedTile = this.currentTileIndex;
             this.recordMargin(HitMargin.Auto);
             const landedTile = this.tiles.get(String(this.currentTileIndex)) ?? null;
-            this.judgmentDisplay?.show(landedTile, HitMargin.Auto);
+            this.showJudgment(this.currentTileIndex, landedTile, HitMargin.Auto);
             // 准度条：autoplay 0 误差（auto → AddHit(0)）
             const ti = this.currentTileIndex - 1;
             this.hitErrorMeter?.addHit(0, this.tileBPM[ti] || 100, this.songPitch, this.getTileMarginScale(ti), this.judgeConfig());
@@ -6166,7 +6226,7 @@ export class Player implements IPlayer {
       this._consecMisses = 0;
       this.recordMargin(HitMargin.Auto);
       const landedTile = this.tiles.get(String(tileIndex + 1)) ?? null;
-      this.judgmentDisplay?.show(landedTile, HitMargin.Auto);
+      this.showJudgment(tileIndex + 1, landedTile, HitMargin.Auto);
       this.playHitForTile(tileIndex + 1);
       this.hitErrorMeter?.addHit(0, this.tileBPM[tileIndex] || 100, this.songPitch, this.getTileMarginScale(tileIndex), this.judgeConfig());
     }
