@@ -49,7 +49,8 @@ export class HoldRenderer {
   private centerY: number;
   private endCenterX: number;
   private endCenterY: number;
-  private radius: number;
+  private startRadius: number;
+  private endRadius: number;
   private startAngle: number;
   private totalAngle: number;
   private width: number;
@@ -57,7 +58,7 @@ export class HoldRenderer {
   constructor(
     centerX: number, centerY: number,
     endCenterX: number, endCenterY: number,
-    radius: number,
+    startRadius: number, endRadius: number,
     startAngle: number, totalAngle: number,
     width: number, texture: Texture,
   ) {
@@ -65,7 +66,8 @@ export class HoldRenderer {
     this.centerY = centerY;
     this.endCenterX = endCenterX;
     this.endCenterY = endCenterY;
-    this.radius = radius;
+    this.startRadius = startRadius;
+    this.endRadius = endRadius;
     this.startAngle = startAngle;
     this.totalAngle = totalAngle;
     this.width = width;
@@ -91,13 +93,14 @@ export class HoldRenderer {
     this.mesh.renderOrder = 105; // 砖之上、行星(110)之下
   }
 
-  /** 采样 t∈[0,1]：圆心线性平移，半径恒定，角度线性扫过（含整圈）。 */
+  /** 采样 t∈[0,1]：圆心线性平移，半径 startRadius→endRadius，角度线性扫过（含整圈）。 */
   private sample(t: number, out: { x: number; y: number }): void {
     const a = this.startAngle + this.totalAngle * t;
     const cx = this.centerX + (this.endCenterX - this.centerX) * t;
     const cy = this.centerY + (this.endCenterY - this.centerY) * t;
-    out.x = cx + Math.cos(a) * this.radius;
-    out.y = cy + Math.sin(a) * this.radius;
+    const r = this.startRadius + (this.endRadius - this.startRadius) * t;
+    out.x = cx + Math.cos(a) * r;
+    out.y = cy + Math.sin(a) * r;
   }
 
   private buildGeometry(): BufferGeometry {

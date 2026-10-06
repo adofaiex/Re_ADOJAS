@@ -1351,20 +1351,24 @@ export class Player implements IPlayer {
       if ((this.tileHoldLength[i] ?? -1) < 0) continue;
       if (!tex) tex = getHoldTexture();
       const radius = this.tileRadiusScale[i] ?? 1;
-      // 官方 targetPosition：圆心终点 = 下一砖位置 − r·exitDir（exitDir = 指向下一砖的方向）。
+      // 官方 UpdateMesh：_StartPosition = Hold 砖位置，_EndPosition = tail 砖位置 − rTail·dir(exitangle)；
+      // 方向必须用**基础 exit 角度**（entry + 总扫角，含圈数也 mod 2π 等价），不能用
+      // atan2(tail − hold)（那会把 PositionTrack 的偏移方向也算进去 → 落点跑偏）。
       const px = this.tilePositions.getX(i);
       const py = this.tilePositions.getY(i);
       const nx = this.tilePositions.getX(i + 1);
       const ny = this.tilePositions.getY(i + 1);
-      const exitAngle = Math.atan2(ny - py, nx - px);
+      const exitAngle = (this.tileStartAngle[i] ?? 0) + (this.tileTotalAngle[i] ?? 0);
+      const rTail = this.tileRadiusScale[i + 1] ?? radius;
       const renderer = new HoldRenderer(
         px, py,
-        nx - Math.cos(exitAngle) * radius,
-        ny - Math.sin(exitAngle) * radius,
+        nx - Math.cos(exitAngle) * rTail,
+        ny - Math.sin(exitAngle) * rTail,
         radius,
+        rTail,
         this.tileStartAngle[i] ?? 0,
         this.tileTotalAngle[i] ?? 0,
-        Math.max(0.3, 0.55 * radius),
+        Math.max(0.3, 0.55 * ((radius + rTail) / 2)),
         tex,
       );
       renderer.render(this.scene);
