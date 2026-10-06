@@ -217,6 +217,8 @@ export class Player implements IPlayer {
   private tileRadiusScale: Float32Array = new Float32Array(0);
   private radiusOffsetX: Float64Array = new Float64Array(0);
   private radiusOffsetY: Float64Array = new Float64Array(0);
+  /** Hold：每砖 holdLength（-1 = 非 hold；>=0 = hold，值为额外圈数；官方 scnGame 1297） */
+  private tileHoldLength: Int16Array = new Int16Array(0);
   private hitErrorSamples: number[] = [];        // 手打有效命中的按键时机偏移（ms，正=晚/慢，负=早/快）
 
   // Camera settings
@@ -430,6 +432,8 @@ export class Player implements IPlayer {
     this.buildHideFlags();
     // 解析 ScaleRadius 事件：轨道半径比例（继承态；官方 scnGame 1294/1380）
     this.buildTileRadiusScales();
+    // 解析 Hold 事件：每砖 holdLength（官方 scnGame 1297）
+    this.buildHoldLengths();
 
     // Initialize position track manager
     this.positionTrackManager = new PositionTrackManager(levelData);
@@ -1195,6 +1199,24 @@ export class Player implements IPlayer {
       }
     }
     for (; idx < n; idx++) this.tileRadiusScale[idx] = cur;
+  }
+
+  /**
+   * Hold 事件（官方 scnGame 1297）：`holdLength = (有下一砖 && duration >= 0) ? duration : -1`。
+   * 逐砖独立（无继承）；无事件的砖为 -1。
+   */
+  private buildHoldLengths(): void {
+    const n = this.levelData.tiles?.length ?? 0;
+    this.tileHoldLength = new Int16Array(n).fill(-1);
+    const actions = this.levelData.actions;
+    if (!actions) return;
+    for (const a of actions) {
+      if (a?.eventType !== 'Hold') continue;
+      const floor = Math.max(0, Math.floor(a.floor ?? 0));
+      if (floor < 0 || floor >= n - 1) continue; // 需要有下一砖
+      const duration = typeof a.duration === 'number' ? Math.trunc(a.duration) : -1;
+      this.tileHoldLength[floor] = duration >= 0 ? duration : -1;
+    }
   }
 
   /**
@@ -2437,6 +2459,11 @@ export class Player implements IPlayer {
 
         // angleLength 同时决定实际运动：视觉扫角也用 sweepAngle。
         // 砖角 < inverse(N) 时扫角回绕成大圈（如 N=3、50° → 350°），= inverse(N) 时整圈。
+        // Hold：holdLength>0 → 扫角 += holdLength×2π（官方 CalculateSingleFloorAngleLength 757）。
+        // 时长 = 扫角/π 拍，因此自动获得 +2×holdLength 拍（与官方 CalculateFloorEntryTimes 一致）。
+        const holdLen = i > 0 ? (this.tileHoldLength[i] ?? -1) : -1;
+        if (holdLen > 0) sweepAngle += holdLen * 2 * Math.PI;
+
         const dirSign = isCW ? -1 : 1;
         totalAngle = dirSign * (sweepAngle + extraRotation * 2 * Math.PI);
 
