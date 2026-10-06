@@ -1299,17 +1299,26 @@ export class Player implements IPlayer {
       }
     }
 
-    // Hold 位置偏移（官方 scnGame 620/758-761）：Hold 砖 x 使砖 x+1 沿 exitangle 方向偏移
-    // holdDistance（只偏移下一砖；近零/整圈砖 holdDistance=0）。
-    for (let i = 1; i < n - 1; i++) {
-      const d = this.tileHoldDistance[i] ?? 0;
-      if (d === 0) continue;
-      const ex = (this.tileStartAngle[i] ?? 0) + (this.tileTotalAngle[i] ?? 0);
-      this.tilePositions.set(
-        i + 1,
-        this.tilePositions.getX(i + 1) + Math.cos(ex) * d,
-        this.tilePositions.getY(i + 1) + Math.sin(ex) * d,
-      );
+    // Hold 位置偏移（官方 scnGame 620/758-761）：Hold 砖 x 使砖 x+1 **及其后所有砖**
+    // 沿 exitangle 方向偏移 holdDistance —— 官方把它累加进 val（val += val3），
+    // 每砖结尾 val2 = val 继续向后传递：x+1 被推远后整条后续轨道必须一起平移，
+    // 否则轨道会在 x+2 处断开/错位（近零/整圈砖 holdDistance=0，不产生偏移）。
+    let hx = 0;
+    let hy = 0;
+    for (let i = 1; i < n; i++) {
+      const d = this.tileHoldDistance[i - 1] ?? 0;
+      if (d !== 0) {
+        const ex = (this.tileStartAngle[i - 1] ?? 0) + (this.tileTotalAngle[i - 1] ?? 0);
+        hx += Math.cos(ex) * d;
+        hy += Math.sin(ex) * d;
+      }
+      if (hx !== 0 || hy !== 0) {
+        this.tilePositions.set(
+          i,
+          this.tilePositions.getX(i) + hx,
+          this.tilePositions.getY(i) + hy,
+        );
+      }
     }
     // 注意：这里**不重算** tileStartDist/tileEndDist。球的轨道半径恒为
     // tileSize×radiusScale（官方 cosmeticRadius），绝不能跟随砖间实际距离，
@@ -5412,9 +5421,28 @@ export class Player implements IPlayer {
       }
 
       const ca = startAngle + this.tileTotalAngle[tileIndex] * easedProgress + pauseOffset;
-      const cd = startDist + (endDist - startDist) * clampedProgress;
-      mx = px + Math.cos(ca) * cd;
-      my = py + Math.sin(ca) * cd;
+      // 与实况 updatePlanetsPosition 同一套几何：半径 = tileSize×radiusScale（段内插值），
+      // Hold 段圆心向 tail − rTail·dir(exit) 平移（球沿长按带走）。不使用砖间实际距离。
+      const r0 = this.tileRadiusScale[tileIndex] ?? 1;
+      const rTail = this.tileRadiusScale[tileIndex + 1] ?? r0;
+      const hp = Math.max(0, Math.min(1, easedProgress));
+      const orbitR = r0 + (rTail - r0) * hp;
+      let mcx = px;
+      let mcy = py;
+      if ((this.tileHoldLength[tileIndex] ?? -1) >= 0) {
+        const tail = tileIndex + 1 < n ? tilePosAt(tileIndex + 1, timeInLevel) : { x: px, y: py };
+        const exitDir = startAngle + this.tileTotalAngle[tileIndex];
+        const endCX = tail.x - Math.cos(exitDir) * rTail;
+        const endCY = tail.y - Math.sin(exitDir) * rTail;
+        mcx = px + (endCX - px) * hp;
+        mcy = py + (endCY - py) * hp;
+      }
+      void clampedProgress; void startDist; void endDist;
+      // Hold 段枢轴（chosen）也随圆心滑动（官方 holdOffsetPos 同样作用于枢轴球）
+      px = mcx;
+      py = mcy;
+      mx = mcx + Math.cos(ca) * orbitR;
+      my = mcy + Math.sin(ca) * orbitR;
     }
 
     // 角色按该砖实际的行星列表分配（MultiPlanet 之后场上可能不是红蓝；
@@ -6231,17 +6259,20 @@ export class Player implements IPlayer {
 
         void startDist; void endDist;
         // 轨道半径恒为 tileSize×radiusScale（官方 cosmeticRadius），**不跟随砖间实际距离**；
-        // Hold 段圆心从砖位平移到 tail − r·dir(exit)（与 HoldRenderer 同一几何，球贴合长按带）。
-        const orbitR = this.tileRadiusScale[tileIndex] ?? 1;
+        // 段内按官方 Mathf.Lerp(radiusScale[i], radiusScale[i+1], easedPerc) 插值。
+        // Hold 段圆心从砖位平移到 tail − rTail·dir(exit)（与 HoldRenderer 同一几何，球贴合长按带）。
+        const r0 = this.tileRadiusScale[tileIndex] ?? 1;
+        const rTail = this.tileRadiusScale[tileIndex + 1] ?? r0;
+        const hp = Math.max(0, Math.min(1, easedProgress));
+        const orbitR = r0 + (rTail - r0) * hp;
         let layoutCX = pivotPos.x;
         let layoutCY = pivotPos.y;
         if ((this.tileHoldLength[tileIndex] ?? -1) >= 0) {
             const tailX = this.tilePositions.getX(tileIndex + 1);
             const tailY = this.tilePositions.getY(tileIndex + 1);
             const exitDir = startAngle + totalAngle;
-            const endCX = tailX - Math.cos(exitDir) * orbitR;
-            const endCY = tailY - Math.sin(exitDir) * orbitR;
-            const hp = Math.max(0, Math.min(1, easedProgress));
+            const endCX = tailX - Math.cos(exitDir) * rTail;
+            const endCY = tailY - Math.sin(exitDir) * rTail;
             layoutCX = pivotPos.x + (endCX - pivotPos.x) * hp;
             layoutCY = pivotPos.y + (endCY - pivotPos.y) * hp;
         }
