@@ -2062,6 +2062,19 @@ export class Player implements IPlayer {
       const musicPos = timeInLevel;
       if (musicPos <= perfectTime) return;
 
+      // 连续长按链：仍按住时跨过中间的长按砖（松手在链尾统一判定，链中不杀）
+      if (this._keysDown > 0 &&
+          (this.tileHoldLength[tileIndex] ?? -1) >= 0 &&
+          (this.tileHoldLength[tileIndex + 1] ?? -1) >= 0) {
+        this.currentTileIndex++;
+        this._judgeLastCorrectedTile = -1;
+        this._consecMisses = 0;
+        this.recordMargin(HitMargin.Perfect);
+        this.showJudgment(tileIndex + 1, this.tiles.get(String(tileIndex + 1)) ?? null, HitMargin.Perfect);
+        this.playHitForTile(tileIndex + 1);
+        continue;
+      }
+
       const bpmTimesSpeed = this.tileBPM[tileIndex] || 100;
       const pitch = this.songPitch;
       const marginScale = this.getTileMarginScale(tileIndex + 1);
