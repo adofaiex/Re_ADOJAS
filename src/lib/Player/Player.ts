@@ -1351,10 +1351,17 @@ export class Player implements IPlayer {
       if ((this.tileHoldLength[i] ?? -1) < 0) continue;
       if (!tex) tex = getHoldTexture();
       const radius = this.tileRadiusScale[i] ?? 1;
+      // 官方 targetPosition：圆心终点 = 下一砖位置 − r·exitDir（exitDir = 指向下一砖的方向）。
+      const px = this.tilePositions.getX(i);
+      const py = this.tilePositions.getY(i);
+      const nx = this.tilePositions.getX(i + 1);
+      const ny = this.tilePositions.getY(i + 1);
+      const exitAngle = Math.atan2(ny - py, nx - px);
       const renderer = new HoldRenderer(
-        this.tilePositions.getX(i), this.tilePositions.getY(i),
-        this.tileStartDist[i] ?? radius,
-        this.tileEndDist[i] ?? radius,
+        px, py,
+        nx - Math.cos(exitAngle) * radius,
+        ny - Math.sin(exitAngle) * radius,
+        radius,
         this.tileStartAngle[i] ?? 0,
         this.tileTotalAngle[i] ?? 0,
         Math.max(0.3, 0.55 * radius),

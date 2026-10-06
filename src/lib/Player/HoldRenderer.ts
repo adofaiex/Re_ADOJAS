@@ -4,10 +4,12 @@ import {
 } from 'three';
 
 /**
- * Hold 长按带（v2：真实轨迹）。
- * 官方带子 = 长按期间球的轨迹：从 entry（指向上一砖，半径 startDist）扫完整段扫角
- * （含 holdLength 圈），半径沿途插值到 exit（指向被 holdDistance 推远的下一砖，半径 endDist），
- * 因此是"螺旋 ribbon"而不是固定圆。
+ * Hold 长按带（v3：官方几何）。
+ * 官方带子 = 长按期间球的真实轨迹：球以**恒定半径 r**（tileSize×radiusScale）绕一个
+ * **平移的圆心**旋转——圆心从 Hold 砖位置线性漂移到 `下一砖位置 − r·exitDir`
+ * （即 targetPosition = nextfloor.startPos − tileSize·radiusScale·ClockwiseAngleToVector(exitangle)），
+ * 同时球的角度从 entry 扫完整个扫角（含 holdLength 整圈）。结果是一串等大的环
+ * 沿路径平移（弹簧/次摆线），而不是固定圆心的渐大螺旋。
  *  - 每块 Hold 砖一次性建 mesh；进度只改 uniform uCompletion（不做官方式全量重画）。
  *  - UV.x 带宽方向（贴图中央白线 = 路径核心线），UV.y 沿路径（彩虹）。
  */
@@ -44,22 +46,25 @@ export class HoldRenderer {
   private material: ShaderMaterial;
   private centerX: number;
   private centerY: number;
-  private startDist: number;
-  private endDist: number;
+  private endCenterX: number;
+  private endCenterY: number;
+  private radius: number;
   private startAngle: number;
   private totalAngle: number;
   private width: number;
 
   constructor(
     centerX: number, centerY: number,
-    startDist: number, endDist: number,
+    endCenterX: number, endCenterY: number,
+    radius: number,
     startAngle: number, totalAngle: number,
     width: number, texture: Texture,
   ) {
     this.centerX = centerX;
     this.centerY = centerY;
-    this.startDist = startDist;
-    this.endDist = endDist;
+    this.endCenterX = endCenterX;
+    this.endCenterY = endCenterY;
+    this.radius = radius;
     this.startAngle = startAngle;
     this.totalAngle = totalAngle;
     this.width = width;
@@ -85,12 +90,13 @@ export class HoldRenderer {
     this.mesh.renderOrder = 105; // 砖之上、行星(110)之下
   }
 
-  /** 采样 t∈[0,1] 处轨迹点：角度线性扫过，半径 startDist→endDist 线性插值。 */
+  /** 采样 t∈[0,1]：圆心线性平移，半径恒定，角度线性扫过（含整圈）。 */
   private sample(t: number, out: { x: number; y: number }): void {
     const a = this.startAngle + this.totalAngle * t;
-    const r = this.startDist + (this.endDist - this.startDist) * t;
-    out.x = this.centerX + Math.cos(a) * r;
-    out.y = this.centerY + Math.sin(a) * r;
+    const cx = this.centerX + (this.endCenterX - this.centerX) * t;
+    const cy = this.centerY + (this.endCenterY - this.centerY) * t;
+    out.x = cx + Math.cos(a) * this.radius;
+    out.y = cy + Math.sin(a) * this.radius;
   }
 
   private buildGeometry(): BufferGeometry {
