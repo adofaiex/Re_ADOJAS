@@ -222,6 +222,8 @@ export class Player implements IPlayer {
   private tileRadiusScale: Float32Array = new Float32Array(0);
   private radiusOffsetX: Float64Array = new Float64Array(0);
   private radiusOffsetY: Float64Array = new Float64Array(0);
+  /** 砖位偏移（ScaleRadius/Hold）是否已叠加；防止同一次 copyTo 之后重复叠加。 */
+  private _tileOffsetsApplied: boolean = false;
   /** Hold：每砖 holdLength（-1 = 非 hold；>=0 = hold，值为额外圈数；官方 scnGame 1297） */
   private tileHoldLength: Int16Array = new Int16Array(0);
   /** Hold：holdDistance（砖位偏移量，官方 scnGame 618）与 distanceMultiplier（%→比例）。 */
@@ -549,6 +551,7 @@ export class Player implements IPlayer {
     // 紧凑版：结果在 typed array 里，原地写回 tile.position，避免 100 万级 Map/Vector。
     this.positionTrackManager.computeTransforms(this.isEditorMode);
     this.positionTrackManager.copyTo(this.tilePositions);
+    this._tileOffsetsApplied = false;
     if (!isCompactTiles(this.levelData.tiles)) {
       this.positionTrackManager.applyPositionsToTiles(this.levelData.tiles);
     }
@@ -1261,6 +1264,8 @@ export class Player implements IPlayer {
    * 每次 positionTrackManager.copyTo(tilePositions) 之后也要重新调用。
    */
   private applyRadiusScaleOffsets(): void {
+    // 幂等：同一次 copyTo 之后只允许叠加一次（长按偏移被重复叠加会与 PositionTrack 冲突）
+    if (this._tileOffsetsApplied) return;
     const n = tileCountOf(this.levelData.tiles);
     this.radiusOffsetX = new Float64Array(n);
     this.radiusOffsetY = new Float64Array(n);
@@ -1309,6 +1314,7 @@ export class Player implements IPlayer {
     // 注意：这里**不重算** tileStartDist/tileEndDist。球的轨道半径恒为
     // tileSize×radiusScale（官方 cosmeticRadius），绝不能跟随砖间实际距离，
     // 否则 PositionTrack/Hold 造成的位移会把球半径"拉大"。
+    this._tileOffsetsApplied = true;
   }
 
   /**
@@ -4752,6 +4758,7 @@ export class Player implements IPlayer {
     if (this.positionTrackManager) {
       this.positionTrackManager.computeTransforms(this.isEditorMode);
       this.positionTrackManager.copyTo(this.tilePositions);
+    this._tileOffsetsApplied = false;
       this.applyRadiusScaleOffsets();
       this.tiles.forEach((mesh, id) => {
         const index = parseInt(id);
@@ -4818,6 +4825,7 @@ export class Player implements IPlayer {
     // Recompute compact transforms, then apply to cached tiles on demand.
     this.positionTrackManager.computeTransforms(this.isEditorMode);
     this.positionTrackManager.copyTo(this.tilePositions);
+    this._tileOffsetsApplied = false;
     this.applyRadiusScaleOffsets();
     
     this.tiles.forEach((mesh, id) => {
