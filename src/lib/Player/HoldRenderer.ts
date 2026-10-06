@@ -4,12 +4,12 @@ import {
 } from 'three';
 
 /**
- * Hold 长按带（v1）：
- *  - 每块 Hold 砖只建 **一个** ribbon mesh（沿枢轴圆周的条带，半径 = tileSize×radiusScale，
- *    角度从 entry 扫到 entry+总扫角），UV.x = 带宽方向（贴图中央白线 = 路径核心线），
- *    UV.y = 沿路径（彩虹贴图沿长度）。
- *  - 未完成/已完成通过 uniform `uCompletion` 分离，逐帧只改 uniform，不重建几何
- *    （官方 drawHold 重开全谱重画的做法这里刻意避开）。
+ * Hold 长按带（v2：真实轨迹）。
+ * 官方带子 = 长按期间球的轨迹：从 entry（指向上一砖，半径 startDist）扫完整段扫角
+ * （含 holdLength 圈），半径沿途插值到 exit（指向被 holdDistance 推远的下一砖，半径 endDist），
+ * 因此是"螺旋 ribbon"而不是固定圆。
+ *  - 每块 Hold 砖一次性建 mesh；进度只改 uniform uCompletion（不做官方式全量重画）。
+ *  - UV.x 带宽方向（贴图中央白线 = 路径核心线），UV.y 沿路径（彩虹）。
  */
 
 const VERT = `
@@ -30,7 +30,6 @@ void main() {
   vec4 tex = texture2D(uMap, vUv);
   float filled = vUv.y <= uCompletion ? 1.0 : 0.0;
   vec3 base = tex.rgb;
-  // 未完成部分压暗；完成部分用球色轻微染色（白线保持白）
   vec3 col = base * mix(0.30, 1.0, filled);
   col = mix(col, col * uColor, 0.55 * filled);
   float a = tex.a * uOpacity;
@@ -45,19 +44,22 @@ export class HoldRenderer {
   private material: ShaderMaterial;
   private centerX: number;
   private centerY: number;
-  private radius: number;
+  private startDist: number;
+  private endDist: number;
   private startAngle: number;
   private totalAngle: number;
   private width: number;
 
   constructor(
     centerX: number, centerY: number,
-    radius: number, startAngle: number, totalAngle: number,
+    startDist: number, endDist: number,
+    startAngle: number, totalAngle: number,
     width: number, texture: Texture,
   ) {
     this.centerX = centerX;
     this.centerY = centerY;
-    this.radius = radius;
+    this.startDist = startDist;
+    this.endDist = endDist;
     this.startAngle = startAngle;
     this.totalAngle = totalAngle;
     this.width = width;
@@ -83,29 +85,40 @@ export class HoldRenderer {
     this.mesh.renderOrder = 105; // 砖之上、行星(110)之下
   }
 
+  /** 采样 t∈[0,1] 处轨迹点：角度线性扫过，半径 startDist→endDist 线性插值。 */
+  private sample(t: number, out: { x: number; y: number }): void {
+    const a = this.startAngle + this.totalAngle * t;
+    const r = this.startDist + (this.endDist - this.startDist) * t;
+    out.x = this.centerX + Math.cos(a) * r;
+    out.y = this.centerY + Math.sin(a) * r;
+  }
+
   private buildGeometry(): BufferGeometry {
     const absTotal = Math.abs(this.totalAngle);
-    const segs = Math.max(8, Math.min(256, Math.ceil(absTotal / 0.12)));
-    const dir = this.totalAngle >= 0 ? 1 : -1;
+    const segs = Math.max(24, Math.min(512, Math.ceil(absTotal / 0.08)));
     const half = this.width / 2;
     const pos: number[] = [];
     const uv: number[] = [];
     const idx: number[] = [];
-    const cx = this.centerX;
-    const cy = this.centerY;
-    const r = this.radius;
+    const p0 = { x: 0, y: 0 };
+    const pA = { x: 0, y: 0 };
+    const pB = { x: 0, y: 0 };
 
     for (let s = 0; s <= segs; s++) {
       const t = s / segs;
-      const a = this.startAngle + this.totalAngle * t;
-      const nx = Math.cos(a);
-      const ny = Math.sin(a);
-      const px = cx + nx * r;
-      const py = cy + ny * r;
-      // 内外两条边（带宽方向 = 半径方向）
-      pos.push(px - nx * half, py - ny * half, 0.5);
+      this.sample(t, p0);
+      this.sample(Math.max(0, t - 1 / 512), pA);
+      this.sample(Math.min(1, t + 1 / 512), pB);
+      let tx = pB.x - pA.x;
+      let ty = pB.y - pA.y;
+      const tl = Math.hypot(tx, ty) || 1;
+      tx /= tl;
+      ty /= tl;
+      const nx = -ty;
+      const ny = tx;
+      pos.push(p0.x - nx * half, p0.y - ny * half, 0.5);
       uv.push(0, t);
-      pos.push(px + nx * half, py + ny * half, 0.5);
+      pos.push(p0.x + nx * half, p0.y + ny * half, 0.5);
       uv.push(1, t);
       if (s > 0) {
         const b = (s - 1) * 2;
@@ -118,7 +131,6 @@ export class HoldRenderer {
     geo.setAttribute('uv', new BufferAttribute(new Float32Array(uv), 2));
     geo.setIndex(idx);
     geo.computeBoundingSphere();
-    void dir;
     return geo;
   }
 

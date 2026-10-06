@@ -1277,15 +1277,32 @@ export class Player implements IPlayer {
 
     // Hold 位置偏移（官方 scnGame 620/758-761）：Hold 砖 x 使砖 x+1 沿 exitangle 方向偏移
     // holdDistance（只偏移下一砖；近零/整圈砖 holdDistance=0）。
+    let anyOffset = any;
     for (let i = 1; i < n - 1; i++) {
       const d = this.tileHoldDistance[i] ?? 0;
       if (d === 0) continue;
+      anyOffset = true;
       const ex = (this.tileStartAngle[i] ?? 0) + (this.tileTotalAngle[i] ?? 0);
       this.tilePositions.set(
         i + 1,
         this.tilePositions.getX(i + 1) + Math.cos(ex) * d,
         this.tilePositions.getY(i + 1) + Math.sin(ex) * d,
       );
+    }
+
+    // 偏移后重算砖间距离：长按把下一砖推远时，球的 endDist/startDist 必须跟上
+    // （等价官方 targetPosition = nextfloor.startPos − radiusScale·exitDir 的拉伸路径）。
+    if (anyOffset) {
+      for (let i = 0; i < n; i++) {
+        const px = this.tilePositions.getX(i);
+        const py = this.tilePositions.getY(i);
+        if (i > 0) {
+          this.tileStartDist[i] = Math.hypot(px - this.tilePositions.getX(i - 1), py - this.tilePositions.getY(i - 1));
+        }
+        if (i < n - 1) {
+          this.tileEndDist[i] = Math.hypot(this.tilePositions.getX(i + 1) - px, this.tilePositions.getY(i + 1) - py);
+        }
+      }
     }
   }
 
@@ -1336,10 +1353,11 @@ export class Player implements IPlayer {
       const radius = this.tileRadiusScale[i] ?? 1;
       const renderer = new HoldRenderer(
         this.tilePositions.getX(i), this.tilePositions.getY(i),
-        radius,
+        this.tileStartDist[i] ?? radius,
+        this.tileEndDist[i] ?? radius,
         this.tileStartAngle[i] ?? 0,
         this.tileTotalAngle[i] ?? 0,
-        Math.max(0.22, 0.32 * radius),
+        Math.max(0.3, 0.55 * radius),
         tex,
       );
       renderer.render(this.scene);
