@@ -730,7 +730,24 @@ export class Player implements IPlayer {
         y: Math.round(planet.position.y * 100) / 100,
       };
     });
-    // Twirl 探针：__adojasTwirl(from, to) → 区间内 twirlAt 换向数 vs 紧凑存储差分换向数 + 末尾方向状态。
+    // Hold 探针：__adojasHold() → 每个 Hold 砖的长度/偏移/角度/端点（对照官方 _EntryAngle/_AngleLength/_EndPosition）
+    (window as any).__adojasHold = () => {
+      const out: any[] = [];
+      for (const [floor] of this.holdRenderers) {
+        out.push({
+          floor,
+          holdLength: this.tileHoldLength[floor],
+          holdDistance: +(this.tileHoldDistance[floor] ?? 0).toFixed(4),
+          radiusStart: this.tileRadiusScale[floor],
+          radiusTail: this.tileRadiusScale[floor + 1],
+          entry: +(this.tileStartAngle[floor] ?? 0).toFixed(4),
+          total: +(this.tileTotalAngle[floor] ?? 0).toFixed(4),
+          start: [+this.tilePositions.getX(floor).toFixed(3), +this.tilePositions.getY(floor).toFixed(3)],
+          tail: [+this.tilePositions.getX(floor + 1).toFixed(3), +this.tilePositions.getY(floor + 1).toFixed(3)],
+        });
+      }
+      return out;
+    };
     // 若 flips === storeFlips（且尾部状态在变），说明 Player 已拿到全部旋转数据，问题只可能在渲染/观感。
     (window as any).__adojasTwirl = (from: number = 0, to: number = 20) => {
       const n = this.twirlAt.length;
