@@ -213,6 +213,10 @@ export class Player implements IPlayer {
   /** ScalePlanets：每个行星当前缩放（应用于 Planet.setRadius，拖尾随之缩放）。 */
   private planetScaleApplied: number[] = new Array(8).fill(1);
   private scalePlanetEvents: { start: number; duration: number; target: number; ids: number[]; ease: string }[] = [];
+  /** ScaleRadius：每砖轨道半径比例（继承，默认 1）+ 叠加到砖位的累积偏移。 */
+  private tileRadiusScale: Float32Array = new Float32Array(0);
+  private radiusOffsetX: Float64Array = new Float64Array(0);
+  private radiusOffsetY: Float64Array = new Float64Array(0);
   private hitErrorSamples: number[] = [];        // 手打有效命中的按键时机偏移（ms，正=晚/慢，负=早/快）
 
   // Camera settings
@@ -424,6 +428,8 @@ export class Player implements IPlayer {
     this.buildTileMarginScales();
     // 解析 Hide 事件：隐藏判定/图标（继承态；官方 scnGame 718-720）
     this.buildHideFlags();
+    // 解析 ScaleRadius 事件：轨道半径比例（继承态；官方 scnGame 1294/1380）
+    this.buildTileRadiusScales();
 
     // Initialize position track manager
     this.positionTrackManager = new PositionTrackManager(levelData);
@@ -552,6 +558,8 @@ export class Player implements IPlayer {
     this.calculateCumulativeRotations();
     // ScalePlanets（时间轴）：预计算事件列表（需要 tileStartTimes / tileBPM）
     this.buildScalePlanetEvents();
+    // ScaleRadius：把累积偏移叠加到砖位（需要 entryangle = tileStartAngle）
+    this.applyRadiusScaleOffsets();
 
     // 基础值访问器：位置直接引用 PositionTrackManager 的 typed array；
     // 旋转/缩放/透明度按需读取 —— 不再按砖构造 Vector2[] base 数组。
@@ -1154,6 +1162,82 @@ export class Player implements IPlayer {
       }
     }
     for (; idx < n; idx++) apply(idx);
+  }
+
+  /**
+   * ScaleRadius（官方 scnGame 1294/1380）：继承态 `radiusScale = scale/100`（默认 1），
+   * 事件砖起一直继承到下一个 ScaleRadius。
+   */
+  private buildTileRadiusScales(): void {
+    const n = this.levelData.tiles?.length ?? 0;
+    this.tileRadiusScale = new Float32Array(n).fill(1);
+    const actions = this.levelData.actions;
+    if (!actions || n === 0) return;
+    const events: { floor: number; scale: number }[] = [];
+    for (const a of actions) {
+      if (a?.eventType === 'ScaleRadius' && isEventActive(a)) {
+        events.push({
+          floor: Math.max(0, Math.floor(a.floor ?? 0)),
+          scale: (typeof a.scale === 'number' ? a.scale : 100) / 100,
+        });
+      }
+    }
+    if (events.length === 0) return;
+    events.sort((x, y) => x.floor - y.floor);
+    let cur = 1;
+    let idx = 0;
+    for (const ev of events) {
+      for (; idx < n && idx < ev.floor; idx++) this.tileRadiusScale[idx] = cur;
+      if (idx < n) {
+        cur = ev.scale;
+        this.tileRadiusScale[idx] = cur;
+        idx++;
+      }
+    }
+    for (; idx < n; idx++) this.tileRadiusScale[idx] = cur;
+  }
+
+  /**
+   * 官方 scnGame 758 的砖位偏移移植：
+   *   val4 += direction(entryangle)·((1 − radiusScale)·tileSize)（逐砖累积），
+   *   floor.position = startPos + positionTrackOffset + val4。
+   * 目的：半径变化时把砖心沿"指向上一砖"的方向挪动，保持轨道链与绕行半径一致
+   * （行星的 startDist/endDist 直接取自砖位，因此绕行距离自动跟随）。
+   * 必须在 calculateCumulativeRotations（entryangle 就绪）之后调用；
+   * 每次 positionTrackManager.copyTo(tilePositions) 之后也要重新调用。
+   */
+  private applyRadiusScaleOffsets(): void {
+    const n = tileCountOf(this.levelData.tiles);
+    this.radiusOffsetX = new Float64Array(n);
+    this.radiusOffsetY = new Float64Array(n);
+    if (n < 2) return;
+    let any = false;
+    for (let i = 1; i < n; i++) {
+      if (this.tileRadiusScale[i] !== 1) { any = true; break; }
+    }
+    if (!any) return;
+
+    let ox = 0;
+    let oy = 0;
+    for (let i = 1; i < n; i++) {
+      const r = this.tileRadiusScale[i] ?? 1;
+      if (r !== 1) {
+        // direction(entryangle)：指向上一砖；我们的角度约定 direction(θ) = (cos θ, sin θ)
+        const theta = this.tileStartAngle[i] ?? 0;
+        const off = 1 - r; // tileSize = 1
+        ox += Math.cos(theta) * off;
+        oy += Math.sin(theta) * off;
+      }
+      this.radiusOffsetX[i] = ox;
+      this.radiusOffsetY[i] = oy;
+    }
+    for (let i = 1; i < n; i++) {
+      this.tilePositions.set(
+        i,
+        this.tilePositions.getX(i) + this.radiusOffsetX[i],
+        this.tilePositions.getY(i) + this.radiusOffsetY[i],
+      );
+    }
   }
 
   /**
@@ -4513,11 +4597,14 @@ export class Player implements IPlayer {
     if (this.positionTrackManager) {
       this.positionTrackManager.computeTransforms(this.isEditorMode);
       this.positionTrackManager.copyTo(this.tilePositions);
+      this.applyRadiusScaleOffsets();
       this.tiles.forEach((mesh, id) => {
         const index = parseInt(id);
         const transform = this.positionTrackManager!.getTileTransform(index);
         if (transform) {
           mesh.position.copy(transform.position);
+          mesh.position.x += this.radiusOffsetX[index] ?? 0;
+          mesh.position.y += this.radiusOffsetY[index] ?? 0;
           mesh.rotation.z = transform.rotation * (Math.PI / 180);
           mesh.scale.copy(transform.scale);
           
@@ -4578,6 +4665,7 @@ export class Player implements IPlayer {
     // Recompute compact transforms, then apply to cached tiles on demand.
     this.positionTrackManager.computeTransforms(this.isEditorMode);
     this.positionTrackManager.copyTo(this.tilePositions);
+    this.applyRadiusScaleOffsets();
     
     this.tiles.forEach((mesh, id) => {
       const index = parseInt(id);
@@ -4585,6 +4673,8 @@ export class Player implements IPlayer {
       
       if (transform) {
         mesh.position.copy(transform.position);
+        mesh.position.x += this.radiusOffsetX[index] ?? 0;
+        mesh.position.y += this.radiusOffsetY[index] ?? 0;
         mesh.rotation.z = transform.rotation * (Math.PI / 180);
         mesh.scale.copy(transform.scale);
         
