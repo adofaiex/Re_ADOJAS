@@ -158,6 +158,83 @@ function testTar(): void {
   }
 }
 
+// ————————————————————————— 2b. 端到端容器 —————————————————————————
+
+/**
+ * 镜像 useFileHandlers.handleExportConfirm → loadFromIlytx 的完整链路：
+ * level → ilybin + manifest + 音频/装饰成员 → tar → 分块 xz → 拼接 →
+ * 单次解压 → tar 拆包 → manifest/ilybin/资产还原 → Level 重建等价。
+ */
+async function testE2E(): Promise<void> {
+  console.log('\n[e2e container: export -> chunked xz -> import]')
+  const level = await loadTiny()
+  const origExport = level.export('object')
+  const enc = new TextEncoder()
+
+  // 伪随机音频（不可压，验证成员不被二次处理）
+  const audio = new Uint8Array(64 * 1024)
+  let s = 7
+  for (let i = 0; i < audio.length; i++) {
+    s = (s * 1103515245 + 12345) & 0x7fffffff
+    audio[i] = (s >>> 16) & 0xff
+  }
+  const decorPng = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4])
+
+  const ilybin = levelToIlybin(level)
+  const manifest = {
+    format: 'ilytx', version: 1, generator: 'adojas', created: Date.now(),
+    tileCount: level.tiles.length,
+    songFilename: level.settings?.songFilename,
+    audio: 'song.mp3', decor: ['deco.png'], bg: [],
+  }
+  const tar = buildTar([
+    { name: 'manifest.json', data: enc.encode(JSON.stringify(manifest)) },
+    { name: 'level.ilybin', data: ilybin },
+    { name: 'audio/song.mp3', data: audio },
+    { name: 'decor/deco.png', data: decorPng },
+  ])
+
+  // 分块 xz + 拼接（xz.ts 设计：每分片独立 xz 流，解压端单次还原）
+  const { initWasm, compress, decompress } = await import('lzma-wasm')
+  await initWasm()
+  const chunkSize = 8192 // 强制多分片
+  const parts: Uint8Array[] = []
+  for (let o = 0; o < tar.length; o += chunkSize) {
+    parts.push(tar.subarray(o, Math.min(o + chunkSize, tar.length)))
+  }
+  check(parts.length > 1, `tar split into ${parts.length} xz chunks`)
+  const xzParts = parts.map(p => compress(p, { format: 'xz', level: 6 }))
+  let xzLen = 0
+  for (const p of xzParts) xzLen += p.length
+  const xz = new Uint8Array(xzLen)
+  let off = 0
+  for (const p of xzParts) { xz.set(p, off); off += p.length }
+
+  // 解压（与 xzWorker 相同的调用方式）
+  const back = decompress(xz, { memLimit: 1024 * 1024 * 1024 })
+  check(back.length === tar.length && back.every((v, i) => v === tar[i]), `concat xz decompress -> ${back.length} bytes`)
+
+  // 拆包 + 成员还原
+  const members = parseTar(back)
+  check(members.length === 4, `member count ${members.length}`)
+  const mBytes = getTarEntry(members, 'manifest.json')
+  check(!!mBytes, 'manifest member present')
+  const m = JSON.parse(new TextDecoder().decode(mBytes!)) as typeof manifest
+  check(m.format === 'ilytx' && m.version === 1 && m.audio === 'song.mp3' && m.decor[0] === 'deco.png', 'manifest fields intact')
+  const lvlBack = getTarEntry(members, 'level.ilybin')
+  check(!!lvlBack && lvlBack.length === ilybin.length && lvlBack.every((v, i) => v === ilybin[i]), 'level.ilybin intact')
+  const audioBack = getTarEntry(members, 'audio/song.mp3')
+  check(!!audioBack && audioBack.length === audio.length && audioBack.every((v, i) => v === audio[i]), 'audio member intact')
+  const decorBack = getTarEntry(members, 'decor/deco.png')
+  check(!!decorBack && decorBack.length === decorPng.length && decorBack.every((v, i) => v === decorPng[i]), 'decor member intact')
+
+  // Level 重建等价
+  const rebuilt = levelFromIlybin(decodeIlybin(lvlBack!))
+  const cmp = deepEqual(origExport, rebuilt.export('object'), 0)
+  check(cmp === null, 'e2e rebuilt level export equal (strict)', cmp ?? undefined)
+  check(rebuilt.export('object').settings.tileMode === origExport.settings.tileMode, 'tileMode preserved')
+}
+
 // ————————————————————————— 3. 主流程 —————————————————————————
 
 async function loadTiny(): Promise<ADOFAI.Level> {
@@ -190,6 +267,7 @@ async function main(): Promise<void> {
   }
 
   testTar()
+  await testE2E()
 
   // —— 规模压测 ——
   const N = Number(process.env.ITX_TILES ?? 1_000_000)

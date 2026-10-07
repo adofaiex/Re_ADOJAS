@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef } from "react"
 import { Button } from "@/components/ui/button"
 import { ArrowLeft, Settings, Save, Upload, Download, Music, Video, Image, Maximize, Minimize } from "lucide-react"
 import { SettingsModal } from "@/components/SettingsModal"
+import { ExportDialog } from "./ExportDialog"
 import { LoadingModal } from "@/components/LoadingModal"
 import { NotificationSystem } from "./NotificationSystem"
 import { useEditorState } from "./useEditorState"
@@ -69,6 +70,10 @@ export default function EditorPage() {
     handleDecorationLoad,
     handleBGImageLoad,
     handleExport,
+    handleExportCancel,
+    handleExportConfirm,
+    exportDialogOpen,
+    exportInfo,
     handlePlay,
     handleExitPlayMode,
     handleToggleManualPlay,
@@ -255,7 +260,7 @@ export default function EditorPage() {
       {!recordingMode && <NotificationSystem />}
 
       {/* Hidden file inputs */}
-      <input ref={fileInputRef} type="file" accept=".adofai,.json,.zip" onChange={handleFileLoad} className="hidden" />
+      <input ref={fileInputRef} type="file" accept=".adofai,.json,.zip,.ilytx" onChange={handleFileLoad} className="hidden" />
       <input ref={audioInputRef} type="file" accept="audio/*" onChange={handleAudioLoad} className="hidden" />
       <input ref={videoInputRef} type="file" accept="video/*" onChange={handleVideoLoad} className="hidden" />
       <input ref={decorationInputRef} type="file" accept="image/*" multiple onChange={handleDecorationLoad} className="hidden" />
@@ -473,6 +478,16 @@ export default function EditorPage() {
           </div>
         </div>
       )}
+
+      {/* 导出弹窗（格式 / 内置内容 / 压缩等级） */}
+      <ExportDialog
+        isOpen={exportDialogOpen}
+        isDark={isDark}
+        hasAudio={exportInfo?.hasAudio ?? false}
+        assetCount={exportInfo?.assetCount ?? 0}
+        onConfirm={handleExportConfirm}
+        onCancel={handleExportCancel}
+      />
 
       {/* Settings Modal */}
       <SettingsModal isOpen={settingsOpen} onClose={() => setSettingsOpen(false)} />

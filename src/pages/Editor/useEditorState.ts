@@ -197,7 +197,7 @@ export function useEditorState() {
   }, [settings, manualMode, noFail, t, bindOttoEvents])
 
   // File handlers
-  const { handleFileLoad, handleAudioLoad, handleVideoLoad, handleDecorationLoad, handleBGImageLoad, handleExport } = useFileHandlers({
+  const { handleFileLoad, handleAudioLoad, handleVideoLoad, handleDecorationLoad, handleBGImageLoad, handleExport, handleExportCancel, handleExportConfirm, exportDialogOpen, exportInfo } = useFileHandlers({
     setIsLoading,
     setLoadingProgress,
     setLoadingStatus,
@@ -649,6 +649,10 @@ export function useEditorState() {
     handleDecorationLoad,
     handleBGImageLoad,
     handleExport,
+    handleExportCancel,
+    handleExportConfirm,
+    exportDialogOpen,
+    exportInfo,
     handlePlay,
     handleExitPlayMode,
     handleToggleManualPlay,

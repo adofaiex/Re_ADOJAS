@@ -130,7 +130,7 @@ export function findLevelFilesSync(dir: string): string[] {
       for (const e of entries) {
         const full = join(d, e.name)
         if (e.isDirectory) walk(full)
-        else if (e.name.endsWith('.adofai')) results.push(full)
+        else if (e.name.endsWith('.adofai') || e.name.endsWith('.ilytx')) results.push(full)
       }
     } catch { /* skip unreadable */ }
   }

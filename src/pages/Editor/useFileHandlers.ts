@@ -1,4 +1,4 @@
-import { useCallback, useRef } from "react"
+import { useCallback, useRef, useState } from "react"
 import * as ADOFAI from "adofai"
 import { Parsers, Structure } from "adofai"
 import type { ILevelData } from "@/lib/Player/types"
@@ -7,6 +7,12 @@ import { LargeFileParser } from "@/lib/LargeFileParser"
 import type { HitsoundSynthStatus } from "@/lib/Player/HitsoundManager"
 import JSZip from "jszip"
 import { isAdojas, autoLoadAssets as adojasAutoLoadAssets, getLastFileDir } from "@/lib/fs"
+import { levelToIlybin, levelFromIlybinBytes } from "@/lib/ilytx/level"
+import { buildTar, parseTar, getTarEntry } from "@/lib/ilytx/tar"
+import type { TarEntry } from "@/lib/ilytx/tar"
+import { xzCompress, xzDecompress } from "@/lib/ilytx/xz"
+import { ILYTX_VERSION, MEMBER_LEVEL, MEMBER_MANIFEST } from "@/lib/ilytx/types"
+import type { IlytxExportOptions, IlytxManifest } from "@/lib/ilytx/types"
 
 // 类型导入
 type ParseProgressEvent = Structure.ParseProgressEvent;
@@ -24,6 +30,37 @@ const COMPACT_TILES_THRESHOLD = 200_000
 
 // 超大文件阈值 - 用于加载进度分段（>90MB 时装饰/打拍音预合成占用更多进度区间）
 const VERY_LARGE_FILE_THRESHOLD = 90 * 1024 * 1024 // 90MB
+
+/** Blob 下载（导出统一走这里）。 */
+const downloadBlob = (blob: Blob, filename: string): void => {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  URL.revokeObjectURL(url)
+}
+
+/**
+ * Uint8Array → Blob（TS 5.7 的 Uint8Array<ArrayBufferLike> 不能直接当 BlobPart；
+ * tar 成员数据实际都是普通 ArrayBuffer 上的视图，这里做收窄）。
+ */
+const bytesToBlob = (bytes: Uint8Array, type?: string): Blob =>
+  new Blob([bytes as unknown as BlobPart], type !== undefined ? { type } : undefined)
+
+/** 按扩展名推 MIME（内置音频重建 Blob 用）。 */const mimeOf = (name: string): string => {
+  const ext = (name.split('.').pop() || '').toLowerCase()
+  switch (ext) {
+    case 'mp3': return 'audio/mpeg'
+    case 'ogg': return 'audio/ogg'
+    case 'wav': return 'audio/wav'
+    case 'm4a': return 'audio/mp4'
+    case 'flac': return 'audio/flac'
+    default: return 'application/octet-stream'
+  }
+}
 
 // 获取加载阶段的显示文本
 const getStageText = (stage: string, t: (key: string) => string): string => {
@@ -99,6 +136,15 @@ export function useFileHandlers({
     progressDetailRef.current.last = 0
     setLoadingDetail?.('')
   }
+
+  // —— 导出内置资源跟踪（.ilytx 弹窗勾选时打包；加载新谱面时清空）——
+  const audioBlobRef = useRef<Blob | null>(null)
+  const audioNameRef = useRef<string>('song')
+  const assetBlobsRef = useRef<Map<string, { blob: Blob; kind: 'decor' | 'bg' }>>(new Map())
+
+  // —— 导出弹窗状态 ——
+  const [exportDialogOpen, setExportDialogOpen] = useState(false)
+  const [exportInfo, setExportInfo] = useState<{ hasAudio: boolean; assetCount: number } | null>(null)
 
   // 辅助函数：初始化玩家、分帧创建装饰物并合成打拍音
   const initializePlayerWithHitsounds = async (loadedLevel: any, isVeryLargeFile: boolean = false): Promise<void> => {
@@ -419,6 +465,8 @@ export function useFileHandlers({
               if (audioBlob && previewerRef.current) {
                 const audioUrl = URL.createObjectURL(audioBlob)
                 previewerRef.current.loadMusic(audioUrl)
+                audioBlobRef.current = audioBlob
+                audioNameRef.current = audioFile.split('/').pop() || 'song'
                 window.showNotification?.("info", t("editor.notifications.audioAutoLoaded"))
                 break
               }
@@ -520,6 +568,7 @@ export function useFileHandlers({
               if (imageName !== imageFile) {
                 previewerRef.current.registerDecorationImage(imageName, imageUrl)
               }
+              assetBlobsRef.current.set(imageName, { blob: imageBlob, kind: 'decor' })
               loadedImages++
             }
           }
@@ -573,6 +622,7 @@ export function useFileHandlers({
                 const imageUrl = URL.createObjectURL(imageBlob)
                 const filename = bgImageName.split('/').pop() || bgImageName
                 previewerRef.current.registerCustomBGImage(filename, imageUrl)
+                assetBlobsRef.current.set(filename, { blob: imageBlob, kind: 'bg' })
               }
               break
             }
@@ -591,6 +641,95 @@ export function useFileHandlers({
     } catch (error) {
       console.error('[ZIP] Loading error:', error)
       window.showNotification?.("error", `${t("editor.notifications.zipLoadError")}: ${error}`)
+      setIsLoading(false)
+      setLoadingProgress(0)
+      setLoadingStatus("")
+    }
+  }
+
+  /**
+   * .ilytx 加载：xz 解压 → tar 拆包 → ilybin 直接组装 Level。
+   *
+   * 相比 .adofai 路径省掉：整份 JSON 字节扫描/字符串解码、createTiles 相对角度
+   * 状态机、Twirl 剥离 —— 反序列化是 typed array 的 memcpy（677 万砖 ≈ 250ms）。
+   * 内置音频/装饰图按 manifest 成员自动挂载（与 ZIP 路径行为一致）。
+   */
+  const loadFromIlytx = async (arrayBuffer: ArrayBuffer): Promise<void> => {
+    setLoadingStatus(t("loading.decompressingIlytx"))
+    setLoadingProgress(3)
+    resetProgressDetail()
+
+    try {
+      const tarBytes = await xzDecompress(new Uint8Array(arrayBuffer))
+      setLoadingProgress(35)
+      setLoadingStatus(t("loading.parsingLevel"))
+
+      const members = parseTar(tarBytes)
+      const levelBytes = getTarEntry(members, MEMBER_LEVEL)
+      if (!levelBytes) throw new Error(`missing ${MEMBER_LEVEL}`)
+
+      let manifest: IlytxManifest | null = null
+      const manifestBytes = getTarEntry(members, MEMBER_MANIFEST)
+      if (manifestBytes) {
+        manifest = JSON.parse(new TextDecoder().decode(manifestBytes)) as IlytxManifest
+        if (manifest.version > ILYTX_VERSION) {
+          throw new Error(`unsupported ilytx version ${manifest.version} (app supports <= ${ILYTX_VERSION})`)
+        }
+      }
+      console.log('[ilytx] members:', members.map(m => m.name), 'manifest:', manifest)
+
+      setLoadingProgress(45)
+      const level = levelFromIlybinBytes(levelBytes)
+      setLoadingStatus(t("loading.buildingScene"))
+      setLoadingProgress(60)
+
+      // 初始化玩家 + 分帧装饰 + 打拍音预合成（与 .adofai 路径一致）
+      const isBigLevel = (level.tiles?.length ?? 0) > COMPACT_TILES_THRESHOLD
+      await initializePlayerWithHitsounds(level, isBigLevel)
+      setLoadingProgress(85)
+
+      // 内置音频
+      const audioEntry = members.find(m => m.name.startsWith('audio/'))
+      if (audioEntry && previewerRef.current) {
+        const blob = bytesToBlob(audioEntry.data, mimeOf(audioEntry.name))
+        audioBlobRef.current = blob
+        audioNameRef.current = audioEntry.name.slice(audioEntry.name.indexOf('/') + 1)
+        previewerRef.current.loadMusic(URL.createObjectURL(blob))
+        window.showNotification?.("info", t("editor.notifications.audioAutoLoaded"))
+      }
+
+      // 内置装饰/背景图（成员名 = 级别引用名，注册即可命中）
+      let registered = 0
+      for (const m of members) {
+        if (m.name.startsWith('decor/')) {
+          const name = m.name.slice('decor/'.length)
+          const blob = bytesToBlob(m.data)
+          const url = URL.createObjectURL(blob)
+          previewerRef.current?.registerDecorationImage?.(name, url)
+          assetBlobsRef.current.set(name, { blob, kind: 'decor' })
+          registered++
+        } else if (m.name.startsWith('bg/')) {
+          const name = m.name.slice('bg/'.length)
+          const blob = bytesToBlob(m.data)
+          const url = URL.createObjectURL(blob)
+          previewerRef.current?.registerCustomBGImage?.(name, url)
+          assetBlobsRef.current.set(name, { blob, kind: 'bg' })
+          registered++
+        }
+      }
+      if (registered > 0 && previewerRef.current?.preloadDecorationTextures) {
+        setLoadingStatus(t("loading.preloadingTextures"))
+        await previewerRef.current.preloadDecorationTextures()
+      }
+
+      setLoadingProgress(100)
+      window.showNotification?.("success", t("editor.notifications.ilytxLoadSuccess"))
+      setIsLoading(false)
+      setLoadingProgress(0)
+      setLoadingStatus("")
+    } catch (error) {
+      console.error('[ilytx] Loading error:', error)
+      window.showNotification?.("error", `${t("editor.notifications.ilytxLoadError")}: ${error}`)
       setIsLoading(false)
       setLoadingProgress(0)
       setLoadingStatus("")
@@ -619,8 +758,19 @@ export function useFileHandlers({
           const fileSize = arrayBuffer?.byteLength || 0
           console.log('[DEBUG] ArrayBuffer size:', fileSize)
 
-          // Check if file is a ZIP archive
+          // 换谱面 → 清空上一份谱面的内置资源跟踪（音频/装饰图）
+          audioBlobRef.current = null
+          assetBlobsRef.current.clear()
+
           const fileName = file.name.toLowerCase()
+
+          // Check if file is .ilytx (binary container: xz(tar(ilybin + assets)))
+          if (fileName.endsWith('.ilytx')) {
+            console.log('[DEBUG] Detected .ilytx file')
+            await loadFromIlytx(arrayBuffer)
+            return
+          }
+
           const isZip = fileName.endsWith('.zip') ||
             file.type === 'application/zip' ||
             file.type === 'application/x-zip-compressed' ||
@@ -693,6 +843,8 @@ export function useFileHandlers({
 
       if (previewerRef.current) {
         previewerRef.current.loadMusic(url)
+        audioBlobRef.current = file
+        audioNameRef.current = file.name
         window.showNotification?.("success", "Audio loaded successfully")
       } else {
         window.showNotification?.("warning", "Please load a level first")
@@ -743,6 +895,7 @@ export function useFileHandlers({
         if (previewerRef.current.registerDecorationImage) {
           previewerRef.current.registerDecorationImage(filename, url)
           loadedFiles.push(filename)
+          assetBlobsRef.current.set(filename, { blob: file, kind: 'decor' })
         }
       }
 
@@ -782,6 +935,7 @@ export function useFileHandlers({
         if (previewerRef.current.registerCustomBGImage) {
           previewerRef.current.registerCustomBGImage(filename, url)
           loadedFiles.push(filename)
+          assetBlobsRef.current.set(filename, { blob: file, kind: 'bg' })
         }
       }
 
@@ -792,31 +946,115 @@ export function useFileHandlers({
     [previewerRef]
   )
 
-  // 导出文件功能
+  // —— 导出：打开导出弹窗（格式 / 内置音频 / 内置装饰图 / xz 等级）——
   const handleExport = useCallback((): void => {
-    if (!previewerRef.current) {
+    const level = (previewerRef.current as unknown as { levelData?: unknown } | null)?.levelData
+    if (!previewerRef.current || !level) {
       window.showNotification?.("error", t("editor.notifications.noFileToExport"))
       return
     }
-
-    try {
-      const adofaiFile = (previewerRef.current as any).levelData
-      const exportData = JSON.stringify(adofaiFile, null, 2)
-      const blob = new Blob([exportData], { type: "application/json" })
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement("a")
-      a.href = url
-      a.download = "level.adofai"
-      document.body.appendChild(a)
-      a.click()
-      document.body.removeChild(a)
-      URL.revokeObjectURL(url)
-      window.showNotification?.("success", t("editor.notifications.exportSuccess"))
-    } catch (error) {
-      console.error("Export error:", error)
-      window.showNotification?.("error", t("editor.notifications.exportError"))
-    }
+    setExportInfo({
+      hasAudio: !!audioBlobRef.current,
+      assetCount: assetBlobsRef.current.size,
+    })
+    setExportDialogOpen(true)
   }, [t, previewerRef])
+
+  const handleExportCancel = useCallback((): void => {
+    setExportDialogOpen(false)
+  }, [])
+
+  const handleExportConfirm = useCallback(
+    async (opts: IlytxExportOptions): Promise<void> => {
+      setExportDialogOpen(false)
+      const level = (previewerRef.current as unknown as { levelData?: any } | null)?.levelData
+      if (!level) {
+        window.showNotification?.("error", t("editor.notifications.noFileToExport"))
+        return
+      }
+
+      setIsLoading(true)
+      setLoadingProgress(0)
+      setLoadingStatus("")
+      resetProgressDetail()
+
+      try {
+        // 文件名：songFilename/song 去扩展名与路径，兜底 "level"
+        const rawName = String(level.settings?.songFilename || level.settings?.song || 'level')
+        const base = (rawName.split('/').pop() || 'level').replace(/\.[a-z0-9]+$/i, '') || 'level'
+
+        if (opts.format === 'adofai') {
+          // 库自身的文本导出（原先的 JSON.stringify(levelData) 是坏的：typed array/Map 序列化后不可用）
+          setLoadingStatus(t("loading.exportingAdofai"))
+          setLoadingProgress(30)
+          const text = level.export('string') as string
+          setLoadingProgress(90)
+          downloadBlob(new Blob([text], { type: 'application/json' }), `${base}.adofai`)
+        } else {
+          setLoadingStatus(t("loading.encodingIlybin"))
+          const ilybin = levelToIlybin(level)
+          setLoadingProgress(15)
+
+          const enc = new TextEncoder()
+          const entries: TarEntry[] = []
+          const manifest: IlytxManifest = {
+            format: 'ilytx',
+            version: ILYTX_VERSION,
+            generator: 'adojas',
+            created: Date.now(),
+            tileCount: level.tiles?.length ?? 0,
+            songFilename: level.settings?.songFilename,
+            decor: [],
+            bg: [],
+          }
+
+          if (opts.embedAudio && audioBlobRef.current) {
+            const name = audioNameRef.current || 'song'
+            entries.push({ name: `audio/${name}`, data: new Uint8Array(await audioBlobRef.current.arrayBuffer()) })
+            manifest.audio = name
+          }
+          if (opts.embedDecor) {
+            for (const [name, entry] of assetBlobsRef.current) {
+              const buf = new Uint8Array(await entry.blob.arrayBuffer())
+              if (entry.kind === 'bg') {
+                entries.push({ name: `bg/${name}`, data: buf })
+                manifest.bg.push(name)
+              } else {
+                entries.push({ name: `decor/${name}`, data: buf })
+                manifest.decor.push(name)
+              }
+            }
+          }
+          entries.unshift({ name: MEMBER_MANIFEST, data: enc.encode(JSON.stringify(manifest)) })
+          entries.push({ name: MEMBER_LEVEL, data: ilybin })
+
+          setLoadingStatus(t("loading.compressingIlytx"))
+          const tar = buildTar(entries)
+          setLoadingProgress(20)
+          const xz = await xzCompress(tar, {
+            level: opts.xzLevel,
+            onProgress: (done, totalChunks) => {
+              setLoadingProgress(20 + Math.round((done / totalChunks) * 75))
+              updateProgressDetail(done, totalChunks)
+            },
+          })
+          downloadBlob(bytesToBlob(xz, 'application/x-ilytx'), `${base}.ilytx`)
+        }
+
+        setLoadingProgress(100)
+        window.showNotification?.("success", t("editor.notifications.exportSuccess"))
+      } catch (error) {
+        console.error('[export] error:', error)
+        window.showNotification?.("error", `${t("editor.notifications.exportError")}: ${error}`)
+      } finally {
+        setIsLoading(false)
+        setLoadingProgress(0)
+        setLoadingStatus("")
+        resetProgressDetail()
+      }
+    },
+    [t, previewerRef, setIsLoading, setLoadingProgress, setLoadingStatus]
+  )
 
   return {
     handleFileLoad,
@@ -824,6 +1062,10 @@ export function useFileHandlers({
     handleVideoLoad,
     handleDecorationLoad,
     handleBGImageLoad,
-    handleExport
+    handleExport,
+    handleExportCancel,
+    handleExportConfirm,
+    exportDialogOpen,
+    exportInfo
   }
 }
