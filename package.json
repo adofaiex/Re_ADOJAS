@@ -47,6 +47,7 @@
         "@vitejs/plugin-react": "^6.0.2",
         "assemblyscript": "^0.28.17",
         "autoprefixer": "^10.4.21",
+        "esbuild": "^0.28.2",
         "eslint": "^9.31.0",
         "eslint-plugin-react-hooks": "^4.6.2",
         "eslint-plugin-react-refresh": "^0.4.20",
