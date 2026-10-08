@@ -93,6 +93,21 @@ function makeChart(opts: { fractional: boolean }): string {
   })
 }
 
+/** 解析 ilybin section 布局（header 12B + {id u8, len u32, payload}），返回 id → payload */
+function parseIlybinSections(buf: Uint8Array): Map<number, Uint8Array> {
+  const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength)
+  const count = dv.getUint16(6, true)
+  const out = new Map<number, Uint8Array>()
+  let off = 12
+  for (let i = 0; i < count; i++) {
+    const id = buf[off]
+    const len = dv.getUint32(off + 1, true)
+    out.set(id, buf.subarray(off + 5, off + 5 + len))
+    off += 5 + len
+  }
+  return out
+}
+
 async function roundTrip(label: string, chartText: string, compact: boolean, eps: number, strict: boolean): Promise<void> {
   const original = new ADOFAI.Level(chartText, parser, { compactTiles: compact })
   await original.load()
@@ -113,6 +128,14 @@ async function roundTrip(label: string, chartText: string, compact: boolean, eps
   check(cmp === null, `${label}: export('object') 等价`, cmp ?? undefined)
   check(rebuilt.isCompactTiles() === original.isCompactTiles(), `${label}: tileMode 保持`)
   check(rebuilt.tiles.length === original.tiles.length, `${label}: tileCount ${rebuilt.tiles.length}`)
+
+  // 回归：紧凑模式 angle 段必须走 f32 定宽（kind=2，比 varint 小 18-24%、比
+  // 曾造成 54MB 膨胀的 f64 回退小 4 倍）；对象模式保持 FloatSection 原路径
+  //（f64 兜底，不量化）。
+  const angleSec = parseIlybinSections(bytes).get(3)
+  const angleKindOk = angleSec !== undefined && (compact ? angleSec[0] === 2 : angleSec[0] !== 2)
+  check(angleKindOk, `${label}: angle 段编码 ${compact ? 'f32 定宽 (kind=2)' : 'FloatSection (非 f32)'}`,
+    angleSec !== undefined ? `kind=${angleSec[0]}` : 'missing section')
 
   const textLen = new TextEncoder().encode(chartText).length
   console.log(
