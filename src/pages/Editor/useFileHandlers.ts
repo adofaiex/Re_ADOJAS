@@ -7,10 +7,11 @@ import { LargeFileParser } from "@/lib/LargeFileParser"
 import type { HitsoundSynthStatus } from "@/lib/Player/HitsoundManager"
 import JSZip from "jszip"
 import { isAdojas, autoLoadAssets as adojasAutoLoadAssets, getLastFileDir } from "@/lib/fs"
-import { levelToIlybin, levelFromIlybinBytes } from "@/lib/ilytx/level"
-import { buildTar, parseTar, getTarEntry } from "@/lib/ilytx/tar"
+import { extractIlybinData, levelFromIlybinBytes } from "@/lib/ilytx/level"
+import { parseTar, getTarEntry } from "@/lib/ilytx/tar"
 import type { TarEntry } from "@/lib/ilytx/tar"
-import { xzCompress, xzDecompress } from "@/lib/ilytx/xz"
+import { xzCompress, xzCompressMain, xzDecompress } from "@/lib/ilytx/xz"
+import { packIlybin } from "@/lib/ilytx/pack"
 import { ILYTX_VERSION, MEMBER_LEVEL, MEMBER_MANIFEST } from "@/lib/ilytx/types"
 import type { IlytxExportOptions, IlytxManifest } from "@/lib/ilytx/types"
 
@@ -991,12 +992,11 @@ export function useFileHandlers({
           setLoadingProgress(90)
           downloadBlob(new Blob([text], { type: 'application/json' }), `${base}.adofai`)
         } else {
+          // 1) 主线程只做轻量提取（Level 对象无法克隆进 worker）
           setLoadingStatus(t("loading.encodingIlybin"))
-          const ilybin = levelToIlybin(level)
-          setLoadingProgress(15)
+          const extracted = extractIlybinData(level)
 
           const enc = new TextEncoder()
-          const entries: TarEntry[] = []
           const manifest: IlytxManifest = {
             format: 'ilytx',
             version: ILYTX_VERSION,
@@ -1008,36 +1008,65 @@ export function useFileHandlers({
             bg: [],
           }
 
-          if (opts.embedAudio && audioBlobRef.current) {
-            const name = audioNameRef.current || 'song'
-            entries.push({ name: `audio/${name}`, data: new Uint8Array(await audioBlobRef.current.arrayBuffer()) })
-            manifest.audio = name
-          }
-          if (opts.embedDecor) {
-            for (const [name, entry] of assetBlobsRef.current) {
-              const buf = new Uint8Array(await entry.blob.arrayBuffer())
-              if (entry.kind === 'bg') {
-                entries.push({ name: `bg/${name}`, data: buf })
-                manifest.bg.push(name)
-              } else {
-                entries.push({ name: `decor/${name}`, data: buf })
-                manifest.decor.push(name)
+          let tar: Uint8Array
+          let viaWorker: boolean
+          {
+            // 2) 编码 + tar 打包：优先 worker（677 万砖的 varint 编码与百 MB 级
+            //    memcpy 在主线程会把 UI 卡死）；worker 不可用（file://、CSP、
+            //    旧浏览器）时 packIlybin 自动回退主线程 —— 导出始终可用。
+            //    entries 在块尾出作用域，音频/图片大 buffer 随即可回收。
+            const entries: TarEntry[] = []
+            if (opts.embedAudio && audioBlobRef.current) {
+              const name = audioNameRef.current || 'song'
+              entries.push({ name: `audio/${name}`, data: new Uint8Array(await audioBlobRef.current.arrayBuffer()) })
+              manifest.audio = name
+            }
+            if (opts.embedDecor) {
+              for (const [name, entry] of assetBlobsRef.current) {
+                const buf = new Uint8Array(await entry.blob.arrayBuffer())
+                if (entry.kind === 'bg') {
+                  entries.push({ name: `bg/${name}`, data: buf })
+                  manifest.bg.push(name)
+                } else {
+                  entries.push({ name: `decor/${name}`, data: buf })
+                  manifest.decor.push(name)
+                }
               }
             }
-          }
-          entries.unshift({ name: MEMBER_MANIFEST, data: enc.encode(JSON.stringify(manifest)) })
-          entries.push({ name: MEMBER_LEVEL, data: ilybin })
+            entries.unshift({ name: MEMBER_MANIFEST, data: enc.encode(JSON.stringify(manifest)) })
 
-          setLoadingStatus(t("loading.compressingIlytx"))
-          const tar = buildTar(entries)
+            const packed = await packIlybin(extracted, entries)
+            tar = packed.tar
+            viaWorker = packed.viaWorker
+          }
           setLoadingProgress(20)
-          const xz = await xzCompress(tar, {
-            level: opts.xzLevel,
-            onProgress: (done, totalChunks) => {
-              setLoadingProgress(20 + Math.round((done / totalChunks) * 75))
-              updateProgressDetail(done, totalChunks)
-            },
-          })
+
+          // 3) xz 压缩：worker 池并行；进度节流（大谱面每次 setState 都是整页
+          //    重渲染，逐块上报会把主线程淹掉）。worker 不可用/中途出错 →
+          //    主线程分块压缩（每块让出事件循环），两条路都保证导出跑完。
+          setLoadingStatus(t("loading.compressingIlytx"))
+          let lastPct = 20
+          let lastUi = 0
+          const onXzProgress = (done: number, totalChunks: number): void => {
+            const pct = 20 + Math.round((done / totalChunks) * 75)
+            if (pct === lastPct) return
+            const now = performance.now()
+            if (pct < 95 && now - lastUi < 300) return
+            lastPct = pct
+            lastUi = now
+            setLoadingProgress(pct)
+            updateProgressDetail(done, totalChunks)
+          }
+          const compressOpts = { level: opts.xzLevel, onProgress: onXzProgress }
+          let xz: Uint8Array | null = null
+          if (viaWorker) {
+            try {
+              xz = await xzCompress(tar, compressOpts)
+            } catch (err) {
+              console.warn('[ilytx] xz worker pool failed, falling back to main thread:', err)
+            }
+          }
+          if (!xz) xz = await xzCompressMain(tar, compressOpts)
           downloadBlob(bytesToBlob(xz, 'application/x-ilytx'), `${base}.ilytx`)
         }
 
