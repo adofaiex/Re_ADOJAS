@@ -25,6 +25,6 @@ export interface IlytxManifest {
   bg: string[]
 }
 
-export const ILYTX_VERSION = 1
+export const ILYTX_VERSION = 2
 export const MEMBER_LEVEL = 'level.ilybin'
 export const MEMBER_MANIFEST = 'manifest.json'

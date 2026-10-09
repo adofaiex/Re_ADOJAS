@@ -6,8 +6,9 @@
  *   文本导出同保真。
  * - levelFromIlybin(data)：**不走 Level.load()** —— 直接组装 public 字段
  *   （settings / angleData / actions / __decorations / tiles），跳过 JSON 解析、
- *   createTiles 状态机与 Twirl 剥离。Level 的这些字段全部是 public，
- *   库（ADOFAI-JS）也是同作者，无需打 patch。
+ *   对象构建与位置计算。相对角由 ilybin 解码端从 direction+twirl 轻量重建
+ *   （单循环 O(n)，见 ilybin.reconstructAngle；angle 段 v2 起不再落盘）。
+ *   Level 的这些字段全部是 public，库（ADOFAI-JS）也是同作者，无需打 patch。
  */
 
 import { Level, Structure } from 'adofai'

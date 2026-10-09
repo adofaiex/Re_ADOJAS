@@ -16,8 +16,12 @@
  *   sections:
  *     1 settings     UTF-8 JSON
  *     2 direction    FloatSection（= angleData 的值，含 999 中心块标记）
- *     3 angle        FloatSection，紧凑模式写 f32 定宽 kind=2（相对角度，
- *                    createTiles 状态机产物 —— 本格式的核心价值；见 encodeAngleSection）
+ *     3 angle        （v1 遗留，v2 起写入端省略）相对角度 FloatSection。
+ *                    angle 是 (direction, twirl) 的纯函数（库 parseAngle 状态机，
+ *                    且 changeAngles/编辑路径同公式），故缺省时解码端正向重建
+ *                    （reconstructAngle，O(n) 单循环）——省掉 677w 谱面 25.8MB
+ *                    原始数据（xz 后 ~4.3MB，占总体积近半）。旧 v1 文件仍带此段，
+ *                    解码优先用存量值。
  *     5 twirl        ZigZag-Varint 差分（累计 Twirl 计数，非递减）
  *     6 actions      UTF-8 JSON [{floor, ...}]（对象模式含 Twirl；紧凑模式由 twirl 段还原，
  *                    解码时按 tileMode 过滤，镜像库的紧凑剥离行为）
@@ -108,12 +112,6 @@ class ByteWriter {
     this.ensure(src.length)
     this.buf.set(src, this.len)
     this.len += src.length
-  }
-
-  f32(v: number): void {
-    this.ensure(4)
-    this.view.setFloat32(this.len, v, true)
-    this.len += 4
   }
 
   f64(v: number): void {
@@ -277,29 +275,10 @@ function encodeFloatSection(values: ArrayLike<number>): Uint8Array {
 }
 
 /**
- * 相对角段（紧凑模式）：f32 定宽编码（kind=2）。
- *
- * 677w 基准（scripts/ilytx-size-bench）实测，相对角是"值集集中、增量分散"型数据，
- * f32 定宽在两种数据形态下都显著胜过缩放 varint 差分与 f64 兜底：
- *   分数谱面: varint 5.08MB / f64 4.01MB / **f32 3.88MB**（-24% vs varint）
- *   整数谱面: varint 5.03MB / f64 4.24MB / **f32 4.14MB**（-18% vs varint）
- * 原理：f32 字节对齐 —— 相同值产出完全相同的 4 字节序列，LZMA 直接长距离匹配；
- * varint 把值打散成变长 token，错位削弱匹配。direction 段相反（增量集中的
- * 随机游走型），保持 varint 最优。
- *
- * 保真：紧凑 store 的 angle 本身就是 f32（f32-exact 采样 100%），定宽写入
- * **位精确无损**；对象模式不走此路径（仍用 FloatSection 的 f64 兜底）。
- * 解码 wantF32=false 时放宽到 f64，量化误差 ≤1e-5°，且相对角不参与
- * export('object')（导出只含 angleData/settings/actions/decorations），物理不可见。
+ * 相对角段（kind=2 f32 定宽）的编码已随 v2 弃用 angle 段一并移除：angle 是
+ * (direction, twirl) 的纯函数，解码端 reconstructAngle 重建即可。解码仍支持
+ * kind=2（v1 遗留文件，见 decodeFloatSection）。
  */
-function encodeAngleSection(values: ArrayLike<number>): Uint8Array {
-  const w = new ByteWriter(Math.max(1024, 1 + values.length * 4))
-  w.u8(2)
-  const n = values.length
-  for (let i = 0; i < n; i++) w.f32(values[i])
-  return w.take()
-}
-
 function decodeFloatSection(payload: Uint8Array, tileCount: number, wantF32: boolean): Float32Array | Float64Array {
   const r = new ByteReader(payload)
   const kind = r.u8()
@@ -325,6 +304,66 @@ function decodeFloatSection(payload: Uint8Array, tileCount: number, wantF32: boo
   return out
 }
 
+/**
+ * angle 段缺失时（v2 起写入端省略）由 direction+twirl 正向重建相对角。
+ *
+ * 复刻库 `parseAngle` 状态机（adofai 包未导出此函数，故内联逐行等价实现）。
+ * 可行性依据（scripts/ilytx-recon-probe.ts 实测验证）：
+ *   - angle 是 (direction, twirl) 的**纯函数** —— createTiles 与编辑路径
+ *     changeAngles 用同一状态机，编辑后的 overlay 也满足此约束；
+ *   - store.twirl[i] 与库传给 parseAngle 的 twirl%2 同源（levelAngle.js:281）；
+ *   - 整数/特殊砖(555/666/777/888)谱面与原库输出位精确 100%。
+ *
+ * 已知偏差（仅对象/分数谱面，可接受）：原库状态机跑在原始 f64 angleData 上，
+ * 本函数跑在 f32 量化的 direction 值上，分数谱面 angle 偶差 1 ulp（≈3e-5°）。
+ * angle 不参与 export('object')（导出只含 angleData/settings/actions/decorations），
+ * 播放旋转差 3e-5° 物理不可见。999 中心块标记不受影响（探测:全部还原 ✓）。
+ *
+ * 环绕现象：退化反转砖（delta≈0）上，原库的 f64 噪音（如 2.8e-14）恰好逃过
+ * 其 `prev===0→360` 提升，而重建在 f32 网格上 delta 精确为 0 → 提升为 360。
+ * 两者是同一旋转（mod 360），重建值反而更接近库的设计意图。angle 在 .adofai
+ * 生态从不持久化（导出只写 angleData，各加载器各自重算），此类差异等价于
+ * 加载器之间的算术差，不构成保真回归。
+ */
+function reconstructAngle(
+  direction: ArrayLike<number>,
+  twirl: ArrayLike<number>,
+  tileCount: number,
+  wantF32: boolean,
+): Float32Array | Float64Array {
+  const out = wantF32 ? new Float32Array(tileCount) : new Float64Array(tileCount)
+  let state = 180 // angleDir.value，初始值与库一致（parseAngle 在 i===0 时也置 180）
+  let run = 0 // 连续 999 计数（含当前砖），避免库实现的 O(r²) 回扫
+  for (let i = 0; i < tileCount; i++) {
+    const d = direction[i]
+    let prev: number
+    if (d === 555 || d === 666 || d === 777 || d === 888) {
+      const offset = d === 555 ? 72 : d === 666 ? -72 : d === 777 ? 52 : -52
+      const prevDir = ((state - 180) % 360 + 360) % 360
+      const actualDir = ((prevDir + offset) % 360 + 360) % 360
+      const delta = ((state - actualDir) % 360 + 360) % 360
+      prev = twirl[i] % 2 === 0 ? delta : ((360 - delta) % 360 + 360) % 360
+      if (prev === 0) prev = 360
+      state = ((actualDir + 180) % 360 + 360) % 360
+      run = 0
+    } else if (d === 999) {
+      run++
+      const realAngle = i - run >= 0 ? direction[i - run] : 0
+      state = ((realAngle + (run - 1) * 180) % 360 + 360) % 360
+      if (isNaN(state)) state = 0
+      prev = 0
+    } else {
+      const delta = ((state - d) % 360 + 360) % 360
+      prev = twirl[i] % 2 === 0 ? delta : ((360 - delta) % 360 + 360) % 360
+      if (prev === 0) prev = 360
+      state = ((d + 180) % 360 + 360) % 360
+      run = 0
+    }
+    out[i] = prev
+  }
+  return out
+}
+
 // ————————————————————————— 编码 —————————————————————————
 
 function utf8(s: string): Uint8Array {
@@ -334,9 +373,8 @@ function utf8(s: string): Uint8Array {
 export function encodeIlybin(data: IlybinData): Uint8Array {
   const settingsBytes = utf8(JSON.stringify(data.settings))
   const directionSec = encodeFloatSection(data.direction)
-  const angleSec = data.tileMode === TILE_MODE_COMPACT
-    ? encodeAngleSection(data.angle) // f32 定宽：实测比 varint/f64 小 18-24%（见函数注释）
-    : encodeFloatSection(data.angle)
+  // v2：不再写 angle 段 —— angle 是 (direction, twirl) 的纯函数，
+  // 解码端 reconstructAngle 重建（见 decodeIlybin）。677w 谱面省 25.8MB 原始 / ~4.3MB xz。
 
   const twirlW = new ByteWriter(Math.max(1024, Math.ceil(data.tileCount * 1.2)))
   {
@@ -355,7 +393,7 @@ export function encodeIlybin(data: IlybinData): Uint8Array {
   const decosBytes = decosArr.length > 0 ? utf8(JSON.stringify(decosArr)) : null
   const extraBytes = data.extraProps && data.extraProps.length > 0 ? utf8(JSON.stringify(data.extraProps)) : null
 
-  let sectionCount = 4 // settings + direction + angle + twirl
+  let sectionCount = 3 // settings + direction + twirl（angle 段 v2 起省略）
   if (actionsBytes) sectionCount++
   if (decosBytes) sectionCount++
   if (extraBytes) sectionCount++
@@ -363,7 +401,6 @@ export function encodeIlybin(data: IlybinData): Uint8Array {
   const sections: Array<{ id: number; payload: Uint8Array }> = [
     { id: S_SETTINGS, payload: settingsBytes },
     { id: S_DIRECTION, payload: directionSec },
-    { id: S_ANGLE, payload: angleSec },
     { id: S_TWIRL, payload: twirlSec },
   ]
   if (actionsBytes) sections.push({ id: S_ACTIONS, payload: actionsBytes })
@@ -422,14 +459,13 @@ export function decodeIlybin(bytes: Uint8Array): IlybinData {
   const settingsRaw = byId.get(S_SETTINGS)
   if (!settingsRaw) throw new Error('[ilybin] 缺少 settings section')
   const directionRaw = byId.get(S_DIRECTION)
-  const angleRaw = byId.get(S_ANGLE)
-  if (!directionRaw || !angleRaw) throw new Error('[ilybin] 缺少 direction/angle section')
+  if (!directionRaw) throw new Error('[ilybin] 缺少 direction section')
+  const angleRaw = byId.get(S_ANGLE) // v1 遗留文件含此段；v2 起省略，由 reconstructAngle 重建
   const twirlRaw = byId.get(S_TWIRL)
   if (!twirlRaw) throw new Error('[ilybin] 缺少 twirl section')
 
   const settings = JSON.parse(new TextDecoder().decode(settingsRaw)) as Record<string, unknown>
   const direction = decodeFloatSection(directionRaw, tileCount, wantF32)
-  const angle = decodeFloatSection(angleRaw, tileCount, wantF32)
 
   let twirl: Int32Array | Float64Array
   if (wantF32) {
@@ -451,6 +487,11 @@ export function decodeIlybin(bytes: Uint8Array): IlybinData {
     }
     twirl = arr
   }
+
+  // v1 文件有存量 angle 段直接用；v2 起省略 → 由 direction+twirl 正向重建
+  const angle = angleRaw
+    ? decodeFloatSection(angleRaw, tileCount, wantF32)
+    : reconstructAngle(direction, twirl, tileCount, wantF32)
 
   const decoder = new TextDecoder()
   const actionsRaw = byId.get(S_ACTIONS)

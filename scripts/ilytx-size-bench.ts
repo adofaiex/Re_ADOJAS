@@ -8,6 +8,12 @@
  *   4. 消融：丢掉 direction 段（导入时重算）能省多少？
  *   5. 生产管线（tar + 音频 + 分块 xz）最终 .ilytx 里音频占多少？
  *
+ * 结论（v2 落地）：弃 direction 的路线因破坏分数谱面严格导出等价被否决，
+ * 改为弃 angle 段（angle 是 direction+twirl 的纯函数，解码端重建，见
+ * ilybin.reconstructAngle）——677w ilybin raw 45.47→19.64MB、
+ * xz L6 单流 8.92→4.65MB（-47.9%）。第 4 问的 direction 消融保留供参考
+ *（它同时显示 direction 是 v2 之后唯一的大段，进一步压缩只能从它下手）。
+ *
  * 谱面生成：seeded PRNG 非周期角度 + 拷贝粘贴段（长程冗余）+ 浮点装饰参数。
  * 注意：不能用模数循环生成（周期病态重复会让所有压缩器撞帧头地板，对比失真）。
  *

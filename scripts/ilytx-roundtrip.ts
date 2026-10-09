@@ -93,6 +93,15 @@ function makeChart(opts: { fractional: boolean }): string {
   })
 }
 
+/** 取 Level 的相对角数组（紧凑 store.angle 或对象 Tile.angle），统一成 ArrayLike<number> */
+function anglesOf(level: ADOFAI.Level): ArrayLike<number> {
+  const tiles = level.tiles as unknown
+  if (Array.isArray(tiles)) {
+    return (tiles as Array<{ angle: number }>).map((t) => t.angle)
+  }
+  return (tiles as { angle: ArrayLike<number> }).angle
+}
+
 /** 解析 ilybin section 布局（header 12B + {id u8, len u32, payload}），返回 id → payload */
 function parseIlybinSections(buf: Uint8Array): Map<number, Uint8Array> {
   const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength)
@@ -129,13 +138,39 @@ async function roundTrip(label: string, chartText: string, compact: boolean, eps
   check(rebuilt.isCompactTiles() === original.isCompactTiles(), `${label}: tileMode 保持`)
   check(rebuilt.tiles.length === original.tiles.length, `${label}: tileCount ${rebuilt.tiles.length}`)
 
-  // 回归：紧凑模式 angle 段必须走 f32 定宽（kind=2，比 varint 小 18-24%、比
-  // 曾造成 54MB 膨胀的 f64 回退小 4 倍）；对象模式保持 FloatSection 原路径
-  //（f64 兜底，不量化）。
-  const angleSec = parseIlybinSections(bytes).get(3)
-  const angleKindOk = angleSec !== undefined && (compact ? angleSec[0] === 2 : angleSec[0] !== 2)
-  check(angleKindOk, `${label}: angle 段编码 ${compact ? 'f32 定宽 (kind=2)' : 'FloatSection (非 f32)'}`,
-    angleSec !== undefined ? `kind=${angleSec[0]}` : 'missing section')
+  // 回归：angle 段 v2 起不再落盘（由 direction+twirl 正向重建），且重建结果
+  // 与原库状态机等价。整数/特殊砖谱面位精确（eps=0）；分数谱面允许 ≤1 ulp
+  //（见 ilybin.reconstructAngle 注释：原库状态机跑在 f64 原始值上，重建跑在
+  // f32 量化 direction 上，差值不参与导出，物理不可见）。
+  //
+  // 比较用**环绕感知距离**（旋转量是 mod 360 的量）：退化反转砖（delta≈0）
+  // 上，原库的 f64 噪音（如 2.8e-14）恰好逃过其自身的 `prev===0→360` 提升，
+  // 而重建在 f32 网格上 delta 精确为 0 → 提升为 360 —— 两者是同一旋转
+  //（mod 360），且重建值更接近库的设计意图。angle 在 .adofai 生态从不持久化
+  //（导出只写 angleData，各加载器各自重算），此类差异等价于加载器间算术差。
+  const sections = parseIlybinSections(bytes)
+  check(!sections.has(3), `${label}: angle 段已省略（v2 重建）`, sections.has(3) ? 'present' : undefined)
+  const origAng = anglesOf(original)
+  const rebAng = anglesOf(rebuilt)
+  let maxErr = 0
+  let wrapCount = 0 // 环绕砖（原始差 >1°、环绕差 <1e-6°）计数，仅记录
+  if (origAng.length !== rebAng.length) {
+    maxErr = Infinity
+  } else {
+    for (let i = 0; i < origAng.length; i++) {
+      const a = origAng[i]
+      const b = rebAng[i]
+      if (Number.isNaN(a) && Number.isNaN(b)) continue
+      const raw = Math.abs(a - b)
+      const d = raw % 360
+      const circ = Math.min(d, 360 - d)
+      if (raw > 1 && circ < 1e-6) wrapCount++
+      if (circ > maxErr) maxErr = circ
+    }
+  }
+  const angEps = compact ? 1e-4 : 1e-9
+  check(maxErr <= angEps, `${label}: 重建 angle 等价 (环绕感知 eps=${angEps})`,
+    `maxErr=${maxErr}${wrapCount > 0 ? `，环绕砖 ${wrapCount}` : ''}`)
 
   const textLen = new TextEncoder().encode(chartText).length
   console.log(
