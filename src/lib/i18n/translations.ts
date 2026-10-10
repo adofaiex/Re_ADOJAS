@@ -176,6 +176,12 @@ export const translations = {
         enabled: "已启用",
         disabled: "已禁用",
       },
+      showPlanetRing: {
+        title: "显示行星环",
+        description: "显示选中星球周围的旋转虚线环。",
+        enabled: "已启用",
+        disabled: "已禁用",
+      },
       recordingMode: {
         title: "录制模式",
         description: "隐藏编辑器控件，仅保留 FPS、右上角信息与左下角播放控制（F9 切换）。",
@@ -425,6 +431,12 @@ export const translations = {
         enabled: "Enabled",
         disabled: "Disabled",
       },
+      showPlanetRing: {
+        title: "Show Planet Ring",
+        description: "Show the rotating dashed ring around the active planet.",
+        enabled: "Enabled",
+        disabled: "Disabled",
+      },
       recordingMode: {
         title: "Recording Mode",
         description: "Hide editor controls, keeping only the FPS, top-right info and bottom-left playback controls (toggle with F9).",
@@ -665,6 +677,12 @@ export const translations = {
       showHitErrorMeter: {
         title: "精度バー表示",
         description: "判定誤差の精度バー（Hit Error Meter）を表示します。",
+        enabled: "有効",
+        disabled: "無効",
+      },
+      showPlanetRing: {
+        title: "惑星リング表示",
+        description: "選択中の惑星の周囲に回転する破線リングを表示します。",
         enabled: "有効",
         disabled: "無効",
       },

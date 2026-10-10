@@ -183,17 +183,13 @@ export class JudgmentDisplay {
     const color = COLOR[margin] ?? '#ffffff';
 
     ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
-    ctx.font = 'bold 40px "Google Sans Code", "Segoe UI", sans-serif';
+    // Thin 字重 + 无描边：描边会让文字显厚重、质感差；仅保留轻微投影保证浅色背景可读。
+    ctx.font = '100 40px "Google Sans Code", "Segoe UI", sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    // 描边（黑底）；让浅色文字在深色背景上也可读
-    ctx.lineJoin = 'round';
-    ctx.lineWidth = 6;
-    ctx.strokeStyle = 'rgba(0,0,0,0.85)';
-    ctx.strokeText(text, CANVAS_W / 2, CANVAS_H / 2, CANVAS_W - 16);
-    ctx.shadowColor = 'rgba(0,0,0,0.6)';
-    ctx.shadowBlur = 6;
-    ctx.shadowOffsetY = 2;
+    ctx.shadowColor = 'rgba(0,0,0,0.45)';
+    ctx.shadowBlur = 4;
+    ctx.shadowOffsetY = 1.5;
     ctx.fillStyle = color;
     ctx.fillText(text, CANVAS_W / 2, CANVAS_H / 2, CANVAS_W - 16);
 

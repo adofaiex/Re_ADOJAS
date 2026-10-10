@@ -122,6 +122,12 @@ export class FlashEffect {
      */
     private fgMode: 'front' | 'behind' = 'front';
     private scene: Scene | null = null;
+    /** legacyFlash 谱面（v13 及更早，如 3. Rainy Gate）：FG/BG 共用一块闪屏材质。 */
+    private legacyFlash: boolean = false;
+
+    public setLegacyFlash(v: boolean): void {
+        this.legacyFlash = v;
+    }
 
     public setFgPlaneMode(mode: 'front' | 'behind'): void {
         if (this.fgMode === mode) return;
@@ -180,6 +186,18 @@ export class FlashEffect {
         // 它的 endColor/endOpacity —— 再终止旧过渡，然后才由新闪屏接管。
         this.completeTransition(transition, material);
 
+        // legacyFlash 谱面：FG/BG 共用一块闪屏材质 → 新 Flash 覆盖另一面的状态
+        // （同一渲染器/材质 + 另一面补完并把 alpha 归零）。
+        // 否则 tile 64 停在 100% 白的前景闪屏会一直盖住 tile 73 的背景闪屏。
+        if (this.legacyFlash) {
+            const otherT = plane === 'FG' ? this.bgTransition : this.fgTransition;
+            const otherMat = plane === 'FG' ? this.bgMaterial : this.fgMaterial;
+            this.completeTransition(otherT, otherMat);
+            otherT.active = false;
+            otherT.hold = false;
+            otherMat.opacity = 0;
+        }
+
         if (flashStyle === 'StayBlack') {
             transition.active = true;
             transition.hold = false;
@@ -197,21 +215,30 @@ export class FlashEffect {
             return;
         }
 
-        // 颜色是 #RRGGBBAA（也可能只有 #RGB / #RRGGBB）：alpha 要单独取出，
-        // 因为 THREE.Color 只吃 RGB，透明度只能走 material.opacity。
-        // 初始值 = startColor（含 alpha），末值 = endColor（含 alpha）；
-        // 未给末色时，末值 = 起始色但全透明（经典的闪一下）。
-        // 显式 startOpacity/endOpacity（0..100）优先于颜色里带的 alpha。
+        // 颜色是 #RRGGBB / #RRGGBBAA（后两位 alpha 可省略，默认 255）；颜色串只取前 6 位 RGB。
+        // 透明度以 startOpacity/endOpacity 属性为准（0..100）：
+        //   缺省 start = 100%（不透明起始）、end = 0%（淡出，经典"闪一下"）。
+        // 颜色自带的 alpha **不参与**（与参考行为一致：FlashAlpha = opacity）。
+        // 旧格式（color/colorTo/opacity/flashStyle）无 start* 字段：那时颜色自带 alpha 有意义，保留回退。
         const start = this.parseColor(event.startColor ?? event.color ?? 'ffffff');
         const endProvided = event.endColor !== undefined || event.colorTo !== undefined;
         const end = endProvided
             ? this.parseColor(event.endColor ?? event.colorTo)
             : { hex: start.hex, alpha: 0 };
 
+        const opacity01 = (v: unknown, defPercent: number): number => {
+            const p = typeof v === 'number' && Number.isFinite(v) ? v : defPercent;
+            return Math.max(0, Math.min(1, p / 100));
+        };
+        const newFormat = event.startColor !== undefined || event.endColor !== undefined
+            || event.startOpacity !== undefined || event.endOpacity !== undefined;
+        // 新格式：alpha 只看 opacity 属性（缺省 start 100 / end 0）；旧格式：保留颜色 alpha 语义。
         const startOpacity = event.startOpacity !== undefined
-            ? event.startOpacity / 100
-            : (event.opacity !== undefined ? event.opacity / 100 : start.alpha);
-        const endOpacity = event.endOpacity !== undefined ? event.endOpacity / 100 : end.alpha;
+            ? opacity01(event.startOpacity, 100)
+            : (event.opacity !== undefined ? opacity01(event.opacity, 100) : (newFormat ? 1 : start.alpha));
+        const endOpacity = event.endOpacity !== undefined
+            ? opacity01(event.endOpacity, 0)
+            : (newFormat ? 0 : end.alpha);
         const ease = event.ease || event.easing || 'Linear';
         const duration = event.duration ?? 1;
 

@@ -4,6 +4,10 @@ uniform sampler2D uIconAtlas;
 uniform float uIconAtlasCols;
 uniform float uIconSize;
 uniform float uDisableTexture;
+uniform sampler2D uTrackEdge;
+uniform float uEdgeGradient;
+uniform float uEdgeTune;
+uniform float uEdgeBaseBorder;
 
 varying vec3 vColor;
 varying vec3 vInstanceColor;
@@ -13,11 +17,22 @@ varying vec3 vWorldPosition;
 varying float vTexSeed;
 varying float vFloorIconType;
 varying vec2 vIconLocalPos;
+varying vec2 vTileUv;
 varying float vFloorIconAngle;
 varying float vIconScale;
 
 void main() {
-    vec3 finalColor = mix(vInstanceBgColor, vInstanceColor, vColor.r);
+    // 样式条带：表面色 = 取色基 × 条带(uv.y)，uv.y = 0 砖外缘 → 1 砖内部 ——
+    // Neon 白/轨道色描边环 + 黑本体、NeonLight 环 + 半灰本体、Basic 黑环 + 轨道色本体、
+    // Minimal 纯轨道色；取色基（fill/border）与参数按样式在 JS 侧配置。
+    vec3 finalColor;
+    if (uEdgeGradient > 0.5) {
+        vec3 base = mix(vInstanceColor, vInstanceBgColor, uEdgeBaseBorder);
+        vec3 edge = texture2D(uTrackEdge, vec2(0.5, clamp(vTileUv.y, 0.0, 1.0))).rgb;
+        finalColor = base * min(edge * uEdgeTune, vec3(1.0));
+    } else {
+        finalColor = mix(vInstanceBgColor, vInstanceColor, vColor.r);
+    }
 
     if (vTexSeed > 0.0 && uDisableTexture < 0.5) {
         vec2 uv = vWorldPosition.xy * uTexScale;

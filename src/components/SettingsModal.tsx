@@ -67,6 +67,12 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
           type: "showHitErrorMeter",
         },
         {
+          id: "showPlanetRing",
+          title: t("settings.showPlanetRing.title"),
+          description: t("settings.showPlanetRing.description"),
+          type: "showPlanetRing",
+        },
+        {
           id: "recordingMode",
           title: t("settings.recordingMode.title"),
           description: t("settings.recordingMode.description"),
@@ -347,6 +353,26 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                       </button>
                       <span className="text-sm text-slate-600 dark:text-slate-400">
                         {settings.showHitErrorMeter ? t("settings.showHitErrorMeter.enabled") : t("settings.showHitErrorMeter.disabled")}
+                      </span>
+                    </div>
+                  )}
+
+                  {setting.type === "showPlanetRing" && (
+                    <div className="flex items-center gap-3">
+                      <button
+                        onClick={() => updateSettings({ showPlanetRing: !settings.showPlanetRing })}
+                        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                          settings.showPlanetRing ? "bg-purple-500" : "bg-slate-300 dark:bg-slate-600"
+                        }`}
+                      >
+                        <span
+                          className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                            settings.showPlanetRing ? "translate-x-6" : "translate-x-1"
+                          }`}
+                        />
+                      </button>
+                      <span className="text-sm text-slate-600 dark:text-slate-400">
+                        {settings.showPlanetRing ? t("settings.showPlanetRing.enabled") : t("settings.showPlanetRing.disabled")}
                       </span>
                     </div>
                   )}

@@ -117,5 +117,14 @@ export function getEasingFunctionWasm(easeName: string): ((t: number) => number)
 export function getEasingFunction(easeName: string): (t: number) => number {
   const wasmFn = getEasingFunctionWasm(easeName);
   if (wasmFn) return wasmFn;
-  return EasingFunctions[easeName] || EasingFunctions.Linear;
+  const direct = EasingFunctions[easeName];
+  if (direct) return direct;
+  // 'Quad.easeOut' / 'Linear.easeNone' 这类命名 → JS 表键：'OutQuad' / 'Linear'。
+  // WASM 未就绪时也必须能解析，否则会静默退化成 Linear。
+  const m = /^([A-Za-z]+)\.ease(InOut|In|Out|None)$/.exec(easeName);
+  if (m) {
+    const key = m[2] === 'None' ? 'Linear' : `${m[2]}${m[1]}`;
+    if (EasingFunctions[key]) return EasingFunctions[key];
+  }
+  return EasingFunctions.Linear;
 }

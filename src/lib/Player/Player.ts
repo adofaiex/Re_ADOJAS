@@ -1,4 +1,4 @@
-import { Scene, OrthographicCamera, WebGLRenderer, Mesh, Vector3, Texture, BufferGeometry, WebGLRenderTarget, Color, Vector2, DirectionalLight, Float32BufferAttribute, Euler, Material, MeshBasicMaterial, TextureLoader, SRGBColorSpace, NearestFilter, LinearFilter, PlaneGeometry, BufferAttribute, Sprite, SpriteMaterial, RepeatWrapping, LinearMipmapLinearFilter, VideoTexture, DoubleSide, Raycaster, Intersection } from 'three';
+import { Scene, OrthographicCamera, WebGLRenderer, Mesh, Vector3, Texture, BufferGeometry, WebGLRenderTarget, Color, Vector2, DirectionalLight, Float32BufferAttribute, Euler, Material, MeshBasicMaterial, TextureLoader, SRGBColorSpace, NearestFilter, LinearFilter, PlaneGeometry, BufferAttribute, Sprite, SpriteMaterial, RepeatWrapping, ClampToEdgeWrapping, LinearMipmapLinearFilter, VideoTexture, DoubleSide, Raycaster, Intersection } from 'three';
 import {WebGPURenderer} from 'three/webgpu';
 import { IPlayer, ILevelData, IMusic, TargetFramerateType, RenderScaleType, InputMethodType, InputQueue } from './types';
 import { Planet } from './Planet';
@@ -12,6 +12,7 @@ import { EasingFunctions } from './Easing';
 import { HTMLAudioMusic, getSharedAudioContext } from './HTMLAudioMusic';
 import tileTextureUrl from '@/assets/texture.json';
 import floorTopGlowUrl from '@/assets/tile/floor-top-glow.json';
+import trackEdgeUrls from '@/assets/tile/track-edge.json';
 import { TileColorManager, TileColorConfig, parseHexAlpha } from './TileColorManager';
 import { isEnabled, isEventActive } from './EventUtils';
 import { loadCompressedTexture } from './TextureCompress';
@@ -35,6 +36,7 @@ import { JudgmentDisplay } from './JudgmentDisplay';
 import { HitErrorMeter } from './HitErrorMeter';
 import { HoldRenderer } from './HoldRenderer';
 import { MultiPlanetIndicator } from './MultiPlanetIndicator';
+import { PlanetRing } from './PlanetRing';
 import { getIconTypeIndex, getTwirlTexture, getSetSpeedTexture, IconType, buildIconAtlas, ICON_ATLAS_SIZE, ICON_TYPES, iconScaleForIndex, isDlcEventIconIndex, getPlanetTexture, getTintedPlanetTexture, ensureTintedPlanetTexture, getHoldTexture } from './IconLoader';
 import Stats from 'three/examples/jsm/libs/stats.module.js';
 import type { Bloom, Flash, RecolorTrack } from 'adofai/event';
@@ -114,6 +116,13 @@ export class Player implements IPlayer {
   private planetBlue: Planet | null = null;
   /** 全部行星按颜色 id（0..7）缓存；MultiPlanet 时 N>2 会创建额外行星。 */
   private planetsById: (Planet | null)[] = new Array(8).fill(null);
+  /** 行星虚线环（按颜色 id 缓存；仅选中星显示）。 */
+  private planetRingsById: (PlanetRing | null)[] = new Array(8).fill(null);
+  /** 行星虚线环显示开关（设置项）。 */
+  private showPlanetRing: boolean = true;
+  /** 行星环旋转累计时间与上一帧时刻（不受暂停/seek 影响，只按真实帧推进）。 */
+  private _ringLastMs = 0;
+  private _ringSpin = 0;
   /** 当前激活的行星颜色 id 列表（默认 [红, 蓝]）。 */
   private activePlanetIds: number[] = [0, 1];
   /** 最近一次应用的行星列表 ref，避免每帧重复增删场景对象。 */
@@ -193,6 +202,12 @@ export class Player implements IPlayer {
   private holdRenderers: Map<number, HoldRenderer> = new Map();
   /** MultiPlanet 变多砖的虚线多边形指示器（按砖索引）。 */
   private mpIndicators: Map<number, MultiPlanetIndicator> = new Map();
+  /** 指示器顶点上的灰色占位行星贴图（异步染色，解码前先用纯色）。 */
+  private mpMarkerTexture: Texture | null = null;
+  /** 占位球构建记录（诊断用）：floor → 顶点/贴轨/占位球明细。 */
+  private mpMarkerDebug: Map<number, {
+    n: number; verts: { x: number; y: number }[]; onTrack: number[]; markers: number[];
+  }> = new Map();
   /** Hold 带构建时起点砖的位置（用于跟随起点砖的运行时移动：MoveTrack 时整体平移）。 */
   private holdStartBase: Map<number, { x: number; y: number }> = new Map();
   /** 设置项：是否显示准度条（创建时应用，运行中实时切换）。 */
@@ -345,6 +360,8 @@ export class Player implements IPlayer {
   private _trailHistTime: Float64Array = new Float64Array(Player.TRAIL_HIST_MAX);
   private _trailHistHead: number = 0;
   private _trailHistCount: number = 0;
+  /** 上一帧的 level 时间（拖尾诊断用，算实际帧间隔）。 */
+  private _lastTrailFrameMs: number = -1;
 
   // Camera Controller
   private cameraController: CameraController;
@@ -599,6 +616,12 @@ export class Player implements IPlayer {
     this.buildHoldRenderers();
     // MultiPlanet：为球数变多的砖建流动虚线多边形（到达后淡出）
     this.buildMultiPlanetIndicators();
+    // 顶点灰色占位行星用灰色染色的行星贴图；解码完成后重建指示器换上贴图
+    void ensureTintedPlanetTexture(0x808080).then((tex) => {
+      if (!this.levelData) return;
+      this.mpMarkerTexture = tex;
+      this.buildMultiPlanetIndicators();
+    });
 
     // 基础值访问器：位置直接引用 PositionTrackManager 的 typed array；
     // 旋转/缩放/透明度按需读取 —— 不再按砖构造 Vector2[] base 数组。
@@ -675,6 +698,8 @@ export class Player implements IPlayer {
                 glow: inst.glow,
                 visible: inst.visible,
             } : null,
+            // 样式渐变条现场状态（是否生效 / 取色基 / 是否与轨道色一致）
+            style: inst ? this.instancedMeshManager?.debugShapeStyle(inst.shapeKey) ?? null : null,
         };
     };
     // 运行期开关/查询：__adojasBloom(false) 关泛光；__adojasBloom() 查询当前 bloom 参数。
@@ -775,6 +800,97 @@ export class Player implements IPlayer {
       }
       return out;
     };
+    // 拖尾诊断：__adojasTrail() → 路径分派 + 每颗星的点数/缓冲统计
+    // 用来定位"MultiPlanet 下拖尾消失"：看清是走了哪条路径、点数为多少、
+    // 以及是不是被 n<2 清空的。
+    (window as any).__adojasTrail = () => {
+      const TRAIL_DURATION = 0.74;
+      const now = this.currentLevelTimeForDiag();
+      const curInfo = this.getTilePlanetInfo(this.currentTileIndex);
+      const winIdx = this.getTileIndexAtLevelTime(now - TRAIL_DURATION);
+      const winInfo = this.getTilePlanetInfo(winIdx);
+      const useHistory = curInfo.ids.length > 2 || winInfo.ids.length > 2;
+      const lastIdx = (this._trailHistHead - 1 + Player.TRAIL_HIST_MAX) % Player.TRAIL_HIST_MAX;
+      const minT = now - TRAIL_DURATION;
+      const perPlanet = this.activePlanetIds.map((id) => {
+        const hist = this._trailHistById[id];
+        let n = 0;
+        if (hist) {
+          for (let i = 0; i < this._trailHistCount && n < 120; i++) {
+            const idx = (lastIdx - i + Player.TRAIL_HIST_MAX) % Player.TRAIL_HIST_MAX;
+            if (this._trailHistTime[idx] < minT) break;
+            n++;
+            if (this._trailHistStart[id] >= 0 && idx === this._trailHistStart[id]) break;
+          }
+        }
+        const p = this.planetsById[id];
+        return {
+          id,
+          hasHist: !!hist,
+          points: n,
+          startIdx: this._trailHistStart[id],
+          trailMesh: !!p?.trail,
+          visible: p?.trail?.mesh ? p.trail.mesh.visible : null,
+        };
+      });
+      return {
+        showTrail: this.showTrail,
+        path: useHistory ? 'history' : 'analytic',
+        curN: curInfo.ids.length,
+        winN: winInfo.ids.length,
+        winTile: winIdx,
+        curTile: this.currentTileIndex,
+        frameGapMs: this._lastTrailFrameMs > 0 ? (now - this._lastTrailFrameMs) * 1000 : -1,
+        histCount: this._trailHistCount,
+        histHead: this._trailHistHead,
+        perPlanet,
+      };
+    };
+    // MultiPlanet 占位球探针：__adojasMpMarker([floor]) → 顶点/贴轨/占位球明细 + 该砖真实行星
+    // 用来确认"多出来的灰球"数量与位置是否正确（以及画面上多出来的球到底是灰球还是真实行星）。
+    (window as any).__adojasMpMarker = (floor?: number) => {
+      let floors: number[];
+      if (floor !== undefined) {
+        // 指定砖没有指示器时（行星数未变），回退到最近的、真的有指示器的砖
+        if (this.mpMarkerDebug.has(floor)) {
+          floors = [floor];
+        } else {
+          const near = [...this.mpMarkerDebug.keys()].sort(
+            (a, b) => Math.abs(a - floor) - Math.abs(b - floor)
+          );
+          floors = near.length ? [near[0]] : [];
+        }
+      } else {
+        floors = [...this.mpMarkerDebug.keys()].sort((a, b) => a - b);
+      }
+      return floors.slice(0, 40).map((f) => {
+        const d = this.mpMarkerDebug.get(f);
+        // 砖心 / 下一砖心：轨道线段两端
+        const px = this.tilePositions.getX(f), py = this.tilePositions.getY(f);
+        const qx = this.tilePositions.getX(f + 1), qy = this.tilePositions.getY(f + 1);
+        const info = this.getTilePlanetInfo(f);
+        const real = info.ids.map((id, i) => ({
+          id,
+          role: i === info.pivotPos ? 'pivot' : i === (info.pivotPos + 1) % info.ids.length ? 'mover' : 'extra',
+          x: +this._layoutX[id].toFixed(3),
+          y: +this._layoutY[id].toFixed(3),
+        }));
+        return {
+          floor: f,
+          hasIndicator: !!d,
+          n: d?.n ?? 0,
+          track: [[+px.toFixed(3), +py.toFixed(3)], [+qx.toFixed(3), +qy.toFixed(3)]],
+          onTrack: d?.onTrack ?? [],
+          markers: d?.markers ?? [],
+          markerCount: d?.markers.length ?? 0,
+          // 期望值：总行星数减去已有的两颗
+          expect: (d?.n ?? 0) - 2,
+          ok: (d?.markers.length ?? 0) === (d?.n ?? 0) - 2,
+          verts: (d?.verts ?? []).map((p) => [+p.x.toFixed(3), +p.y.toFixed(3)]),
+          realPlanets: real,
+        };
+      });
+    };
     // 若 flips === storeFlips（且尾部状态在变），说明 Player 已拿到全部旋转数据，问题只可能在渲染/观感。
     (window as any).__adojasTwirl = (from: number = 0, to: number = 20) => {
       const n = this.twirlAt.length;
@@ -852,6 +968,8 @@ export class Player implements IPlayer {
         if (mode === 'front' || mode === 'behind') this.flashEffect?.setFgPlaneMode?.(mode);
         return this.flashEffect?.getFgPlaneMode?.() ?? null;
     };
+    // 运行时状态快照（排查 canvas 卡死）：冻结时在控制台执行 __adojasState()。
+    (window as any).__adojasState = () => this.debugState();
     if (opts?.deferDecorations) {
       // 装饰物分帧/异步创建（加载界面显示进度）——见 buildDecorationsAsync()
       this.decorationManager.collectDecoSources();
@@ -1456,7 +1574,12 @@ export class Player implements IPlayer {
       const moverId = info.ids[(info.pivotPos + 1) % info.ids.length];
       const planet = this.planetsById[moverId];
       if (planet) renderer.setColor(planet.color);
-      renderer.setVisible(true);
+
+      // 与起点砖同步显示：轨道出现/消失动画（Fade 等）或 MoveTrack 透明度还没到位时，
+      // 长按带不能抢跑显示（砖还没出现，弧线不该先亮）。采样与砖动画同一时间域。
+      const tileOpacity = this.timelineManager.sample(`tile:${floor}`, 'opacity', timeInLevel) ?? 1;
+      renderer.setOpacity(tileOpacity);
+      renderer.setVisible(tileOpacity > 0.001);
 
       // 官方把 hold 带挂在起点砖下：起点砖运行时移动（MoveTrack）→ 整条弧跟着平移，
       // 画完定型、与 x−1/x+1 之后的位置变化无关。
@@ -1509,7 +1632,43 @@ export class Player implements IPlayer {
         const th = thetaC + dirSign * 2 * Math.PI * ((1 - k) - newN / 2) / newN;
         pts.push({ x: cx + Math.cos(th) * r, y: cy + Math.sin(th) * r });
       }
-      const ind = new MultiPlanetIndicator(pts);
+      // 每个顶点代表一颗行星；轨道上已经有的两颗（pivot/mover）不画占位球，
+      // 只在"离开轨道"的顶点上补灰色占位球 = 多出来的那几颗。
+      //
+      // 判据是顶点到轨道**直线**（过砖心、方向 = 进入该砖的方向）的距离，不是到
+      // 轨道**线段**的距离：直线上除 pivot 外还有一个顶点落在砖心背后（与线段共线
+      // 但在线段之外），用线段判据会把它误判成灰球 → 多画一颗（n=3 时画成 2 个）。
+      //
+      // 已验证（真实谱面 14 个 MultiPlanet 砖 × n=3..8 × CW/CCW）：贴直线的恒为
+      // 2 个顶点，灰球恒为 n-2 个，且都落在唯一离开轨道的那一侧。
+      const startRad = this.tileStartAngle[i] ?? 0; // 已是弧度
+      const lineUx = Math.cos(startRad);
+      const lineUy = Math.sin(startRad);
+      const ON_TRACK_EPS = 0.02;
+      const distToTrackLine = (p: { x: number; y: number }): number =>
+        Math.abs(-(p.x - px) * lineUy + (p.y - py) * lineUx);
+      const markerPts: { x: number; y: number }[] = [];
+      const onTrackIdx: number[] = [];
+      for (let k = 0; k < newN; k++) {
+        if (distToTrackLine(pts[k]) <= ON_TRACK_EPS) { onTrackIdx.push(k); continue; }
+        markerPts.push(pts[k]);
+      }
+      this.mpMarkerDebug.set(i, {
+        n: newN,
+        verts: pts.slice(0, newN),
+        onTrack: onTrackIdx,
+        markers: pts.slice(0, newN)
+          .map((_, k) => k)
+          .filter((k) => !onTrackIdx.includes(k)),
+      });
+      const ind = new MultiPlanetIndicator(
+        pts,
+        0.45,
+        0.05,
+        markerPts,
+        this.mpMarkerTexture,
+        0.22
+      );
       ind.render(this.scene);
       this.mpIndicators.set(i, ind);
     }
@@ -1521,6 +1680,7 @@ export class Player implements IPlayer {
       ind.dispose();
     }
     this.mpIndicators.clear();
+    this.mpMarkerDebug.clear();
   }
 
   /** 虚线持续流动；玩到该砖后 0.5s 淡出（预览/未到达时保持可见）。 */
@@ -2373,6 +2533,13 @@ export class Player implements IPlayer {
     geometry.setIndex(meshData.faces);
     geometry.setAttribute('position', new Float32BufferAttribute(meshData.vertices, 3));
     geometry.setAttribute('color', new Float32BufferAttribute(meshData.colors, 3));
+    // 沿轨道的 UV（样式渐变条采样用；实例材质按 style 采样 track-edge 贴图）
+    // 样式条带 UV（构建器写入：v = 边缘 0 → 中心 1）；无 uv 的形状退回本体色
+    const uvCount = Math.floor(meshData.vertices.length / 3);
+    const uvArr = meshData.uvs && meshData.uvs.length === uvCount * 2
+      ? meshData.uvs
+      : Array.from({ length: uvCount * 2 }, (_, i) => (i % 2 === 0 ? 0.5 : 1));
+    geometry.setAttribute('uv', new Float32BufferAttribute(uvArr, 2));
     geometry.computeVertexNormals();
     // 砖块辉度用：沿路径的完整长度（弯砖 AABB 不等于它）。
     if (meshData.tileLength) geometry.userData.tileLength = meshData.tileLength;
@@ -2715,14 +2882,50 @@ export class Player implements IPlayer {
     let autoPlayTiles = false; // AutoPlayTiles running state
 
     // ── MultiPlanet：行星列表模拟（颜色 id 列表 + 枢轴位置）────────────
-    // 官方 PlanetarySystem.SetNumPlanets：
-    //   增星 = 把备用池的行星插入到 chosen 索引之后（绿→黄→紫→粉→橙→青）；
-    //   减星 = 移除 chosen 的前驱；随后 chosen 的下标相应前移。
-    // 逐砖推进：离开该砖时移动星 = next；midspin 且 N>2 时 = prev（官方 MoveToNextFloor）。
+    // 增删星的参照星是【事件砖的前一砖】的枢轴：枢轴切换发生在过砖之后，
+    // 星数变更那一刻参照星仍指向前一砖。
+    //   增星 = 插到参照星之前（新星成为参照星的前驱 = 不在轨道上的那几颗）；
+    //   减星 = 移除参照星的前驱（就是那些不在轨道上的星）；随后下标相应前移。
+    // 逐砖推进：离开该砖时移动星 = next；midspin 且 N>2 时 = prev。
     let numPlanets = 2;
     const planetIds: number[] = [0, 1];          // 红、蓝
     const planetPool: number[] = [2, 3, 4, 5, 6, 7]; // 绿、黄、紫、粉、橙、青
     let chosenPos = 0;                            // 当前枢轴在列表中的位置
+    let prevPivotPos = 0;                         // 前一砖枢轴的下标（增删星参照）
+
+    /**
+     * 应用一次星数变化（含多次连增/连减）。
+     * 参照星 = 前一砖枢轴 prevPivotPos；本砖枢轴（移动星）与参照星在变更后必须保留。
+     */
+    const applyMultiPlanetCount = (req: number): void => {
+        if (req === numPlanets) return;
+        const moverId = planetIds[chosenPos];
+        const refId = planetIds[prevPivotPos];
+        if (req > numPlanets) {
+            // 增星：逐颗插到参照星之前（后续插入仍落在参照星之前）
+            for (let k = 1; k <= req - numPlanets; k++) {
+                const id = planetPool.shift();
+                if (id === undefined) break;
+                planetIds.splice(prevPivotPos + k - 1, 0, id);
+            }
+        } else {
+            // 减星：移除参照星的前驱（可能跨列表尾）
+            const remove = numPlanets - req;
+            const positions: number[] = [];
+            for (let k = 1; positions.length < remove && k <= numPlanets; k++) {
+                const pos = (prevPivotPos - k + numPlanets) % numPlanets;
+                if (planetIds[pos] === moverId) continue; // 保险：本砖枢轴永不被移除（补取更远的前驱）
+                positions.push(pos);
+            }
+            positions.sort((a, b) => a - b); // 低下标先回池：队首为下标最大的被移除星（下次增星优先复用）
+            const removed = positions.map(pos => planetIds[pos]);
+            for (let k = positions.length - 1; k >= 0; k--) planetIds.splice(positions[k], 1);
+            for (const id of removed) planetPool.unshift(id);
+        }
+        numPlanets = planetIds.length;
+        chosenPos = Math.max(0, planetIds.indexOf(moverId));
+        prevPivotPos = Math.max(0, planetIds.indexOf(refId));
+    };
 
     // We iterate through tiles to calculate the rotation/time to reach the NEXT tile.
     for (let i = 0; i < n - 1; i++) {
@@ -2749,32 +2952,8 @@ export class Player implements IPlayer {
                 } else if (event.eventType === 'AutoPlayTiles') {
                     autoPlayTiles = event.enabled !== false;
                 } else if (event.eventType === 'MultiPlanet') {
-                    const req = this.parseMultiPlanetCount(event.planets);
-                    if (req !== numPlanets) {
-                        if (req > numPlanets) {
-                            // 增星：插到枢轴之后
-                            for (let k = 1; k <= req - numPlanets; k++) {
-                                const id = planetPool.shift();
-                                if (id === undefined) break;
-                                planetIds.splice(chosenPos + k, 0, id);
-                            }
-                        } else {
-                            // 减星：移除枢轴的前驱（可能跨列表尾），再压缩索引
-                            const remove = numPlanets - req;
-                            const positions: number[] = [];
-                            for (let k = 1; k <= remove; k++) {
-                                positions.push((chosenPos - k + numPlanets) % numPlanets);
-                            }
-                            positions.sort((a, b) => b - a); // 从后往前删
-                            for (const pos of positions) {
-                                planetPool.unshift(planetIds[pos]);
-                                planetIds.splice(pos, 1);
-                                if (pos < chosenPos) chosenPos--;
-                            }
-                        }
-                        numPlanets = planetIds.length;
-                    }
-                    // 官方特例：若前一砖是 midspin，midspin 砖直接继承新的数量
+                    applyMultiPlanetCount(this.parseMultiPlanetCount(event.planets));
+                    // 若前一砖是 midspin，midspin 砖直接继承新的数量
                     if (i > 0 && tileDirection(tiles, i - 1) === 999) {
                         this.tileNumPlanets[i - 1] = numPlanets;
                     }
@@ -2787,11 +2966,12 @@ export class Player implements IPlayer {
             this.tileAuto[i + 1] = 1;
         }
 
-        // MultiPlanet：记录本砖的 N 与枢轴，再按官方规则推进枢轴
+        // MultiPlanet：记录本砖的 N 与枢轴，再推进枢轴
         this.tileNumPlanets[i] = numPlanets;
         this.tilePivotPlanetId[i] = planetIds[chosenPos] ?? 0;
         this.tilePlanetListRef[i] = planetListRefOf(planetIds);
         this.tilePivotPos[i] = chosenPos;
+        prevPivotPos = chosenPos;   // 下一砖事件增删星的参照（枢轴过砖后才切换）
         if (numPlanets > 2 && tileDirection(tiles, i) === 999) {
             chosenPos = (chosenPos - 1 + numPlanets) % numPlanets;   // midspin：prev
         } else {
@@ -2916,29 +3096,7 @@ export class Player implements IPlayer {
                 } else if (event.eventType === 'Pause') {
                     extraRotation += (event.duration || 0) / 2.0;
                 } else if (event.eventType === 'MultiPlanet') {
-                    const req = this.parseMultiPlanetCount(event.planets);
-                    if (req !== numPlanets) {
-                        if (req > numPlanets) {
-                            for (let k = 1; k <= req - numPlanets; k++) {
-                                const id = planetPool.shift();
-                                if (id === undefined) break;
-                                planetIds.splice(chosenPos + k, 0, id);
-                            }
-                        } else {
-                            const remove = numPlanets - req;
-                            const positions: number[] = [];
-                            for (let k = 1; k <= remove; k++) {
-                                positions.push((chosenPos - k + numPlanets) % numPlanets);
-                            }
-                            positions.sort((a, b) => b - a);
-                            for (const pos of positions) {
-                                planetPool.unshift(planetIds[pos]);
-                                planetIds.splice(pos, 1);
-                                if (pos < chosenPos) chosenPos--;
-                            }
-                        }
-                        numPlanets = planetIds.length;
-                    }
+                    applyMultiPlanetCount(this.parseMultiPlanetCount(event.planets));
                     if (lastIndex > 0 && tileDirection(tiles, lastIndex - 1) === 999) {
                         this.tileNumPlanets[lastIndex - 1] = numPlanets;
                     }
@@ -3069,6 +3227,12 @@ export class Player implements IPlayer {
         this.flashEffect = null;
       }
       this.flashEffect = new FlashEffect();
+      // legacyFlash 谱面：FG/BG 共用闪屏状态（新 Flash 覆盖另一面），见 FlashEffect.startFlash。
+      // version < 4 的老谱面同样按 legacy 处理。
+      {
+        const s: any = this.levelData?.settings;
+        this.flashEffect.setLegacyFlash(!!s?.legacyFlash || (typeof s?.version === 'number' && s.version < 4));
+      }
       // Background 闪光属于主场景（砖块下面一层）；Foreground 闪光仍是上层叠层。
       this.flashEffect.attachToScene(this.scene);
     }
@@ -3135,6 +3299,15 @@ export class Player implements IPlayer {
     if (this.planetRed || this.planetBlue) {
       this.removePlanets();
       this.createPlanets();
+    }
+  }
+
+  /** 行星虚线环显示开关（设置项）；关闭时立即隐藏所有环。 */
+  public setPlanetRingEnabled(enabled: boolean): void {
+    if (this.showPlanetRing === enabled) return;
+    this.showPlanetRing = enabled;
+    if (!enabled) {
+      for (const ring of this.planetRingsById) ring?.setVisible(false);
     }
   }
 
@@ -3577,6 +3750,54 @@ export class Player implements IPlayer {
     }
   }
 
+  /** 冻结看门狗：每 2s 检查一次播放时间是否推进；长帧也记录（排查 canvas 卡死）。 */
+  private _wdLastCheckMs = 0;
+  private _wdLastElapsed = 0;
+  private _wdStuckChecks = 0;
+  /** 上一次 renderPlayer 被跳过的原因（'' = 正常渲染）。 */
+  private _lastRenderSkip = '';
+
+  private runWatchdog(nowMs: number): void {
+    if (nowMs - this._wdLastCheckMs < 2000) return;
+    this._wdLastCheckMs = nowMs;
+    const active = this.isPlaying && !this.isPaused && !this._manualDead;
+    if (!active) {
+      this._wdStuckChecks = 0;
+      this._wdLastElapsed = this.elapsedTime;
+      return;
+    }
+    if (Math.abs(this.elapsedTime - this._wdLastElapsed) < 1) {
+      this._wdStuckChecks++;
+      if (this._wdStuckChecks === 2) {
+        console.warn('[Watchdog] 播放时间未推进（画面可能冻结）:', JSON.stringify(this.debugState()));
+      }
+    } else {
+      this._wdStuckChecks = 0;
+    }
+    this._wdLastElapsed = this.elapsedTime;
+  }
+
+  /** 运行时状态快照（console: __adojasState()）。 */
+  public debugState(): Record<string, unknown> {
+    const gl = (this.renderer as any)?.getContext?.();
+    const info = (this.renderer as any)?.info;
+    return {
+      playing: this.isPlaying,
+      paused: this.isPaused,
+      dead: this._manualDead,
+      restoringContext: this.isRestoringContext,
+      rendererInitialized: this.rendererInitialized,
+      rendererType: this.rendererType,
+      ctxLost: !!(gl && gl.isContextLost?.()),
+      lastRenderSkip: this._lastRenderSkip,
+      hidden: typeof document !== 'undefined' ? document.hidden : undefined,
+      elapsedMs: Math.round(this.elapsedTime),
+      tile: this.currentTileIndex,
+      render: info ? { calls: info.render?.calls, triangles: info.render?.triangles, textures: info.memory?.textures } : undefined,
+      perf: { ...this._perf },
+    };
+  }
+
   private startRenderLoop(): void {
     let lastTime = performance.now();
     let frameCount = 0;
@@ -3608,6 +3829,10 @@ export class Player implements IPlayer {
       
       const delta = (time - lastTime) / 1000;
       lastTime = time;
+      // 长帧告警：JS 卡住 >1s（与帧率限制无关）→ 记录状态便于定位 canvas 卡死
+      if (delta > 1.0 && !document.hidden) {
+        console.warn('[Watchdog] 长帧 ' + Math.round(delta * 1000) + 'ms:', JSON.stringify(this.debugState()));
+      }
       const tFrame = performance.now();
       // 帧间隔（与 total 对比可区分"我们的帧时间"与"帧间阻塞/合成/GC"）
       if (this._lastAnimateTime > 0) this.perfAdd('frameGap', tFrame - this._lastAnimateTime);
@@ -3631,6 +3856,7 @@ export class Player implements IPlayer {
 
       this.perfAdd('total', performance.now() - tFrame);
       this.perfTick(time);
+      this.runWatchdog(performance.now());
 
       // FPS calculation (update every 500ms)
       frameCount++;
@@ -4205,16 +4431,19 @@ export class Player implements IPlayer {
     }
     // If renderer not initialized, try to initialize it
     if (!this.rendererInitialized && !this.isRestoringContext) {
+      this._lastRenderSkip = 'initRenderer';
       this.initRenderer();
       return;
     }
 
     // Skip rendering if context is being restored
     if (this.isRestoringContext) {
+      this._lastRenderSkip = 'restoringContext';
       return;
     }
     
     if (this.renderer && this.scene && this.camera) {
+      this._lastRenderSkip = '';
       // Apply shake offset to camera for rendering
       let unshakenX = this.camera.position.x;
       let unshakenY = this.camera.position.y;
@@ -4230,6 +4459,7 @@ export class Player implements IPlayer {
         const backendReady = !isWebGPU || (this.renderer as any).backend !== null;
         
         if (!backendReady) {
+          this._lastRenderSkip = 'backendNotReady';
           this.camera.position.x = unshakenX;
           this.camera.position.y = unshakenY;
           return;
@@ -4237,6 +4467,7 @@ export class Player implements IPlayer {
         
         const gl = (this.renderer as any).getContext?.();
         if (gl && gl.isContextLost?.()) {
+          this._lastRenderSkip = 'contextLost';
           this.camera.position.x = unshakenX;
           this.camera.position.y = unshakenY;
           return;
@@ -4268,9 +4499,14 @@ export class Player implements IPlayer {
           
           this.renderer.setRenderTarget(this.renderTarget);
           this.renderer.render(this.scene, this.camera);
-          this.renderer.setRenderTarget(backdropReady ? this.backdropRT : null);
-          
-          this.bloomEffect.render(this.renderer as WebGLRenderer, this.renderTarget.texture);
+          // bloom 合成输出：backdrop 激活时必须写进 backdropRT（随后 blit 上屏 + 叠背景混合装饰）。
+          // 注意目标要通过参数传给 bloom —— 它内部渲染时会自行 setRenderTarget，
+          // 只在外面 setRenderTarget 会被覆盖，导致 backdropRT 全空、blit 出黑屏。
+          this.bloomEffect.render(
+            this.renderer as WebGLRenderer,
+            this.renderTarget.texture,
+            backdropReady ? this.backdropRT : null,
+          );
         } else if (backdropReady) {
           this.renderer.setRenderTarget(this.backdropRT);
           this.renderer.render(this.scene, this.camera);
@@ -4286,7 +4522,10 @@ export class Player implements IPlayer {
         }
 
         if (backdropReady) {
-          // 主场景结果 → 屏幕
+          // 主场景结果 → 屏幕。必须显式把渲染目标切回屏幕：bloom 合成的最后一步是在
+          // backdropRT 上渲染的，若此时直接 blit/叠装饰，就会在采样 backdropRT.texture 的
+          // 同时写进 backdropRT → "Feedback loop formed between Framebuffer and active Texture"。
+          this.renderer.setRenderTarget(null);
           this.blitPass!.render(this.renderer as WebGLRenderer, this.backdropRT!.texture, this.blitCamera!);
           // 背景混合装饰单独一遍：着色器按屏幕坐标采样上面那张 RT 作为 backdrop
           this.decorationManager!.updateBackdropUniforms(
@@ -4826,6 +5065,12 @@ export class Player implements IPlayer {
     
         // Override appear animation initial state at time 0: show base state for preview
         this.applyBaseStateToAllTiles();
+    
+        // 长按带回到完全可见（与砖的 base state 一致，避免停在播放中的淡出透明度）
+        for (const r of this.holdRenderers.values()) {
+          r.setOpacity(1);
+          r.setVisible(true);
+        }
     
         // Re-apply PositionTrack transforms (PositionTrack is global and applies at all times)
         this.reapplyPositionTrackTransforms();
@@ -5454,6 +5699,8 @@ export class Player implements IPlayer {
       planet = new Planet(def.color, undefined, this.showTrail, texture);
       planet.render(this.scene);
       this.planetsById[id] = planet;
+      // 行星虚线环（同色；仅选中星显示，由 updatePlanetRings 驱动）
+      this.planetRingsById[id] = new PlanetRing(def.color);
       if (id === 0) this.planetRed = planet;
       if (id === 1) this.planetBlue = planet;
       // 底图未解码时先用了红贴图：解码完成后换成彩色贴图（并让帧动画作用到新贴图上）
@@ -5474,13 +5721,25 @@ export class Player implements IPlayer {
       if (!planet) continue;
       const active = this.activePlanetIds.indexOf(id) >= 0;
       const inScene = this.scene.children.includes(planet.mesh);
+      const ring = this.planetRingsById[id];
       if (active) {
         if (!inScene) planet.render(this.scene);
-        if (this._trailHistStart[id] < 0) this._trailHistStart[id] = this._trailHistHead;
-      } else if (inScene) {
-        planet.removeFromScene(this.scene);
-        planet.clearTrail();
-        this._trailHistStart[id] = -1;
+        ring?.render(this.scene);
+        // 起点记"上一帧已写入的槽位"（head-1），而不是"本帧将写入的槽位"（head）：
+        // setActivePlanets 早于本帧的 recordTrailHistory 执行，若记 head，则
+        // buildTrailFromHistory 的首次循环 idx 就等于 start，n 停在 1 < 2 →
+        // trail.clear()，表现为每次增删星时拖尾闪断一帧（帧率越低越明显）。
+        if (this._trailHistStart[id] < 0) {
+          this._trailHistStart[id] = (this._trailHistHead - 1 + Player.TRAIL_HIST_MAX) % Player.TRAIL_HIST_MAX;
+        }
+      } else {
+        if (inScene) {
+          planet.removeFromScene(this.scene);
+          planet.clearTrail();
+          this._trailHistStart[id] = -1;
+        }
+        ring?.removeFromScene(this.scene);
+        ring?.setVisible(false);
       }
     }
   }
@@ -5564,6 +5823,35 @@ export class Player implements IPlayer {
     for (const id of this.activePlanetIds) {
       const planet = this.planetsById[id];
       if (planet) planet.position.set(this._layoutX[id], this._layoutY[id], 1.0);
+    }
+    this.updatePlanetRings(tileIndex);
+  }
+
+  /**
+   * 每帧更新行星虚线环：仅当前枢轴星显示（0.1s 线性缩放），
+   * 半径 = 本砖轨道半径（radiusScale），30°/s 旋转，方向随本砖转向。
+   */
+  private updatePlanetRings(tileIndex: number): void {
+    const now = performance.now();
+    const dt = this._ringLastMs > 0 ? Math.min(0.1, (now - this._ringLastMs) / 1000) : 0;
+    this._ringLastMs = now;
+    this._ringSpin += dt;
+
+    if (!this.showPlanetRing) return;
+
+    const valid = tileIndex >= 0 && tileIndex < this.tilePlanetListRef.length;
+    const info = this.getTilePlanetInfo(tileIndex);
+    const chosenId = info.ids[info.pivotPos];
+    const radiusScale = valid
+      ? (this.tileRadiusScale[tileIndex + 1] ?? this.tileRadiusScale[tileIndex] ?? 1)
+      : 1;
+    const dirSign = valid && this.tileIsCW[tileIndex] ? -1 : 1;
+    for (const id of this.activePlanetIds) {
+      const planet = this.planetsById[id];
+      const ring = this.planetRingsById[id];
+      if (!planet || !ring) continue;
+      ring.mesh.position.set(planet.position.x, planet.position.y, ring.mesh.position.z);
+      ring.update(dt, this._ringSpin, id === chosenId, radiusScale, dirSign);
     }
   }
 
@@ -5836,6 +6124,11 @@ export class Player implements IPlayer {
     if (!anyWritten) this.buildTrailFromHistory(timeInLevel);
   }
 
+  /** 当前 level 时间（拖尾诊断用）。 */
+  private currentLevelTimeForDiag(): number {
+    return this.elapsedTime / 1000 - this.getTimeOrigin();
+  }
+
   /** 直接用逐帧记录的真实位置拼每颗激活行星的拖尾（含 MoveTrack / MultiPlanet）。 */
   private buildTrailFromHistory(timeInLevel: number): void {
     const TRAIL_DURATION = 0.74;
@@ -5890,12 +6183,14 @@ export class Player implements IPlayer {
     this._trailHistTime[head] = timeInLevel;
     this._trailHistHead = (head + 1) % Player.TRAIL_HIST_MAX;
     if (this._trailHistCount < Player.TRAIL_HIST_MAX) this._trailHistCount++;
+    this._lastTrailFrameMs = timeInLevel;
   }
 
   /** 清空拖尾历史（seek/重开时调用，避免旧轨迹串到新位置）。 */
   private resetTrailHistory(): void {
     this._trailHistHead = 0;
     this._trailHistCount = 0;
+    this._lastTrailFrameMs = -1;
     for (let id = 0; id < this._trailHistStart.length; id++) {
       this._trailHistStart[id] = this.activePlanetIds.indexOf(id) >= 0 ? 0 : -1;
     }
@@ -5908,6 +6203,12 @@ export class Player implements IPlayer {
         planet.removeFromScene(this.scene);
         planet.dispose();
         this.planetsById[id] = null;
+      }
+      const ring = this.planetRingsById[id];
+      if (ring) {
+        ring.removeFromScene(this.scene);
+        ring.dispose();
+        this.planetRingsById[id] = null;
       }
     }
     this.planetRed = null;
@@ -6162,6 +6463,11 @@ export class Player implements IPlayer {
       geometry.setIndex(meshData.faces);
       geometry.setAttribute('position', new Float32BufferAttribute(meshData.vertices, 3));
       geometry.setAttribute('color', new Float32BufferAttribute(meshData.colors, 3));
+      const uvCount = Math.floor(meshData.vertices.length / 3);
+      const uvArr = meshData.uvs && meshData.uvs.length === uvCount * 2
+        ? meshData.uvs
+        : Array.from({ length: uvCount * 2 }, (_, i) => (i % 2 === 0 ? 0.5 : 1));
+      geometry.setAttribute('uv', new Float32BufferAttribute(uvArr, 2));
       geometry.computeVertexNormals();
       this.geometryCache.set(shapeKey, geometry);
     }
@@ -6727,6 +7033,28 @@ export class Player implements IPlayer {
     glow.magFilter = LinearFilter;
     if (this.instancedMeshManager) {
       this.instancedMeshManager.setGlowTexture(glow);
+    }
+
+    // 轨道样式渐变条（2×128：沿轨道长度 0→1 明暗渐变）。
+    // Neon/NeonLight/Basic/Minimal 的表面色 = 轨道色 × 该条带 —— 这是"Neon 亮头渐隐"的来源。
+    const edgeMap: Record<string, Texture> = {};
+    for (const [key, url] of Object.entries(trackEdgeUrls as Record<string, string>)) {
+      const tex = loader.load(url, () => {
+        // 解码完成 → 刷新已建形状（数据 URL 极小，通常首帧内就绪）
+        this.instancedMeshManager?.setTrackEdgeTextures(edgeMap);
+      });
+      tex.colorSpace = SRGBColorSpace;
+      tex.minFilter = LinearFilter;
+      tex.magFilter = LinearFilter;
+      tex.wrapS = ClampToEdgeWrapping;
+      tex.wrapT = ClampToEdgeWrapping;
+      // 不翻转行：uv.y = 0 直接取条带第一行（贴图顶部 = 边缘/描边环颜色，往内渐到本体色）。
+      // 默认 flipY 会把 v=0 映到图片底行，导致"中间亮、边缘黑"反向。
+      tex.flipY = false;
+      edgeMap[key] = tex;
+    }
+    if (this.instancedMeshManager) {
+      this.instancedMeshManager.setTrackEdgeTextures(edgeMap);
     }
   }
 

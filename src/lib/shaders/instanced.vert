@@ -14,6 +14,7 @@ varying vec3 vWorldPosition;
 varying float vTexSeed;
 varying float vFloorIconType;
 varying vec2 vIconLocalPos;
+varying vec2 vTileUv;
 varying float vFloorIconAngle;
 varying float vIconScale;
 
@@ -27,6 +28,7 @@ void main() {
     vFloorIconAngle = iFloorIconAngle;
     vIconScale = iIconScale;
     vIconLocalPos = position.xy;
+    vTileUv = uv;
 
     vec4 worldPos = modelMatrix * instanceMatrix * vec4(position, 1.0);
     vWorldPosition = worldPos.xyz;

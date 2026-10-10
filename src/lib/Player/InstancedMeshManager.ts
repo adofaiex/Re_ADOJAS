@@ -173,6 +173,62 @@ export class InstancedMeshManager {
         }
     }
 
+    /**
+     * 轨道样式渐变条（2×128：沿轨道长度 0→1 的明暗渐变）。
+     * key = track-edge.json 的键（standard/basic/minimal/neon/neon2/neonLight）。
+     */
+    private trackEdgeTextures: Record<string, Texture> = {};
+    /** 样式 → 渐变条取用方式（条带键 / 亮度倍率 / 取色基）。 */
+    private static readonly TRACK_STYLE_EDGE: Record<string, { strip: string; tune: number; base: 'fill' | 'border' }> = {
+        Neon:      { strip: 'neon',      tune: 1, base: 'border' },
+        NeonLight: { strip: 'neonLight', tune: 1, base: 'border' },
+        Basic:     { strip: 'basic',     tune: 1, base: 'fill' },
+        Minimal:   { strip: 'minimal',   tune: 1, base: 'fill' },
+    };
+
+    /** 渐变条是否已解码完成（未完成时走原来的双色路径，避免采样未完成的纹理变黑）。 */
+    private static isTextureReady(tex?: Texture | null): boolean {
+        const img: any = tex ? (tex as any).image : null;
+        return !!(img && img.width > 0);
+    }
+
+    /** 设置（或更新）渐变条贴图；已建形状按自身 trackStyle 立即刷新。 */
+    public setTrackEdgeTextures(map: Record<string, Texture>): void {
+        this.trackEdgeTextures = map;
+        for (const shapeData of this.instancedMeshes.values()) {
+            const mat = shapeData.instancedMesh.material as ShaderMaterial;
+            if (!mat.uniforms) continue;
+            const style = InstancedMeshManager.styleOfShapeKey(shapeData.shapeKey);
+            const def = InstancedMeshManager.TRACK_STYLE_EDGE[style];
+            const tex = def ? map[def.strip] : null;
+            const ready = InstancedMeshManager.isTextureReady(tex);
+            mat.uniforms.uTrackEdge.value = ready ? tex : this.glowTexture;
+            mat.uniforms.uEdgeGradient.value = ready ? 1 : 0;
+            mat.uniforms.uEdgeTune.value = def ? def.tune : 1;
+            mat.uniforms.uEdgeBaseBorder.value = def && def.base === 'border' ? 1 : 0;
+        }
+    }
+
+    /** shapeKey = `${pred}_${dir}_${is999}_${trackStyle}` → trackStyle */
+    private static styleOfShapeKey(shapeKey: string): string {
+        const parts = shapeKey.split('_');
+        return parts.length >= 4 ? parts[3] : 'Standard';
+    }
+
+    /** 诊断：某形状的样式 uniform 现场值（__adojasTileInfo 用）。 */
+    public debugShapeStyle(shapeKey: string): Record<string, unknown> | null {
+        const shape = this.instancedMeshes.get(shapeKey);
+        if (!shape) return null;
+        const u = (shape.instancedMesh.material as ShaderMaterial).uniforms;
+        return {
+            trackStyle: InstancedMeshManager.styleOfShapeKey(shapeKey),
+            edgeGradient: (u.uEdgeGradient?.value as number) ?? null,
+            edgeTune: (u.uEdgeTune?.value as number) ?? null,
+            edgeBaseBorder: (u.uEdgeBaseBorder?.value as number) ?? null,
+            edgeReady: InstancedMeshManager.isTextureReady(u.uTrackEdge?.value as Texture | null),
+        };
+    }
+
     constructor(
         scene: Scene,
         onGeometryNeeded: (shapeKey: string) => BufferGeometry | null,
@@ -196,6 +252,11 @@ export class InstancedMeshManager {
         if (!geometry) return undefined;
 
         // Create a basic shader material that supports instance colors
+        // 样式渐变条：shapeKey 里含 trackStyle → 每个形状一份材质，可直接按样式设 uniform。
+        const style = InstancedMeshManager.styleOfShapeKey(shapeKey);
+        const edgeDef = InstancedMeshManager.TRACK_STYLE_EDGE[style];
+        const edgeTex = edgeDef ? this.trackEdgeTextures[edgeDef.strip] : undefined;
+        const edgeReady = InstancedMeshManager.isTextureReady(edgeTex);
         const material = new ShaderMaterial({
             uniforms: {
                 uTileTexture: { value: this.tileTexture },
@@ -203,7 +264,11 @@ export class InstancedMeshManager {
                 uIconAtlas: { value: this.iconAtlasTexture },
                 uIconAtlasCols: { value: this.iconAtlasCols },
                 uIconSize: { value: this.iconSize },
-                uDisableTexture: { value: 0.0 }
+                uDisableTexture: { value: 0.0 },
+                uTrackEdge: { value: edgeReady ? edgeTex : this.glowTexture },
+                uEdgeGradient: { value: edgeReady ? 1.0 : 0.0 },
+                uEdgeTune: { value: edgeDef ? edgeDef.tune : 1.0 },
+                uEdgeBaseBorder: { value: edgeDef && edgeDef.base === 'border' ? 1.0 : 0.0 }
             },
             vertexShader: instancedVert,
             fragmentShader: instancedFrag,

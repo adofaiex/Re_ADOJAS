@@ -83,36 +83,49 @@ const f = (x: number, w: number): number => {
     return -1 * (lerp(0, w, q(x)) - w) / sin(x / 2);
 };
 
+/**
+ * 沿圆弧补点：从当前末点所在的弧端，走到另一端（闭合多边形）。
+ *
+ * 起点判据用几何距离比较两端点（哪个端点就是末点就从哪端起），不再依赖
+ * `Math.round` 或 fmod 后的绝对角比较 —— 后两者在整体旋转/镜像（尤其跨越
+ * 0°/360° 边界）时会翻转，导致弧的起点落到另一端。
+ *
+ * 点数由**跨度**唯一决定（`seg = ceil(ang/acc)`，中间点 `seg-1` 个 + 1 个终点），
+ * 与遍历方向无关，因此 CW/CCW 两种手性铺出的顶点集合完全一致，
+ * 不会在相邻砖接缝处因"错开一格"露出细缝。
+ */
 const Sector = (
     Cx: number, Cy: number,
     rad: number, ang: number, dir: number,
     a: number, acc: number,
     pts: [number, number][]
 ): [number, number][] => {
-    let angle = a;
-    let d = dir;
     const lastPt = pts[pts.length - 1];
+    // 两个候选弧端点：A = a，B = a + dir*ang
+    const ax = Cx + rad * cos(a), ay = Cy + rad * sin(a);
+    const bx = Cx + rad * cos(a + dir * ang), by = Cy + rad * sin(a + dir * ang);
+    const distA = Math.pow(ax - lastPt[0], 2) + Math.pow(ay - lastPt[1], 2);
+    const distB = Math.pow(bx - lastPt[0], 2) + Math.pow(by - lastPt[1], 2);
     
-    if (rad < Math.round(Math.sqrt(
-        Math.pow(Cx + rad * cos(angle) - lastPt[0], 2) +
-        Math.pow(Cy + rad * sin(angle) - lastPt[1], 2)
-    ))) {
-        angle = a + dir * ang;
-        d = -1 * dir;
-    }
-    
-    // 生成弧上的点
-    for (let i = 0; i < Math.floor(ang / acc) - 1; i++) {
-        pts.push([Cx + rad * cos(angle), Cy + rad * sin(angle)]);
-        angle += d * acc;
-    }
-    
-    // 添加终点
-    if (d === dir) {
-        pts.push([Cx + rad * cos(a + dir * ang), Cy + rad * sin(a + dir * ang)]);
+    // 末点所在的端点就是起点；步进方向由起点指向另一端
+    let angle: number;
+    let d: number;
+    if (distA <= distB) {
+        angle = a;
+        d = dir;
     } else {
-        pts.push([Cx + rad * cos(a), Cy + rad * sin(a)]);
+        angle = a + dir * ang;
+        d = -dir;
     }
+    
+    // 均匀铺点：seg 段 → seg-1 个严格内部的点（两端已在 pts 中）
+    const seg = Math.max(1, Math.ceil(ang / acc));
+    for (let i = 1; i < seg; i++) {
+        const t = a + (d * i * ang) / seg;
+        pts.push([Cx + rad * cos(t), Cy + rad * sin(t)]);
+    }
+    // 终点（= 多边形另一端的弧点，闭合）
+    pts.push([Cx + rad * cos(angle + d * ang), Cy + rad * sin(angle + d * ang)]);
     
     return pts;
 };
@@ -179,22 +192,22 @@ const CaculatePoints = (
         pts.push([wid * sin(a[0]) + len * cos(a[0]), -wid * cos(a[0]) + len * sin(a[0])]);
         pts.push([r0 * sin(a[0]) + x0, -r0 * cos(a[0]) + y0]);
         
-        // 添加扇形弧段
-        if (fmod(a1, 360) > fmod(a2, 360)) {
-            return Sector(
-                x0, y0, r0, 180 - alpha,
-                fmod(a1, 360) - fmod(a2, 360) > 180 ? 1 : -1,
-                fmod(a1, 360) - fmod(a2, 360) > 180 ? a2 + 90 : a2 - 90,
-                6, pts
-            );
-        } else {
-            return Sector(
-                x0, y0, r0, 180 - alpha,
-                fmod(a2, 360) - fmod(a1, 360) > 180 ? 1 : -1,
-                fmod(a2, 360) - fmod(a1, 360) > 180 ? a1 + 90 : a1 - 90,
-                6, pts
-            );
-        }
+        // 添加扇形弧段。
+        // 凹侧圆弧的两个端点：多边形首点在圆周角 a[1]+90，紧邻的末点在 a[0]-90，
+        // 弧跨度 180-alpha，方向由两端的圆周角差（相对量）决定。
+        // 不能用 fmod 后的绝对角（a1/a2 本身、或 a1±90 谁大）来判断方向：
+        // 那些比较在整体旋转跨越 0°/360° 时会翻转，使弧的起点落到另一端，
+        // CW/CCW 两种手性铺出的顶点错开一格，弯砖接缝处露出细缝。
+        const arcStart = a[0] - 90;
+        const arcSpan = fmod(arcStart - (a[1] + 90), 360);
+        const arcDir = arcSpan > 180 ? 1 : -1;
+        
+        return Sector(
+            x0, y0, r0, 180 - alpha,
+            arcDir,
+            arcStart,
+            6, pts
+        );
     } else {
         // midspin 模式（mr !== 0）
         pts.push([wid * sin(a[1]) + len * cos(a[1]), -wid * cos(a[1]) + len * sin(a[1])]);
@@ -241,12 +254,53 @@ interface MeshData {
     vertices: number[];
     faces: number[];
     colors: number[];
+    /** 样式条带 UV（uv.y：0=边缘 → 1=中心；由各构建器按结构写入）。 */
+    uvs?: number[];
     /** 砖块沿路径方向的**完整长度**（含 outline，= 2×(length+outline)）。
      *  砖块辉度（topGlow）用它的直径画正圆。弯砖的 AABB 不等于该值。 */
     tileLength?: number;
     /** 砖块横向**完整宽度**（含 outline）。 */
     tileWidth?: number;
 }
+
+// ========== 多边形转网格（带中心顶点：边缘→中心的软渐变需要内侧取样） ==========
+/**
+ * 中心顶点用**砖心 (0,0)**（一定在多边形内；转角砖轮廓是凹的，质心可能落在外面，
+ * 会导致扇形插值翻转、整砖发亮）。
+ * vEdge/vCenter = 该多边形"边缘/中心"顶点在样式条带上的取样位置：
+ * 边缘取环色、中心取本体色。
+ */
+const polygonToMeshCentered = (
+    points: [number, number][],
+    color: Color,
+    vertices: number[],
+    faces: number[],
+    colors: number[],
+    uvs: number[],
+    vEdge: number,
+    vCenter: number,
+) => {
+    if (points.length < 3) return;
+
+    const startIndex = vertices.length / 3;
+
+    // 中心顶点（砖心；y取反：SVG y-down → Three.js y-up 对 (0,0) 无影响）
+    vertices.push(0, 0, 0);
+    colors.push(color.r, color.g, color.b);
+    uvs.push(0.5, vCenter);
+
+    // 边界顶点
+    for (const [x, y] of points) {
+        vertices.push(x, -y, 0);
+        colors.push(color.r, color.g, color.b);
+        uvs.push(0.5, vEdge);
+    }
+
+    // 中心扇形
+    for (let i = 0; i < points.length; i++) {
+        faces.push(startIndex, startIndex + 1 + i, startIndex + 1 + ((i + 1) % points.length));
+    }
+};
 
 // ========== 多边形转网格 ==========
 const polygonToMesh = (
@@ -426,11 +480,23 @@ const createMidSpinMesh = (
     const vertices: number[] = [];
     const faces: number[] = [];
     const colors: number[] = [];
+    const uvs: number[] = [];
 
     const midpoint = new Vector3(-m1 * 0.04, -m2 * 0.04, 0);
 
     const blackColor: Color = { r: 0, g: 0, b: 0 };
     const whiteColor: Color = { r: 1, g: 1, b: 1 };
+
+    // 样式条带 UV（v：0=外缘 → 1=中心），与 createTileMesh 用**同一个公式**：
+    // 外轮廓整圈取 v=0（条带环色 → Neon 等样式的亮边），内圈取 vInner，
+    // 中心取 v=1（本体色）。
+    //
+    // 两个细节必须和 createTileMesh 严格一致，否则同一关卡里两种砖的亮边宽度会不一致：
+    //  1) vInner 公式是 2*(2*outline)/(width+outline)，分母取带 outline 的外宽；
+    //  2) 内圈必须由中心扇形插值（边缘 vInner → 中心 1），否则没有由内到外的渐变。
+    // 缺 uv 时 Player 会退回全 v=1，Neon 采样到条带最内端（纯黑），
+    // 表现为整块砖全黑、没有描边。
+    const vInnerMid = Math.max(0, Math.min(0.5, (2 * (2 * outline)) / Math.max(width + outline, 1e-3)));
 
     // Main body with outline
     widthi += outline;
@@ -450,6 +516,7 @@ const createMidSpinMesh = (
 
         for (let i = 0; i < 7; i++) {
             colors.push(blackColor.r, blackColor.g, blackColor.b);
+            uvs.push(0.5, 0);
         }
 
         faces.push(count, count + 1, count + 2);
@@ -475,14 +542,48 @@ const createMidSpinMesh = (
 
         for (let i = 0; i < 7; i++) {
             colors.push(whiteColor.r, whiteColor.g, whiteColor.b);
+            uvs.push(0.5, vInnerMid);
         }
 
-        faces.push(count, count + 1, count + 2);
-        faces.push(count + 2, count + 3, count);
-        faces.push(count + 4, count + 5, count + 6);
+        // 内芯只用中心扇形，不再叠原来的三块三角形：
+        // 两者共面覆盖同一区域，会 z-fighting 出 X 形黑带。
+        //
+        // 上面 7 个槽位里 5/6 分别与 3/2 重合（同一坐标），去掉重复后是五边形
+        // 0→1→2→3→4；按此顺序扇形即可得到边缘 v=vInner → 中心 v=1 的渐变，
+        // 且朝向与外圈三角形一致、无自交。形心取五边形顶点平均，必在内部。
+        {
+            const ring = [0, 1, 2, 3, 4].map((k) => count + k);
+            let cx = 0, cy = 0;
+            for (const vi of ring) {
+                cx += vertices[vi * 3];
+                cy += vertices[vi * 3 + 1];
+            }
+            cx /= ring.length;
+            cy /= ring.length;
+
+            // 槽位顺序不等于绕行顺序（3/4 在角序上是反的），按形心角度排成
+            // 凸序再扇形，避免出现朝向相反的翻转三角形。
+            const ringPts = ring.map((vi) => ({
+                vi,
+                ang: Math.atan2(vertices[vi * 3 + 1] - cy, vertices[vi * 3] - cx),
+            }));
+            ringPts.sort((a, b) => a.ang - b.ang);
+
+            const centerIndex = vertices.length / 3;
+            vertices.push(cx, cy, 0);
+            colors.push(whiteColor.r, whiteColor.g, whiteColor.b);
+            uvs.push(0.5, 1);
+            for (let i = 0; i < ringPts.length; i++) {
+                faces.push(
+                    centerIndex,
+                    ringPts[i].vi,
+                    ringPts[(i + 1) % ringPts.length].vi
+                );
+            }
+        }
     }
 
-    return { vertices, faces, colors };
+    return { vertices, faces, colors, uvs };
 };
 
 // ========== 创建 Tile 网格（核心函数） ==========
@@ -496,24 +597,30 @@ const createTileMesh = (
     const vertices: number[] = [];
     const faces: number[] = [];
     const colors: number[] = [];
+    const uvs: number[] = [];
 
     const blackColor: Color = { r: 0, g: 0, b: 0 };
     const whiteColor: Color = { r: 1, g: 1, b: 1 };
 
-    // 外部轮廓（黑色描边）
+    // 外部轮廓（黑色描边）：整圈顶点都在边缘上 → 条带取样 v=0（环色），中心 v=1
     const outerWidth = width + outline;
     const outerLength = length + outline;
     const outerPoints = CaculatePoints(startAngle, endAngle, outerWidth, outerLength, 0);
-    polygonToMesh(outerPoints, blackColor, vertices, faces, colors);
+    polygonToMeshCentered(outerPoints, blackColor, vertices, faces, colors, uvs, 0, 1);
 
-    // 内部填充（白色）
+    // 内部填充（白色）：边界取"已往内推进的比例"，中心 v=1 → 边缘环色向本体色的软渐变。
+    // 系数 2：让本体更快进入条带暗部（否则大面积中半径区域偏亮，Neon 会显得"发灰"）。
     const innerWidth = width - outline;
     const innerLength = length - outline;
     const innerPoints = CaculatePoints(startAngle, endAngle, innerWidth, innerLength, 0);
-    polygonToMesh(innerPoints, whiteColor, vertices, faces, colors);
+    const vInner = Math.max(0, Math.min(0.5, 2 * (2 * outline) / Math.max(width + outline, 1e-3)));
+    polygonToMeshCentered(innerPoints, whiteColor, vertices, faces, colors, uvs, vInner, 1);
 
-    return { vertices, faces, colors };
+    return { vertices, faces, colors, uvs };
 };
+
+// ========== 砖块 UV 由各构建器写入 MeshData.uvs（v：0=边缘 → 1=中心） ==========
+
 
 // ========== 创建 Track 网格（主入口） ==========
 const createTrackMesh = (
@@ -525,33 +632,39 @@ const createTrackMesh = (
     outline: number = OUTLINE,
     trackStyle: string = "Standard"
 ): MeshData => {
-    if (isMidspin) {
-        return createMidSpinMesh(startAngle);
-    }
-
     // 如果角度差为整圆（360°的整数倍），使用特殊长宽比 3.2:2.75
     let adjustedLength = length;
     if (Math.abs((endAngle - startAngle) % 360) < 0.001) {
         adjustedLength = width * 3.2 / 2.75;
     }
 
+    // 各样式砖块尺寸微调：非 Standard 样式的砖略放大，让相邻砖互相搭接，
+    // 接缝处不会露出背景（否则画面里会出现一圈"白框"/网格线）。
+    // Basic/Neon/NeonLight：半长 +0.02、半宽 +0.025；Minimal：保持原有长度处理；其余样式不变。
+    const styleWidth = width + ((trackStyle === "Basic" || trackStyle === "Neon" || trackStyle === "NeonLight") ? 0.025 : 0);
+    let styleLength = adjustedLength + ((trackStyle === "Basic" || trackStyle === "Neon" || trackStyle === "NeonLight") ? 0.02 : 0);
+
     // 沿路径的完整尺寸（含 outline）：砖块辉度按 tileLength 画正圆。
     // CaculatePoints 的 length 是"半长"，几何跨 ±(length+outline)。
+    if (trackStyle === "Minimal") {
+        styleLength -= 0.03;
+    }
     const dims = {
-        tileLength: 2 * (adjustedLength + outline),
-        tileWidth: 2 * (width + outline),
+        tileLength: 2 * (styleLength + outline),
+        tileWidth: 2 * (styleWidth + outline),
     };
 
+    // Midspin 也要走样式尺寸：否则它用的是 createMidSpinMesh 的默认 TILE_WIDTH，
+    // 与相邻普通砖尺寸/亮边宽度都对不上（Neon 下尤其明显）。
+    if (isMidspin) {
+        return { ...createMidSpinMesh(startAngle, styleWidth, styleLength, outline), ...dims };
+    }
+
     if (trackStyle === "Gems") {
-        return { ...createGemsMesh(startAngle, endAngle, adjustedLength, width, outline), ...dims };
+        return { ...createGemsMesh(startAngle, endAngle, styleLength, styleWidth, outline), ...dims };
     }
 
-    if (trackStyle === "Minimal") {
-        adjustedLength -= 0.03;
-        dims.tileLength = 2 * (adjustedLength + outline);
-    }
-
-    return { ...createTileMesh(startAngle, endAngle, adjustedLength, width, outline), ...dims };
+    return { ...createTileMesh(startAngle, endAngle, styleLength, styleWidth, outline), ...dims };
 };
 
 // ========== 展开为每面独立顶点 ==========

@@ -182,6 +182,7 @@ export function useEditorState() {
       player.setDisableTrackTexture(settings.disableTrackTexture)
       player.setMusicDelayMs(settings.musicDelayMs)
       player.setShowHitErrorMeter(settings.showHitErrorMeter)
+      player.setPlanetRingEnabled(settings.showPlanetRing)
       player.setRecordingMode(settings.recordingMode)
 
       previewerRef.current = player
@@ -405,6 +406,7 @@ export function useEditorState() {
       player.setStatsPanel(settings.showStats)
       player.setDisableTrackTexture(settings.disableTrackTexture)
       player.setShowHitErrorMeter(settings.showHitErrorMeter)
+      player.setPlanetRingEnabled(settings.showPlanetRing)
       player.setRecordingMode(settings.recordingMode)
     }
   }, [
@@ -419,6 +421,7 @@ export function useEditorState() {
     settings.showStats,
     settings.disableTrackTexture,
     settings.showHitErrorMeter,
+    settings.showPlanetRing,
     settings.recordingMode,
   ])
 
@@ -539,6 +542,7 @@ export function useEditorState() {
             player.setDisableTrackTexture(settings.disableTrackTexture)
             player.setMusicDelayMs(settings.musicDelayMs)
             player.setShowHitErrorMeter(settings.showHitErrorMeter)
+            player.setPlanetRingEnabled(settings.showPlanetRing)
             player.setRecordingMode(settings.recordingMode)
             
             // Synthesize hitsounds

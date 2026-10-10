@@ -152,6 +152,11 @@ export class HoldRenderer {
     this.material.uniforms.uCompletion.value = Math.max(0, Math.min(1, v));
   }
 
+  /** 整体不透明度（跟随起点砖的出现/消失动画与 MoveTrack 透明度）。 */
+  setOpacity(v: number): void {
+    this.material.uniforms.uOpacity.value = Math.max(0, Math.min(1, v));
+  }
+
   /** 完成部分的主色（通常取移动球的颜色）。 */
   setColor(color: Color): void {
     (this.material.uniforms.uColor.value as Color).copy(color);
