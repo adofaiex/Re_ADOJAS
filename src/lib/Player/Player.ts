@@ -46,6 +46,12 @@ import { Level } from 'adofai';
 const BG_OVERSCAN = 1.02;
 
 /**
+ * 逐砖 hitsound 表 hsTypeId 的"无"标记。同名的合法 hitsound 只会占用 0..254 的
+ * 表下标，所以 255 留作哨兵值。
+ */
+const HS_NO_TYPE = 255;
+
+/**
  * 砖块辉度（topGlow）总开关。该叠加层随砖一起显隐、且不受轨道透明度影响，行为错误，
  * 故全局禁用（代码保留，置 true 即可恢复；InstancedMeshManager 侧另有 TOP_GLOW_ENABLED 闸门）。
  * 官方语义：玩家经过的砖会叠加一层柔光，alpha = min(floorOpacity*glow/100*0.8, colorAlpha)。
@@ -327,7 +333,6 @@ export class Player implements IPlayer {
   private tilePauseTweenDuration: Float32Array = new Float32Array(0);
   private tileEvents: Map<number, any[]> = new Map();
   private tileCameraEvents: Map<number, any[]> = new Map();
-  private tileSetHitsoundEvents: Map<number, any[]> = new Map();
   private tilePlayHitsoundEvents: Map<number, any[]> = new Map();
   /**
    * Twirl 事件位图。百万砖谱面里 Twirl 往往每砖一条（如 605 万条），
@@ -342,11 +347,26 @@ export class Player implements IPlayer {
   private tileIconOrder: Map<number, string[]> = new Map();
   private timelineManager: TimelineManager;
 
-  // Per-tile hitsound overrides (from SetHitsound events)
-  // Each entry: {type, volume} to override the default hitsound for that tile
-  private setHitsoundOverrides: Map<number, {type: HitsoundType, volume: number}> = new Map();
-  // 每个砖块的有效 hitsound（SetHitsound 从事件 floor 起继承到所有后续砖块，可被下一个覆盖）
-  private tileHitsounds: Array<{ type: HitsoundType; volume: number } | null> = [];
+  /**
+   * 每砖有效 hitsound，用扁平 TypedArray 表示（type 走字符串表下标，volume 走 f32）。
+   *
+   * SetHitsound 是逐砖高频事件——1100 万砖的谱面里几乎每砖一条。原先用
+   * `Map<number, {type, volume}>` 存，1100 万项要 1.3GB；再加上按 floor 分桶的
+   * `tileSetHitsoundEvents`（Map 项 + 每项一个数组）更是 2.4GB。两张 u8+f32 表
+   * 只要 55MB。
+   *
+   * `hsTypeId[i] === HS_NO_TYPE` 表示该砖没有 SetHitsound（用默认音）。
+   */
+  private hsTypeId: Uint8Array = new Uint8Array(0);
+  private hsVolume: Float32Array = new Float32Array(0);
+  /** hitsound 字符串表（下标即 hsTypeId 的取值），按需增长以容纳非枚举名字。 */
+  private hsTypeTable: HitsoundType[] = [];
+  private hsTypeIndex: Map<string, number> = new Map();
+  /**
+   * hitsoundAt() 返回的复用对象。两个调用点都只读 `.type` / `.volume` 并立刻
+   * 拷进新对象，不持有引用——所以逐砖复用同一个对象即可，避免百万级分配。
+   */
+  private hsScratch: { type: HitsoundType; volume: number } = { type: 'Kick', volume: 100 };
 
   // 拖尾完全由时间轴 seek 计算（对窗口内每个采样时刻求球坐标再连线），
   // 不缓存砖块逐帧位置、也不做头部对齐。下面这份逐帧球位置仅作极端兜底。
@@ -478,7 +498,11 @@ export class Player implements IPlayer {
 
     // Parse actions if available
     if (this.levelData.actions) {
-      this.twirlAt = new Uint8Array(this.levelData.tiles?.length ?? 0);
+      const tileCount = this.levelData.tiles?.length ?? 0;
+      this.twirlAt = new Uint8Array(tileCount);
+      // 逐砖 hitsound 表：先全填 HS_NO_TYPE，遇到 SetHitsound 再就地写入。
+      this.hsTypeId = new Uint8Array(tileCount).fill(HS_NO_TYPE);
+      this.hsVolume = new Float32Array(tileCount);
       const compactTilesForTwirl = isCompactTiles(this.levelData.tiles);
       if (compactTilesForTwirl) {
         // 紧凑模式：库已把 Twirl 事件剥离（省几百 MB），方向信息在 store.twirl 差分里。
@@ -515,14 +539,12 @@ export class Player implements IPlayer {
         } else if (action.eventType === 'MoveTrack') {
             // handled by TimelineManager during build
         } else if (action.eventType === 'SetHitsound') {
-            if (!this.tileSetHitsoundEvents.has(floor)) {
-                this.tileSetHitsoundEvents.set(floor, []);
+            // 直接落进逐砖表；同一 floor 出现多次时后写的覆盖先写的（与原先 Map 行为一致）。
+            if (floor >= 0 && floor < this.hsTypeId.length) {
+                const hsType = (action.hitsound || 'ReverbClack') as HitsoundType;
+                this.hsTypeId[floor] = this.hitsoundTypeId(hsType);
+                this.hsVolume[floor] = action.hitsoundVolume != null ? action.hitsoundVolume : 100;
             }
-            this.tileSetHitsoundEvents.get(floor)!.push(action);
-            // Store per-tile override immediately
-            const hsType = (action.hitsound || 'ReverbClack') as HitsoundType;
-            const hsVol = action.hitsoundVolume != null ? action.hitsoundVolume : 100;
-            this.setHitsoundOverrides.set(floor, { type: hsType, volume: hsVol });
         } else if (action.eventType === 'PlayHitsound') {
             if (!this.tilePlayHitsoundEvents.has(floor)) {
                 this.tilePlayHitsoundEvents.set(floor, []);
@@ -2414,37 +2436,45 @@ export class Player implements IPlayer {
    * 可被下一个 SetHitsound 覆盖。
    */
   private buildTileHitsounds(): void {
-    const n = this.levelData.tiles?.length ?? 0;
-    this.tileHitsounds = new Array(n).fill(null);
-    if (!this.tileSetHitsoundEvents || this.tileSetHitsoundEvents.size === 0) return;
+    // SetHitsound 是继承态：从事件所在砖起一直沿用到下一个 SetHitsound 之前。
+    // 这里把"该砖自己的值"向前铺开成逐砖有效值；铺完之前留 HS_NO_TYPE 的
+    // 前缀表示"还没出现过 SetHitsound"，那些砖用默认音。
+    const n = this.hsTypeId.length;
+    let curType = HS_NO_TYPE;
+    let curVol = 0;
+    for (let i = 0; i < n; i++) {
+      const t = this.hsTypeId[i];
+      if (t !== HS_NO_TYPE) { curType = t; curVol = this.hsVolume[i]; }
+      else if (curType !== HS_NO_TYPE) {
+        this.hsTypeId[i] = curType;
+        this.hsVolume[i] = curVol;
+      }
+    }
+  }
 
-    const events: Array<{ floor: number; type: HitsoundType; volume: number }> = [];
-    for (const [floor, list] of this.tileSetHitsoundEvents) {
-      for (let k = 0; k < list.length; k++) {
-        const ev = list[k];
-        const hsType = (ev.hitsound || 'Kick') as HitsoundType;
-        const hsVol = ev.hitsoundVolume != null ? ev.hitsoundVolume : 100;
-        events.push({ floor, type: hsType, volume: hsVol });
-      }
-    }
-    if (events.length === 0) return;
-    events.sort((a, b) => a.floor - b.floor);
+  /**
+   * 该砖的有效 hitsound；没有则返回 null（用默认音）。
+   *
+   * 返回的是复用对象 `hsScratch`——调用点只读字段并立刻拷走，不持有引用。
+   * 逐砖新建 `{type, volume}` 在千万级谱面上要多花几百 MB。
+   */
+  private hitsoundAt(i: number): { type: HitsoundType; volume: number } | null {
+    const id = this.hsTypeId[i];
+    if (id === HS_NO_TYPE) return null;
+    this.hsScratch.type = this.hsTypeTable[id];
+    this.hsScratch.volume = this.hsVolume[i];
+    return this.hsScratch;
+  }
 
-    let current: { type: HitsoundType; volume: number } | null = null;
-    let idx = 0;
-    for (const ev of events) {
-      for (; idx < n && idx < ev.floor; idx++) {
-        this.tileHitsounds[idx] = current;
-      }
-      if (idx < n) {
-        current = { type: ev.type, volume: ev.volume };
-        this.tileHitsounds[idx] = current;
-        idx++;
-      }
-    }
-    for (; idx < n; idx++) {
-      this.tileHitsounds[idx] = current;
-    }
+  /** hitsound 名字 → 字符串表下标；表满 255 项后回退到 0（Kick）以保住 u8 的取值范围。 */
+  private hitsoundTypeId(type: HitsoundType): number {
+    const existing = this.hsTypeIndex.get(type);
+    if (existing !== undefined) return existing;
+    if (this.hsTypeTable.length >= HS_NO_TYPE) return 0;
+    const id = this.hsTypeTable.length;
+    this.hsTypeTable.push(type);
+    this.hsTypeIndex.set(type, id);
+    return id;
   }
   
   /**
@@ -2581,7 +2611,7 @@ export class Player implements IPlayer {
       // 所以那些段落整段静音（与合成策略无关）。这里改为只跳过 midspin。
       const isMidspin = i < tileCountOf(this.levelData.tiles) && tileDirection(this.levelData.tiles, i) === 999;
       if (i < tileCountOf(this.levelData.tiles) && !isMidspin) {
-        const override = this.tileHitsounds[i];
+        const override = this.hitsoundAt(i);
         if (override) {
           const key = `${override.type}_${override.volume}`;
           let group = overrideGroups.get(key);
@@ -2669,7 +2699,7 @@ export class Player implements IPlayer {
       // 所以那些段落整段静音（与合成策略无关）。这里改为只跳过 midspin。
       const isMidspin = i < tileCountOf(this.levelData.tiles) && tileDirection(this.levelData.tiles, i) === 999;
       if (i < tileCountOf(this.levelData.tiles) && !isMidspin) {
-        const override = this.tileHitsounds[i];
+        const override = this.hitsoundAt(i);
         if (override) {
           const key = `${override.type}_${override.volume}`;
           let group = overrideGroups.get(key);
