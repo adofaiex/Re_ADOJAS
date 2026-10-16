@@ -93,6 +93,15 @@ export class Player implements IPlayer {
   private animationId: number | null = null;
   private lastFrameTime: number = 0;
   private frameInterval: number = 0; // milliseconds between frames
+  /**
+   * 谱面 SetFrameRate 事件的渲染限速（毫秒）。只用来跳过"渲染"，
+   * 不跳 updatePlayer —— 判定/球位/时钟仍按真实 delta 推进，
+   * 所以是纯视觉降帧，不会让谱面变慢变卡手。
+   * 0 = 不限速（事件未开启或已 enabled:false）。
+   */
+  private frameRateEventInterval: number = 0;
+  /** 上一次真正渲染的时刻（ms），SetFrameRate 的限速基准。 */
+  private lastFrameRenderTime: number = 0;
   private stats: Stats | null = null;
 
   // Lightweight per-frame timing breakdown (logged via debugLog every ~2s).
@@ -994,6 +1003,25 @@ export class Player implements IPlayer {
     };
     // 运行时状态快照（排查 canvas 卡死）：冻结时在控制台执行 __adojasState()。
     (window as any).__adojasState = () => this.debugState();
+    // 长帧归因：__adojasSpikes() → 最近的长帧记录，按耗时降序。
+    // 自动记录（帧尾），不需要在卡顿当时操作 DevTools。
+    (window as any).__adojasSpikes = () => {
+      const list = [...this._spikes].sort((a: any, b: any) => b.ms - a.ms);
+      return {
+        count: list.length,
+        // 哪个阶段最该负责：把所有条目的 stages 按阶段累加
+        stageTotals: (() => {
+          const t: Record<string, number> = {};
+          for (const s of list) {
+            for (const [k, v] of Object.entries((s as any).stages ?? {})) {
+              t[k] = +((t[k] ?? 0) + (v as number)).toFixed(1);
+            }
+          }
+          return t;
+        })(),
+        worst: list.slice(0, 10),
+      };
+    };
     if (opts?.deferDecorations) {
       // 装饰物分帧/异步创建（加载界面显示进度）——见 buildDecorationsAsync()
       this.decorationManager.collectDecoSources();
@@ -1160,6 +1188,9 @@ export class Player implements IPlayer {
     this.isPaused = false;
     this.audioDriftSynced = false;
     this.useAudioContextTime = false;
+    // 清掉谱面 SetFrameRate 的渲染限速，避免上一轮的限制带进下一次播放
+    this.frameRateEventInterval = 0;
+    this._updateErrors = 0;
     this.preStartHoldMs = 0;
     this.preStartHoldTotal = 0;
     this.preStartHatTick = -1;
@@ -1340,8 +1371,11 @@ export class Player implements IPlayer {
       if (a?.eventType === 'Hide' && isEventActive(a)) {
         events.push({
           floor: Math.max(0, Math.floor(a.floor ?? 0)),
-          hideJudgment: !!a.hideJudgment,
-          hideIcon: !!a.hideTileIcon,
+          // 这两个字段谱面里既可能是布尔，也可能是 "Enabled"/"Disabled" 字符串。
+          // 用 !! 判断时 "Disabled" 同样为 true —— 本该"恢复显示"的 Hide 反而
+          // 继续隐藏，后面所有砖的图标就都看不见了（Rainy Gate 3.adofai 就是这种）。
+          hideJudgment: isEnabled(a.hideJudgment, false),
+          hideIcon: isEnabled(a.hideTileIcon, false),
         });
       }
     }
@@ -3439,6 +3473,23 @@ export class Player implements IPlayer {
     }
   }
 
+  /**
+   * SetFrameRate：按事件给定的帧率限制"画面刷新"，`enabled:false` 时解除。
+   *
+   * 只挡渲染、不挡 updatePlayer —— 判定/球位/时钟照常按真实 delta 推进，
+   * 所以这是纯视觉降帧（画面按 24fps 刷新但判定精度不变），
+   * 而不像设置项那样整帧跳过、把谱面跑慢。
+   * 帧率低于 1 会让画面几乎不刷新（表现为"卡死"），所以下限钳到 1。
+   */
+  private processFrameRateEvent(ev: any): void {
+    const enabled = isEnabled(ev.enabled);
+    const raw = typeof ev.frameRate === 'number' && isFinite(ev.frameRate) ? ev.frameRate : 0;
+    const fps = Math.max(raw, 1);
+    this.frameRateEventInterval = enabled && raw > 0 ? 1000 / fps : 0;
+    debugLog('[FrameRate] event fps=' + raw + ' enabled=' + enabled
+      + ' → 渲染限速间隔=' + this.frameRateEventInterval.toFixed(2) + 'ms');
+  }
+
   public createPlayer(container: HTMLElement): void {
     this.container = container;
     
@@ -3841,6 +3892,14 @@ export class Player implements IPlayer {
   private _wdStuckChecks = 0;
   /** 上一次 renderPlayer 被跳过的原因（'' = 正常渲染）。 */
   private _lastRenderSkip = '';
+  /** updatePlayer 累计抛异常次数（超过 3 次不再重复打印，避免刷屏）。 */
+  private _updateErrors = 0;
+  /**
+   * 长帧归因环形缓冲（最多 24 条，超出丢最旧）。
+   * 主循环卡顿时 DevTools 也会一起卡，没法"边拖边调函数"，
+   * 所以在这里自动记录，事后用 __adojasSpikes() 取。
+   */
+  private _spikes: Array<Record<string, unknown>> = [];
 
   private runWatchdog(nowMs: number): void {
     if (nowMs - this._wdLastCheckMs < 2000) return;
@@ -3925,7 +3984,19 @@ export class Player implements IPlayer {
       
       if (this.isPlaying && !this.isPaused && !this._manualDead) {
         const tU = performance.now();
-        this.updatePlayer(delta);
+        // 必须包住：updatePlayer 抛异常会让同一帧的 renderPlayer 不执行，
+        // 表现成"画面卡死但循环还在跑"，而且不一定有明显报错。
+        // 这里吞掉异常并计数，把"沉默卡死"变成"能看见的报错"。
+        try {
+          this.updatePlayer(delta);
+        } catch (e) {
+          this._updateErrors++;
+          if (this._updateErrors <= 3) {
+            console.error('[Player] updatePlayer 抛异常（画面会停止更新）:', e);
+          } else if (this._updateErrors === 4) {
+            console.error('[Player] updatePlayer 持续抛异常，后续不再重复打印');
+          }
+        }
         this.perfAdd('updatePlayer', performance.now() - tU);
         this.syncVideo();
       }
@@ -3933,13 +4004,49 @@ export class Player implements IPlayer {
       // MultiPlanet 虚线多边形：预览/播放/暂停都要流动（淡出逻辑内部按播放状态判断）
       this.updateMultiPlanetIndicators();
 
-      {
+      // 谱面 SetFrameRate：只跳过"渲染"，updatePlayer 照常按真实 delta 推进，
+      // 所以判定/球位/时钟不受影响，只是画面按事件给定的帧率刷新。
+      let skipRender = false;
+      if (this.frameRateEventInterval > 0) {
+        const el = time - this.lastFrameRenderTime;
+        if (el < this.frameRateEventInterval) {
+          skipRender = true;
+        } else {
+          this.lastFrameRenderTime = time - (el % this.frameRateEventInterval);
+        }
+      }
+
+      if (!skipRender) {
         const tR = performance.now();
         this.renderPlayer(delta);
         this.perfAdd('renderPlayer', performance.now() - tR);
       }
 
       this.perfAdd('total', performance.now() - tFrame);
+
+      // 长帧归因捕获（帧尾）。
+      // 帧开头的告警拿不到本帧耗时 —— 那时还没干活，_perf 里是上帧残留。
+      // 这里在帧尾取，才能把长帧归到具体阶段；结果进环形缓冲，事后用
+      // __adojasSpikes() 取，不需要在卡顿当时操作 DevTools（那时它也会一起卡）。
+      {
+        const frameMs = performance.now() - tFrame;
+        if (frameMs > 120) {
+          this._spikes.push({
+            ms: +frameMs.toFixed(1),
+            at: +(this.elapsedTime / 1000).toFixed(2),
+            tile: this.currentTileIndex,
+            playing: this.isPlaying,
+            stages: Object.fromEntries(
+              Object.entries(this._perf).map(([k, v]) => [k, +(v as number).toFixed(1)])
+            ),
+            visibleTiles: this.visibleTiles?.size ?? 0,
+            updateErrors: this._updateErrors,
+            renderSkip: this._lastRenderSkip,
+          });
+          if (this._spikes.length > 24) this._spikes.shift();
+        }
+      }
+
       this.perfTick(time);
       this.runWatchdog(performance.now());
 
@@ -4213,6 +4320,7 @@ export class Player implements IPlayer {
           case 'SetCustomBG':
           case 'CustomBackground': this.processCustomBGEvent(ev); break;
           case 'RecolorTrack': this.processRecolorEvent(ev); break;
+          case 'SetFrameRate': this.processFrameRateEvent(ev); break;
           // 粒子：AddParticle 在装饰创建时建系统；这两个是运行期驱动
           case 'SetParticle':
           case 'EmitParticle':
@@ -5948,7 +6056,8 @@ export class Player implements IPlayer {
       const ring = this.planetRingsById[id];
       if (!planet || !ring) continue;
       ring.mesh.position.set(planet.position.x, planet.position.y, ring.mesh.position.z);
-      ring.update(dt, this._ringSpin, id === chosenId, radiusScale, dirSign);
+      // 传入行星自身缩放：环需按它反向补偿（见 PlanetRing.update）
+      ring.update(dt, this._ringSpin, id === chosenId, radiusScale, dirSign, this.planetScaleApplied[id] ?? 1);
     }
   }
 

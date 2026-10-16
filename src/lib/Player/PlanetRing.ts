@@ -112,7 +112,10 @@ export class PlanetRing {
    * dt = 帧间隔（秒）；spinTime = 累计时间（秒）；chosen = 是否为当前枢轴星；
    * radiusScale = 所在砖的轨道半径比例；dirSign = ±1 旋转方向。
    */
-  public update(dt: number, spinTime: number, chosen: boolean, radiusScale: number, dirSign: number): void {
+  public update(
+    dt: number, spinTime: number, chosen: boolean,
+    radiusScale: number, dirSign: number, planetScale: number = 1,
+  ): void {
     const target = chosen ? 1 : 0;
     if (this.scalePercent !== target) {
       const step = dt / SCALE_TWEEN;
@@ -123,7 +126,10 @@ export class PlanetRing {
     const visible = this.scalePercent > 0.001;
     this.mesh.visible = visible;
     if (!visible) return;
-    const radius = RING_RADIUS * radiusScale * this.scalePercent;
+    // 环随行星缩放做反向补偿（除以 planetScale）：行星变大时环保持贴着轨道半径，
+    // 不被行星自身的大小带偏。planetScale 为 0 时行星不可见，这里兜底成 1 避免除零。
+    const scaleDiv = planetScale !== 0 ? planetScale : 1;
+    const radius = RING_RADIUS * radiusScale * this.scalePercent / scaleDiv;
     this.mesh.scale.set(radius, radius, 1);
     this.mesh.rotation.z = dirSign * (SPIN_DEG_PER_SEC * Math.PI / 180) * spinTime;
   }

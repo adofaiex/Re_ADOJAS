@@ -790,8 +790,14 @@ class DecorationInstance {
                 // 用 **Mesh（world 空间四边形）**，不用 Sprite：Sprite 永远面向相机、
                 // 且**忽略父级/世界旋转** —— 装饰自身的 rotation、lockRotation、
                 // 以及相机旋转都会失效（与 WebADOFAI/原版观感不同）。
+                // 贴图还没解码完（image 为 null）时不能直接当 map 交出去：
+                // three 上传贴图会读 image.complete，拿 null 会抛错并中断整帧渲染
+                // （表现为画面卡死）。此时退回占位贴图，等真图就绪后由
+                // loadDecoTexture 的完成回调重新挂上。
+                const mapReady = !!(texture as any)?.image;
+                const safeMap = mapReady ? texture : (this._manager?.getPlaceholderTexture() ?? null);
                 const mat = new MeshBasicMaterial({
-                    map: texture, color: 0xffffff, transparent: true, opacity: this.currentOpacity,
+                    map: safeMap, color: 0xffffff, transparent: true, opacity: this.currentOpacity,
                     blending: blend as Blending, depthWrite: false, side: DoubleSide,
                     // Silence THREE's MultiplyBlending premultipliedAlpha warning.
                     premultipliedAlpha: blend === MultiplyBlending,
