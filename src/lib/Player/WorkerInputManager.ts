@@ -1,91 +1,21 @@
-import type { InputQueue } from './types';
-import type { AsyncInputEvent } from './AsyncInputManager';
+import { AsyncInputManager } from './AsyncInputManager';
 
 /**
- * Worker 异步输入队列。
+ * "Worker 输入方式" 的兼容实现。
  *
- * 主线程捕获 DOM 事件（守卫逻辑与 AsyncInputManager 一致），在事件派发瞬间用
- * `performance.now()` 打时间戳，转发给 Worker 排队；Worker 批量回传后写入本地
- * mailbox。`drain()` 与 AsyncInputManager 保持同步返回契约，游戏循环无需改动。
+ * 历史：早期实现把主线程捕获的 DOM 事件 postMessage 转发到 Worker 排队，
+ * Worker 用微任务合并成批再回传主线程 mailbox。
+ *
+ * 已移除 Worker 数据通路，原因：
+ * - Worker 线程是单点故障：移动端浏览器在内存压力下会直接杀死 Worker 线程
+ *   （本应用同时运行 WebGL 渲染、WebAudio、音效合成 Worker，压力尤其大），
+ *   此后 postMessage 静默失败，无 onerror/重建/兜底，输入整体死亡；
+ * - 队列本身没有可并行的计算量，转发只是纯增两次 postMessage 往返延迟
+ *   （主线程卡顿时会进一步放大），并无精度收益——事件时间戳在主线程
+ *   派发瞬间就已打定，本地队列同样精确；
+ * - Worker 往返引入 clear() 与在途 batch 的竞态，重开一局可能收到幻影按键。
+ *
+ * 现与 AsyncInputManager 同契约（含 pointercancel / 失焦释放等可靠性修复），
+ * 保留类名与设置项以兼容既有配置。
  */
-export class WorkerInputManager implements InputQueue {
-    private worker: Worker | null = null;
-    private mailbox: AsyncInputEvent[] = [];
-    private attached: boolean = false;
-
-    private post(type: 'down' | 'up'): void {
-        this.worker?.postMessage({ kind: 'event', type, perfTime: performance.now() });
-    }
-
-    private readonly onKeyDown = (e: KeyboardEvent) => {
-        if (e.repeat) return;
-        // 排除纯修饰键（Ctrl/Shift/Alt/Meta）与编辑器/UI 快捷键组合
-        if (e.ctrlKey || e.metaKey || e.altKey) return;
-        if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
-        this.post('down');
-    };
-
-    private readonly onKeyUp = (e: KeyboardEvent) => {
-        if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
-        this.post('up');
-    };
-
-    private readonly onPointerDown = (e: PointerEvent) => {
-        if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
-        this.post('down');
-    };
-
-    private readonly onPointerUp = (e: PointerEvent) => {
-        if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
-        this.post('up');
-    };
-
-    public attach(): void {
-        if (this.attached) return;
-        this.attached = true;
-        if (!this.worker) {
-            this.worker = new Worker(new URL('./inputWorker.ts', import.meta.url), { type: 'module' });
-            this.worker.onmessage = (e: MessageEvent<{ kind: 'batch'; events: AsyncInputEvent[] }>) => {
-                const data = e.data;
-                if (data && data.kind === 'batch') {
-                    const evs = data.events;
-                    for (let i = 0; i < evs.length; i++) this.mailbox.push(evs[i]);
-                }
-            };
-        }
-        window.addEventListener('keydown', this.onKeyDown, { capture: true });
-        window.addEventListener('keyup', this.onKeyUp, { capture: true });
-        window.addEventListener('pointerdown', this.onPointerDown, { capture: true });
-        window.addEventListener('pointerup', this.onPointerUp, { capture: true });
-    }
-
-    public detach(): void {
-        if (!this.attached) return;
-        this.attached = false;
-        window.removeEventListener('keydown', this.onKeyDown, { capture: true });
-        window.removeEventListener('keyup', this.onKeyUp, { capture: true });
-        window.removeEventListener('pointerdown', this.onPointerDown, { capture: true });
-        window.removeEventListener('pointerup', this.onPointerUp, { capture: true });
-        // 终止 Worker 线程，避免残留监听/线程；下次 attach 时按需重建。
-        this.worker?.terminate();
-        this.worker = null;
-    }
-
-    public drain(): AsyncInputEvent[] {
-        if (this.mailbox.length === 0) return EMPTY;
-        const q = this.mailbox;
-        this.mailbox = [];
-        return q;
-    }
-
-    public get pendingCount(): number {
-        return this.mailbox.length;
-    }
-
-    public clear(): void {
-        this.mailbox.length = 0;
-        this.worker?.postMessage({ kind: 'clear' });
-    }
-}
-
-const EMPTY: AsyncInputEvent[] = [];
+export class WorkerInputManager extends AsyncInputManager { }

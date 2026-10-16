@@ -39,12 +39,14 @@ export class OverlayHUD {
   }
 
   resize(): void {
-    this.dpr = window.devicePixelRatio || 1;
+    // HUD 是小字号文本：DPR 上限 2（手机 DPR≈3 时少 ~55% 填充/合成开销，肉眼无差）
+    this.dpr = Math.min(window.devicePixelRatio || 1, 2);
     const w = this.container.clientWidth;
     const h = this.container.clientHeight;
     if (w === 0 || h === 0) return;
     this.canvas.width = Math.ceil(w * this.dpr);
     this.canvas.height = Math.ceil(h * this.dpr);
+    this._lastSig = ''; // canvas 尺寸变化会清空内容，强制下一帧重绘
   }
 
   update(stats: {
@@ -75,7 +77,16 @@ export class OverlayHUD {
     this.deaths = stats.deaths ?? 0;
   }
 
+  /** 上次重绘内容的签名：未变化时跳过整屏 clear+重绘（编辑器/暂停静止时
+   *  省掉全屏 2D 图层每帧的反复合成——手机端这是实打实的填充/带宽开销）。 */
+  private _lastSig = '';
+
   render(): void {
+    // fps 每 500ms 才更新一次 → 静止时 HUD 仅 ~2次/秒 重绘，其余帧零开销
+    const sig = `${this.fps}|${this.time}|${this.tileIndex}|${this.totalTiles}|${this.countdownText}|${this.marginCounts}|${this.xAcc}|${this.dead}|${this.percentComplete}|${this.deaths}|${this.recordingMode}`;
+    if (sig === this._lastSig) return;
+    this._lastSig = sig;
+
     const ctx = this.ctx;
     const w = this.container.clientWidth;
     const h = this.container.clientHeight;

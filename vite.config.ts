@@ -34,6 +34,18 @@ export default defineConfig(({ mode, command }) => {
       },
     },
     base: base,
+    // Dev 模式下 oxc 默认 esnext（不降级语法），旧浏览器会解析失败白屏。
+    // 统一降级到 es2015，依赖预打包同样处理。
+    oxc: {
+      target: 'es2015',
+    },
+    optimizeDeps: {
+      rolldownOptions: {
+        transform: {
+          target: 'es2015',
+        },
+      },
+    },
     worker: {
       format: 'es',
     },

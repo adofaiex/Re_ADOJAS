@@ -9,12 +9,17 @@ export type RenderScaleType = "0.75" | "1" | "1.5" | "native";
 /** 输入方式：sync = 主线程事件队列；worker = Worker 队列（主线程打戳、Worker 搬运）。 */
 export type InputMethodType = "sync" | "worker";
 
+/** 抗锯齿（MSAA）：auto = 桌面开 / 移动关；on / off 强制。移动端 MSAA 是带宽大户，默认关但可手动开。 */
+export type AntialiasModeType = "auto" | "on" | "off";
+
 /** 输入队列抽象：AsyncInputManager 与 WorkerInputManager 共用同一 API。 */
 export interface InputQueue {
   attach(): void;
   detach(): void;
   drain(): AsyncInputEvent[];
   clear(): void;
+  /** 时钟锚点重定位时平移在途事件时间戳，避免已入队事件的判定时刻跳变。 */
+  shiftPendingTime(deltaMs: number): void;
   readonly pendingCount: number;
 }
 
@@ -34,6 +39,7 @@ export interface IPlayer {
   setHitsoundEnabled(enabled: boolean): void;
   setTargetFramerate(framerate: TargetFramerateType): void;
   setRenderScale(scale: RenderScaleType): void;
+  setAntialias(mode: AntialiasModeType): void;
   setInputMethod(method: InputMethodType): void;
   setOGGCompression(enabled: boolean): void;
   setZoom(zoom: number): void;

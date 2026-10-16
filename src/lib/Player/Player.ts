@@ -1,6 +1,6 @@
 import { Scene, OrthographicCamera, WebGLRenderer, Mesh, Vector3, Texture, BufferGeometry, WebGLRenderTarget, Color, Vector2, DirectionalLight, Float32BufferAttribute, Euler, Material, MeshBasicMaterial, TextureLoader, SRGBColorSpace, NearestFilter, LinearFilter, PlaneGeometry, BufferAttribute, Sprite, SpriteMaterial, RepeatWrapping, ClampToEdgeWrapping, LinearMipmapLinearFilter, VideoTexture, DoubleSide, Raycaster, Intersection } from 'three';
 import {WebGPURenderer} from 'three/webgpu';
-import { IPlayer, ILevelData, IMusic, TargetFramerateType, RenderScaleType, InputMethodType, InputQueue } from './types';
+import { IPlayer, ILevelData, IMusic, TargetFramerateType, RenderScaleType, AntialiasModeType, InputMethodType, InputQueue } from './types';
 import { Planet } from './Planet';
 import { HitsoundManager, HitsoundType, TimestampGroup, HitsoundSynthStatus } from './HitsoundManager';
 import { isCompactTiles, tileCount as tileCountOf, tileAngle, tileAngleOr, tileDirection, tileTwirl, tileActions, TilePositions } from './TileAccess';
@@ -72,6 +72,8 @@ export class Player implements IPlayer {
   private readonly tilePositions: TilePositions = new TilePositions(0);
   private targetFramerate: TargetFramerateType = 'auto';
   private renderScale: RenderScaleType = '1.5';
+  /** 抗锯齿模式：auto = 桌面开 / 移动关（tiler GPU 上 MSAA 是带宽大户），on/off 强制。 */
+  private antialiasMode: AntialiasModeType = 'auto';
 
   // updateDecorations 每帧复用的临时对象，避免逐帧分配（options 字面量 + Vector2）。
   private _decRedPos = new Vector2();
@@ -1004,6 +1006,7 @@ export class Player implements IPlayer {
       // 预算「哪些装饰有动画」，让每帧更新只遍历这一小撮
       this.decorationManager.refreshAnimatedDecos();
       this._decorationsBuilt = true;
+      this._idleDecorSig = ''; // 装饰重建：强制下一次静止帧重采样
     }
 
     // Initialize MoveTrack Manager with TimelineManager
@@ -1140,6 +1143,7 @@ export class Player implements IPlayer {
 
   /** 死亡后完整重开：清死亡状态、回到开头、音乐/打拍音重播。 */
   public retryManual(): void {
+    this.inputQueue.clear(); // 官方状态切换时 ClearKeys：重开后旧事件不能参与新一局判定
     this._manualDead = false;
     this._consecMisses = 0;
     this._keysDown = 0;
@@ -1907,42 +1911,45 @@ export class Player implements IPlayer {
   }
 
   /**
-   * 处理异步输入队列中的按键事件（用按键时刻精确判定，而非处理帧时刻）。
+   * 处理异步输入队列（照抄官方 ADOFAI scrController.ProcessKeyInputs /
+   * scrPlayer.Simulated_PlayerControl_Update）：
+   * 每个事件都在它自己的时间戳上跑一遍完整模拟——先超时失败检查、长按检查，
+   * 再消费该事件的按键判定——事件按时间顺序依次推进状态机，与渲染帧率完全
+   * 无关（1fps 也不丢键）。帧循环仍以帧时刻跑同一套检查（官方帧路径
+   * currFrameTick 同理），两者单调不冲突。
    */
   private processAsyncInputs(): void {
     if (!this.manualMode) return;
     const events = this.inputQueue.drain();
     if (events.length === 0) return;
-
-    // 先维护按键计数（长按状态）：死亡/保护期也要保持计数正确，否则长按会误判
-    let hasDown = false;
-    for (const ev of events) {
-      if (ev.type === 'down') { this._keysDown++; hasDown = true; }
-      else this._keysDown = Math.max(0, this._keysDown - 1);
-    }
-
-    // 死亡后按任意键 → 从开头重开
-    if (this._manualDead) {
-      if (hasDown) this.retryManual();
-      return;
-    }
-
-    // GO 后到首个落点判定窗口开始前：按键忽略（避免提前按被判 TooEarly）
-    if (this.isPreStartGraceActive()) return;
-
-    const settings = this.levelData.settings;
-    const bpm0 = settings.bpm || 100;
-    const cd0 = (settings.countdownTicks || 4) * (60 / bpm0);
     const timeOrigin = this.getTimeOrigin();
 
     for (let i = 0; i < events.length; i++) {
       const ev = events[i];
-      const elapsedAtEvent = this.getElapsedTimeAt(ev.perfTime);
-      const timeInLevel = elapsedAtEvent / 1000 - timeOrigin;
+      const timeInLevel = this.getElapsedTimeAt(ev.perfTime) / 1000 - timeOrigin;
+
       if (ev.type === 'down') {
+        // 死亡后按任意键 → 从开头重开；本次 drain 剩余事件一并作废
+        // （官方状态切换时 ClearKeys，restart 后的旧事件不能参与新一局判定）
+        if (this._manualDead) { this.retryManual(); return; }
+        this._keysDown++;
+        // GO 后到首个落点判定窗口开始前：按键忽略（避免提前按被判 TooEarly）
+        if (this.isPreStartGraceActive()) continue;
+        this.checkManualTooLate(timeInLevel);
+        if (this._manualDead) return;
+        this.checkHoldState(timeInLevel);
+        if (this._manualDead) return;
         this.judgePress(timeInLevel);
       } else {
+        this._keysDown = Math.max(0, this._keysDown - 1);
+        if (this._manualDead || this.isPreStartGraceActive()) continue;
+        // 官方 Simulated_PlayerControl_Update 顺序：超时失败检查（CheckPostHoldFail）
+        // → 松手判定（UpdateHoldBehavior）→ 长按未完成检查（CheckPreHoldFail）
+        this.checkManualTooLate(timeInLevel);
+        if (this._manualDead) return;
         this.handleHoldRelease(timeInLevel);
+        if (this._manualDead) return;
+        this.checkHoldState(timeInLevel);
       }
     }
   }
@@ -3178,7 +3185,7 @@ export class Player implements IPlayer {
 
     if (this.rendererType === 'webgpu' && this.webgpuSupported) {
       try {
-        const gpuRenderer = new WebGPURenderer({ alpha: true, antialias: true });
+        const gpuRenderer = new WebGPURenderer({ alpha: true, antialias: this.resolveAntialias() });
         this.renderer = gpuRenderer;
         this.rendererInitialized = true;
 
@@ -3211,9 +3218,11 @@ export class Player implements IPlayer {
       }
       
       try {
+        // 抗锯齿按设置解析（auto = 桌面开 / 移动关）。手机/平板 tiler GPU（如 Mali-G 系列）上
+        // 4× MSAA 是纯带宽开销，满屏 alpha 混合场景下最拖帧率；canvas 本身有缩放，损失不可见。
         this.renderer = new WebGLRenderer({ 
           alpha: true, 
-          antialias: true,
+          antialias: this.resolveAntialias(),
           powerPreference: 'high-performance',
           failIfMajorPerformanceCaveat: false,
           // 装饰遮罩（MaskingType Mask/VisibleInside/VisibleOutsideMask）用 stencil 实现。
@@ -3374,13 +3383,36 @@ export class Player implements IPlayer {
     this.renderer.setPixelRatio(ratio);
   }
 
+  /** 手机/平板检测：触摸 + 移动 UA。用于关闭 MSAA 等填充率敏感的渲染特性。 */
+  private static isMobileDevice(): boolean {
+    if (typeof navigator === 'undefined') return false;
+    const touch = navigator.maxTouchPoints > 1 || 'ontouchstart' in window;
+    return touch && /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+  }
+
+  /** 抗锯齿最终值：auto = 桌面开 / 移动关；on / off 强制。上下文创建时一次性生效。 */
+  private resolveAntialias(): boolean {
+    if (this.antialiasMode === 'on') return true;
+    if (this.antialiasMode === 'off') return false;
+    return !Player.isMobileDevice();
+  }
+
+  /** 切换抗锯齿模式（需重建渲染上下文才能生效，与 setRenderer 同机制）。 */
+  public setAntialias(mode: AntialiasModeType): void {
+    if (this.antialiasMode === mode) return;
+    this.antialiasMode = mode;
+    if (!this.renderer) return; // 尚未初始化：initRenderer 时自然生效
+    this.rendererInitialized = false;
+    this.initRenderer();
+  }
+
   public setRenderScale(scale: RenderScaleType): void {
     if (this.renderScale === scale) return;
     this.renderScale = scale;
     this.applyPixelRatio();
   }
 
-  /** 切换输入方式：sync = 主线程事件队列；worker = Worker 队列（主线程打戳转发）。 */
+  /** 切换输入方式：两者均为主线程高精度时间戳队列（worker 实现已不再创建线程，见 WorkerInputManager）。 */
   public setInputMethod(method: InputMethodType): void {
     if (this.inputMethod === method) return;
     const wasAttached = this.inputAttached;
@@ -3474,6 +3506,7 @@ export class Player implements IPlayer {
     (dm as any)._timelineManager = this.timelineManager;
     dm.refreshAnimatedDecos();
     this._decorationsBuilt = true;
+    this._idleDecorSig = ''; // 装饰重建：强制下一次静止帧重采样
     dm.setRootVisible(true);
     onProgress?.(1, 'decorations');
     debugLog(`[Decoration] build: count=${total} materialize=${(tMat - tStart).toFixed(0)}ms events=${(tEv - tMat).toFixed(0)}ms keyframes=${(tKf - tEv).toFixed(0)}ms`);
@@ -3542,6 +3575,7 @@ export class Player implements IPlayer {
 
   private onMouseDown(event: MouseEvent): void {
     if (event.button === 0) { // Left click
+      if (this.isManualPlayViewLocked) return; // 手动播放中：拖动不带动预览视角
       this.isDragging = true;
       this.previousMousePosition = { x: event.clientX, y: event.clientY };
       this.mouseDownPos = { x: event.clientX, y: event.clientY };
@@ -3550,6 +3584,7 @@ export class Player implements IPlayer {
 
   private onMouseMove(event: MouseEvent): void {
     if (!this.isDragging) return;
+    if (this.isManualPlayViewLocked) return; // 手动播放中：即使已在拖动也不移动视角
 
     const deltaX = event.clientX - this.previousMousePosition.x;
     const deltaY = event.clientY - this.previousMousePosition.y;
@@ -3682,6 +3717,15 @@ export class Player implements IPlayer {
     this._targetCamPos = new Vector3(this.tilePositions.getX(index), this.tilePositions.getY(index), 0);
   }
 
+  /**
+   * 手动模式播放中（非 auto 且正在跑）：触摸/鼠标拖动与双指缩放禁用——
+   * 手指/鼠标是打歌输入，拖动或缩放会带动预览视角影响发挥；
+   * 滚轮缩放（onWheel）不受限；暂停/停止/切回 auto 后自动恢复。
+   */
+  private get isManualPlayViewLocked(): boolean {
+    return this.manualMode && this.isPlaying && !this.isPaused;
+  }
+
   private onWheel(event: WheelEvent): void {
     event.preventDefault();
     
@@ -3701,10 +3745,18 @@ export class Player implements IPlayer {
   // Touch support (simplified)
   private onTouchStart(event: TouchEvent): void {
     if (event.touches.length === 1) {
+      // 手动播放中：单指是打歌输入，不启动视角拖动（见 isManualPlayViewLocked）
+      if (this.isManualPlayViewLocked) return;
       this.isDragging = true;
       this.previousMousePosition = { x: event.touches[0].clientX, y: event.touches[0].clientY };
     } else if (event.touches.length === 2) {
       this.isDragging = false;
+      // 手动播放中：禁用双指缩放——两指是打歌输入，缩放手势会干扰判定/带动预览视角；
+      // 滚轮缩放（onWheel）不受影响；暂停/切回 auto 后自动解禁。
+      if (this.isManualPlayViewLocked) {
+        this.initialPinchDistance = 0;
+        return;
+      }
       const dx = event.touches[0].clientX - event.touches[1].clientX;
       const dy = event.touches[0].clientY - event.touches[1].clientY;
       this.initialPinchDistance = Math.sqrt(dx*dx + dy*dy);
@@ -3715,6 +3767,7 @@ export class Player implements IPlayer {
   private onTouchMove(event: TouchEvent): void {
     event.preventDefault();
     if (this.isDragging && event.touches.length === 1) {
+      if (this.isManualPlayViewLocked) return; // 手动播放中：拖动不带动预览视角
       const touch = event.touches[0];
       const deltaX = touch.clientX - this.previousMousePosition.x;
       const deltaY = touch.clientY - this.previousMousePosition.y;
@@ -3733,6 +3786,8 @@ export class Player implements IPlayer {
       
       this.previousMousePosition = { x: touch.clientX, y: touch.clientY };
     } else if (event.touches.length === 2) {
+      // 手动播放中禁用双指缩放，见 onTouchStart / isManualPlayViewLocked
+      if (this.isManualPlayViewLocked) return;
       const dx = event.touches[0].clientX - event.touches[1].clientX;
       const dy = event.touches[0].clientY - event.touches[1].clientY;
       const distance = Math.sqrt(dx*dx + dy*dy);
@@ -4104,6 +4159,7 @@ export class Player implements IPlayer {
       const drift = expectedMusicPos - actualMusicPos;
       if (Math.abs(drift) > 0.01) {
         console.log('[Player] One-shot audio sync:', (drift * 1000).toFixed(1), 'ms');
+        const oldElapsed = this.elapsedTime;
         if (this.useAudioContextTime) {
           const audioCtx = getSharedAudioContext();
           if (audioCtx) {
@@ -4114,6 +4170,9 @@ export class Player implements IPlayer {
           this.startTime += drift * 1000;
           this.elapsedTime = performance.now() - this.startTime;
         }
+        // 锚点重定位会让"已入队未判定"的事件换算结果整体跳变 → 平移在途事件时间戳抵消
+        // （等价官方 UpdateOffsetTime 的平滑 offsetTick 校准，保证判定连续不跳）
+        this.inputQueue.shiftPendingTime(oldElapsed - this.elapsedTime);
         // 时钟刚被重新对齐到音乐：打拍音也重定位，否则它仍按旧时钟播放 → 与音乐恒定错位
         this.restartHitsoundsAtCurrentTime();
       }
@@ -4421,10 +4480,14 @@ export class Player implements IPlayer {
       this.perfAdd('visibleTiles', performance.now() - _t); _t = performance.now();
       this.syncInstancedTiles();
       this.perfAdd('instanced', performance.now() - _t); _t = performance.now();
-      // Keep decorations in sync with the seeked time while not actively playing
-      // (editor scrubbing / paused playback). During playback updateDecorations
-      // is driven from updatePlayer instead.
-      this.updateDecorations();
+      // 静止早退：时间/相机/缩放/选中均未变（编辑器空闲、暂停不拖动）时跳过
+      // 装饰的逐帧采样——相机相对/动画装饰在手机端是空闲帧的固定主线程开销。
+      // 装饰重建（_decorationsBuilt 置位）与 seek/拖动/缩放/编辑都会改变签名。
+      const idleSig = `${this.elapsedTime.toFixed(3)}|${this.camera.position.x.toFixed(4)}|${this.camera.position.y.toFixed(4)}|${this.camera.rotation.z.toFixed(5)}|${this.camera.zoom.toFixed(4)}|${this.zoomMultiplier.toFixed(4)}|${this.adoZoom.toFixed(4)}|${this.selectedTileIndex ?? -1}`;
+      if (idleSig !== this._idleDecorSig) {
+        this._idleDecorSig = idleSig;
+        this.updateDecorations();
+      }
       this.perfAdd('decorations', performance.now() - _t);
     }
     // Selection green flash animation (disabled during playback)
@@ -5143,6 +5206,8 @@ export class Player implements IPlayer {
     if (!this.isPlaying || this.isPaused) return;
     this.isPaused = true;
     this.pauseTime = performance.now();
+    // 官方非 PlayerControl 状态 ClearKeys：暂停期间的按键是设置/UI 操作，不能入判定队列
+    this.inputQueue.clear();
     if (this.music && (this.music as any).hasAudio ? this.music.hasAudio : false) {
       this.music.pause();
     }
@@ -5153,6 +5218,7 @@ export class Player implements IPlayer {
   public resumePlay(): void {
     if (!this.isPlaying || !this.isPaused) return;
     this.isPaused = false;
+    this.inputQueue.clear(); // 暂停期间累积的按键作废（官方 ClearKeys）
     const pauseDuration = performance.now() - this.pauseTime;
     this.startTime += pauseDuration;
     // 音频时钟基准同样要补偿：elapsedTime 走 AudioContext.currentTime，
@@ -5201,6 +5267,7 @@ export class Player implements IPlayer {
 
     // 手动模式：seek 后把当前砖块重置到该时间点，避免从错误的砖块继续判定
     if (this.manualMode) {
+      this.inputQueue.clear(); // 位置重定义后旧事件不能参与判定
       this.currentTileIndex = this.getTileIndexAtLevelTime(timeInLevel);
       this._judgeLastCorrectedTile = -1;
       this._judgeHitsoundPlayed = -1;
@@ -6256,6 +6323,8 @@ export class Player implements IPlayer {
 
   private lastVisibleCheckPos = new Vector3(Infinity, Infinity, Infinity);
   private lastVisibleCheckZoom = -1;
+  /** 静止早退签名：装饰重建/seek 时置空，强制下一次 updateDecorations 执行。 */
+  private _idleDecorSig = '';
   // Sorted ids of the last assigned visible set (avoids re-layering when unchanged)
   private _lastSortedVisible: number[] = [];
   /** 每块砖当前的层级 z（updateVisibleTiles 写入），供 syncFloorDepth 装饰继承。 */

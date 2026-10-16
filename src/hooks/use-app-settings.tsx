@@ -7,6 +7,7 @@ export type RenderMethodType = "sync" | "async"
 export type LoadMethodType = "sync" | "async" | "worker"
 export type TargetFramerateType = "auto" | "30" | "60" | "120" | "144" | "165" | "240" | "unlimited"
 export type RenderScaleType = "0.75" | "1" | "1.5" | "native"
+export type AntialiasModeType = "auto" | "on" | "off" // 抗锯齿：auto = 桌面开 / 移动关
 export type InputMethodType = "sync" | "worker"
 export type TrailSampleModeType = "fixed" | "bpm"
 
@@ -17,6 +18,7 @@ interface AppSettings {
   trailSampleMode: TrailSampleModeType // 拖尾采样率：fixed=固定 100 点/秒；bpm=随当前 BPM 提高采样率（高 BPM 更平滑）
   targetFramerate: TargetFramerateType
   renderScale: RenderScaleType // 渲染倍率上限（pixelRatio = min(DPR, 该值)）
+  antialias: AntialiasModeType // 抗锯齿（MSAA）：auto = 桌面开 / 移动关，可强制开/关
   loadMethod: LoadMethodType
   inputMethod: InputMethodType // 输入方式：sync 主线程 / worker 队列
   hitsoundEnabled: boolean
@@ -36,6 +38,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   trailSampleMode: "bpm", // 高 BPM 下自动加密拖尾采样（低 BPM 与固定模式相同）
   targetFramerate: "auto", // Default to auto (monitor refresh rate)
   renderScale: "1.5", // Cap pixel ratio at min(DPR, 1.5) for fill-rate performance
+  antialias: "auto", // Auto: on for desktop, off for mobile (MSAA is bandwidth-heavy on tile GPUs)
   loadMethod: "async", // Default to async loading
   inputMethod: "sync", // Default to main-thread synchronous input
   hitsoundEnabled: true, // Default to enabled

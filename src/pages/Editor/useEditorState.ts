@@ -176,6 +176,7 @@ export function useEditorState() {
       player.setHitsoundEnabled(settings.hitsoundEnabled)
       player.setTargetFramerate(settings.targetFramerate)
       player.setRenderScale(settings.renderScale)
+      player.setAntialias(settings.antialias)
       player.setInputMethod(settings.inputMethod)
       player.setOGGCompression(settings.useOGGCompression)
       player.setStatsPanel(settings.showStats)
@@ -401,6 +402,7 @@ export function useEditorState() {
       player.setHitsoundEnabled(settings.hitsoundEnabled)
       player.setTargetFramerate(settings.targetFramerate)
       player.setRenderScale(settings.renderScale)
+      player.setAntialias(settings.antialias)
       player.setInputMethod(settings.inputMethod)
       player.setOGGCompression(settings.useOGGCompression)
       player.setStatsPanel(settings.showStats)
@@ -417,6 +419,7 @@ export function useEditorState() {
     settings.hitsoundEnabled,
     settings.targetFramerate,
     settings.renderScale,
+    settings.antialias,
     settings.inputMethod,
     settings.showStats,
     settings.disableTrackTexture,
@@ -471,6 +474,11 @@ export function useEditorState() {
   useEffect(() => {
     previewerRef.current?.setRenderScale(settings.renderScale)
   }, [settings.renderScale])
+
+  // 监听抗锯齿设置变化（需重建渲染上下文）
+  useEffect(() => {
+    previewerRef.current?.setAntialias(settings.antialias)
+  }, [settings.antialias])
 
   // 监听输入方式设置变化
   useEffect(() => {
@@ -536,6 +544,7 @@ export function useEditorState() {
             player.setHitsoundEnabled(settings.hitsoundEnabled)
             player.setTargetFramerate(settings.targetFramerate)
             player.setRenderScale(settings.renderScale)
+            player.setAntialias(settings.antialias)
             player.setInputMethod(settings.inputMethod)
             player.setStatsPanel(settings.showStats)
 

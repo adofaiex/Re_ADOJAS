@@ -220,6 +220,13 @@ export const translations = {
         r15: "1.5x（推荐）",
         native: "原生（设备像素比）",
       },
+      antialias: {
+        title: "抗锯齿 (MSAA)",
+        description: "多重采样抗锯齿，可平滑轨道边缘；移动端默认关闭（tiler GPU 上开销较大），可手动强制",
+        auto: "自动（桌面开 / 移动关）",
+        on: "始终开启",
+        off: "始终关闭",
+      },
       loadMethod: {
         title: "关卡加载方式",
         description: "选择加载关卡的执行方式",
@@ -230,8 +237,8 @@ export const translations = {
       inputMethod: {
         title: "输入方式",
         description: "选择判定输入的采集方式",
-        sync: "同步输入（主线程，当前实现）",
-        worker: "Worker 队列（后台线程）",
+        sync: "同步输入（主线程）",
+        worker: "异步输入（兼容选项，等同主线程队列）",
       },
       useOGGCompression: {
         title: "OGG 压缩",
@@ -475,6 +482,13 @@ export const translations = {
         r15: "1.5x (Recommended)",
         native: "Native (Device Pixel Ratio)",
       },
+      antialias: {
+        title: "Anti-aliasing (MSAA)",
+        description: "Multisample anti-aliasing smooths track edges; off by default on mobile (expensive on tile GPUs), can be forced",
+        auto: "Auto (On for desktop / Off for mobile)",
+        on: "Always On",
+        off: "Always Off",
+      },
       loadMethod: {
         title: "Level Load Method",
         description: "Choose how levels are loaded",
@@ -485,8 +499,8 @@ export const translations = {
       inputMethod: {
         title: "Input Method",
         description: "Choose how judgment inputs are captured",
-        sync: "Sync Input (Main Thread, Current)",
-        worker: "Worker Queue (Background Thread)",
+        sync: "Sync Input (Main Thread)",
+        worker: "Async Input (Legacy, same as main thread)",
       },
       disableTrackTexture: {
         title: "Disable Track Texture",
@@ -724,6 +738,13 @@ export const translations = {
         r15: "1.5x（推奨）",
         native: "ネイティブ（デバイスピクセル比）",
       },
+      antialias: {
+        title: "アンチエイリアス (MSAA)",
+        description: "マルチサンプルAAでトラックの縁を滑らかにします。モバイルではデフォルト無効（タイルGPUでは高負荷）、強制可能",
+        auto: "自動（デスクトップ=有効 / モバイル=無効）",
+        on: "常に有効",
+        off: "常に無効",
+      },
       loadMethod: {
         title: "レベル読み込み方法",
         description: "レベルの読み込み方法を選択",
@@ -734,8 +755,8 @@ export const translations = {
       inputMethod: {
         title: "入力方法",
         description: "判定入力の取得方法を選択",
-        sync: "同期入力（メインスレッド、現在の実装）",
-        worker: "ワーカーキュー（バックグラウンドスレッド）",
+        sync: "同期入力（メインスレッド）",
+        worker: "非同期入力（互換用、メインスレッドと同等）",
       },
       disableTrackTexture: {
         title: "トラックテクスチャを無効化",
