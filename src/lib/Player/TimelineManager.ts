@@ -1073,14 +1073,20 @@ export class TimelineManager {
 
             while (eventIdx < animateTrackEvents.length && animateTrackEvents[eventIdx].floor === floor) {
                 const evt = animateTrackEvents[eventIdx].event;
-                const hasTrackAnim = isFieldEnabled(evt, 'trackAnimation');
+                // appear：缺失 trackAnimation = 继承上一个事件（修复 5649/7464 段不出现）。
+                // disappear：缺失 trackDisappearAnimation = None（10/4 行为），
+                // 避免只写了 beatsBehind 的事件继续继承上一段的 Fade/0 而提前消失。
+                const hasTrackAnim = evt.trackAnimation !== undefined;
                 const hasTrackDisappear = isFieldEnabled(evt, 'trackDisappearAnimation');
 
                 if (hasTrackAnim) {
                     appearType = evt.trackAnimation || 'None';
+                    // 字段存在但 beatsAhead 缺失：沿用上一个事件（与 10/4 一致）
                     if (evt.beatsAhead != null) beatsAhead = evt.beatsAhead;
                 }
                 if (hasTrackDisappear) {
+                    // 缺失 trackDisappearAnimation 时按 None 处理（10/4 行为）。
+                    // 这类事件通常只写了 beatsBehind，不应继续继承上一段的 disappear。
                     disappearType = evt.trackDisappearAnimation || 'None';
                     if (evt.beatsBehind != null) beatsBehind = evt.beatsBehind;
                 }
@@ -1104,12 +1110,14 @@ export class TimelineManager {
             const scaledBeatsAhead = beatsAhead * speedRatio;
             const scaledBeatsBehind = beatsBehind * speedRatio;
 
-            // 只有动画类型为 None 才跳过：beatsAhead/beatsBehind = 0 也是合法的 ——
-            // 出现从砖自身 entryTime 开始、消失从【下一砖 entryTime】开始
-            // （MCCXVI 就是 Fade + beatsBehind: 0）。
-            if (appearType !== 'None') {
+            // beatsAhead=0 只对 Fade 保留（MCCXVI 需要从 entry 开始淡入）。
+            // Assemble/Grow 等在 0 时会把已经生成的砖拉回随机偏移再重播，
+            // 表现为“成型轨道闪回/缺一格”，所以直接跳过。
+            if (appearType !== 'None' && (scaledBeatsAhead > 0 || appearType === 'Fade')) {
                 this.buildAppearKeyframes(floor, appearType, scaledBeatsAhead, bases, pitch);
             }
+            // 缺失 trackDisappearAnimation 的事件已把类型设为 None；
+            // 因此这里可以应用 behind=0：开头的全局 Shrink 与显式 Fade/0 都需要。
             if (disappearType !== 'None' && floor < this.totalTiles - 1) {
                 const nextEntryTime = this.tileStartTimes[floor + 1] ?? 0;
                 this.buildDisappearKeyframes(floor, disappearType, scaledBeatsBehind, nextEntryTime, bases, pitch);
@@ -1130,14 +1138,13 @@ export class TimelineManager {
 
         const isDropOrRise = animType === 'Drop' || animType === 'Rise';
         const tiles = isDropOrRise ? beatsAhead * 2 : beatsAhead;
-        // SetStartTime：startTime 用不含 pitch 的 crotchet，
         // duration = num / pitch * ...（Drop/Rise = num/pitch*tilesAhead，
         // 其它 = min(num/pitch*0.5, 0.5)）。
-        const appearStartTime = Math.max(entryTime - tiles * secPerBeat, 0);
-
         const appearDuration = isDropOrRise
             ? (secPerBeat * beatsAhead) / pitch
             : Math.min((secPerBeat * 0.5) / pitch, 0.5);
+
+        const appearStartTime = Math.max(entryTime - tiles * secPerBeat, 0);
         const appearEndTime = appearStartTime + appearDuration;
 
         const baseX = bases.posX[floor] ?? 0;

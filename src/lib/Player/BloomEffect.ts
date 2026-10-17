@@ -52,7 +52,7 @@ export class BloomEffect {
     /** 官方 Tint（sRGB 分量）。 */
     private bloomColor: Color = new Color(1, 1, 1);
     /** 官方 VideoBloom.MediumAmount（定标值 0.28）。 */
-    private mediumAmount: number = 0.28;
+    private mediumAmount: number = 0.67;
     private quality: number = 1;
 
     private width: number = 1;

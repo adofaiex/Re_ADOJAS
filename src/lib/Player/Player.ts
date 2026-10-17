@@ -735,6 +735,112 @@ export class Player implements IPlayer {
             style: inst ? this.instancedMeshManager?.debugShapeStyle(inst.shapeKey) ?? null : null,
         };
     };
+    // 砖块动画探针：__adojasTileAnim(floor)
+    //   → 该砖 entryTime、时间轴关键帧、附近事件，以及入场前后的采样值。
+    //   用来区分"出现窗口本身就晚"和"MoveTrack 覆盖了出现动画"。
+    (window as any).__adojasTileAnim = (floor?: number) => {
+        const tm: any = this.timelineManager;
+        if (!tm) return null;
+        const i = floor ?? this.currentTileIndex;
+        const entry = this.tileStartTimes[i] ?? 0;
+
+        const props = ['opacity', 'scaleX', 'scaleY', 'positionX', 'positionY', 'rotation'];
+        const keyframes: Record<string, string> = {};
+        const lo = entry - 16;
+        const hi = entry + 8;
+        for (const p of props) {
+            const kfs = tm.timelines?.get(`tile:${i}`)?.get(p) as any[] | undefined;
+            if (kfs && kfs.length) {
+                const near = kfs.filter((k: any) => k.time >= lo && k.time <= hi);
+                keyframes[p] = `${near.length}/${kfs.length} in [${lo.toFixed(2)}, ${hi.toFixed(2)}]: ` +
+                    near
+                        .map((k: any) => `${Number(k.time).toFixed(3)}@${Number(k.value).toFixed(4)}${k.ease ? '/' + k.ease : ''}`)
+                        .join(' | ');
+            }
+        }
+
+        const offsets = [-1, -0.5, -0.25, 0, 0.1, 0.25, 0.5, 1, 2, 4, 6, 8];
+        const samples = offsets.map((dt) => {
+            const t = entry + dt;
+            return {
+                t: Number(t.toFixed(3)),
+                dt,
+                opacity: tm.sample(`tile:${i}`, 'opacity', t),
+                scaleX: tm.sample(`tile:${i}`, 'scaleX', t),
+                scaleY: tm.sample(`tile:${i}`, 'scaleY', t),
+                x: tm.sample(`tile:${i}`, 'positionX', t),
+                y: tm.sample(`tile:${i}`, 'positionY', t),
+                rot: tm.sample(`tile:${i}`, 'rotation', t),
+            };
+        });
+
+        const actions = (this.levelData?.actions ?? []) as any[];
+        const recentAT = actions
+            .filter((a) => a?.eventType === 'AnimateTrack' && typeof a.floor === 'number' && a.floor <= i)
+            .slice(-6);
+        const nearby = actions.filter((a) =>
+            typeof a.floor === 'number' &&
+            a.floor >= i - 32 && a.floor <= i + 8 &&
+            (a.eventType === 'MoveTrack' || a.eventType === 'SetSpeed')
+        );
+        const events = [...recentAT, ...nearby]
+            .sort((a, b) => a.floor - b.floor)
+            .map((a) => ({
+                floor: a.floor,
+                id: a.id,
+                eventType: a.eventType,
+                active: a.active,
+                disabled: a.disabled,
+                startTile: a.startTile,
+                endTile: a.endTile,
+                gapLength: a.gapLength,
+                ease: a.ease,
+                trackAnimation: a.trackAnimation,
+                trackDisappearAnimation: a.trackDisappearAnimation,
+                beatsAhead: a.beatsAhead,
+                beatsBehind: a.beatsBehind,
+                duration: a.duration,
+                positionOffset: a.positionOffset,
+                rotationOffset: a.rotationOffset,
+                scale: a.scale,
+                opacity: a.opacity,
+                easing: a.easing,
+            }));
+
+        return {
+            floor: i,
+            entryTime: Number(entry.toFixed(3)),
+            bpm: this.tileBPM[i] ?? null,
+            keyframes,
+            events,
+            samples,
+        };
+    };
+    // AnimateTrack 总览：__adojasAT() → 全局设置 + 所有 AnimateTrack 的字段。
+    // 用来确认 beatsAhead/beatsBehind 是显式写死，还是缺省后继承。
+    (window as any).__adojasAT = () => {
+        const s = this.levelData?.settings ?? {};
+        const actions = (this.levelData?.actions ?? []) as any[];
+        return {
+            settings: {
+                trackAnimation: s.trackAnimation,
+                trackDisappearAnimation: s.trackDisappearAnimation,
+                beatsAhead: s.beatsAhead,
+                beatsBehind: s.beatsBehind,
+            },
+            events: actions
+                .filter((a) => a?.eventType === 'AnimateTrack')
+                .map((a) => ({
+                    floor: a.floor,
+                    id: a.id,
+                    trackAnimation: a.trackAnimation,
+                    beatsAhead: a.beatsAhead,
+                    trackDisappearAnimation: a.trackDisappearAnimation,
+                    beatsBehind: a.beatsBehind,
+                    disabled: a.disabled,
+                })),
+        };
+    };
     // 运行期开关/查询：__adojasBloom(false) 关泛光；__adojasBloom() 查询当前 bloom 参数。
     (window as any).__adojasBloom = (on?: boolean) => {
         if (on !== undefined) {

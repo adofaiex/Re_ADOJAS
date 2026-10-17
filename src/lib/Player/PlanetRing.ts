@@ -124,12 +124,14 @@ export class PlanetRing {
         : Math.max(target, this.scalePercent - step);
     }
     const visible = this.scalePercent > 0.001;
-    this.mesh.visible = visible;
-    if (!visible) return;
-    // 环随行星缩放做反向补偿（除以 planetScale）：行星变大时环保持贴着轨道半径，
-    // 不被行星自身的大小带偏。planetScale 为 0 时行星不可见，这里兜底成 1 避免除零。
-    const scaleDiv = planetScale !== 0 ? planetScale : 1;
-    const radius = RING_RADIUS * radiusScale * this.scalePercent / scaleDiv;
+    // planetScale=0 时行星不可见，环也一并隐藏，避免残留一个正常大小的环。
+    if (!visible || planetScale === 0) {
+      this.mesh.visible = false;
+      return;
+    }
+    this.mesh.visible = true;
+    // 其余情况保持原逻辑：按行星缩放做反向补偿。
+    const radius = RING_RADIUS * radiusScale * this.scalePercent / planetScale;
     this.mesh.scale.set(radius, radius, 1);
     this.mesh.rotation.z = dirSign * (SPIN_DEG_PER_SEC * Math.PI / 180) * spinTime;
   }

@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef } from "react"
 import { Button } from "@/components/ui/button"
 import { ArrowLeft, Settings, Save, Upload, Download, Music, Video, Image, Maximize, Minimize } from "lucide-react"
 import { SettingsModal } from "@/components/SettingsModal"
+import { FindDialog } from "@/components/FindDialog"
 import { ExportDialog } from "./ExportDialog"
 import { LoadingModal } from "@/components/LoadingModal"
 import { NotificationSystem } from "./NotificationSystem"
@@ -95,11 +96,26 @@ export default function EditorPage() {
   } = useEditorState()
 
   const [timelineOpen, setTimelineOpen] = useState(false)
+  // 高级查找（Ctrl+F）
+  const [findOpen, setFindOpen] = useState(false)
   const [sliderValue, setSliderValue] = useState(0)
   const recordingMode = settings.recordingMode
 
   const player = previewerRef.current
   const totalMs = player?.totalDurationMs ?? 600000
+
+  // Ctrl+F 打开高级查找
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
+        e.preventDefault()
+        e.stopPropagation()
+        setFindOpen(true)
+      }
+    }
+    window.addEventListener("keydown", onKey, true)
+    return () => window.removeEventListener("keydown", onKey, true)
+  }, [])
 
   // Poll slider position during playback.
   // 注意：只在时间轴面板打开时轮询；否则每次 setState 都会让整个编辑器页面
@@ -491,6 +507,9 @@ export default function EditorPage() {
 
       {/* Settings Modal */}
       <SettingsModal isOpen={settingsOpen} onClose={() => setSettingsOpen(false)} />
+
+      {/* 高级查找（Ctrl+F） */}
+      <FindDialog isOpen={findOpen} onClose={() => setFindOpen(false)} player={player} isDark={isDark} />
 
       {/* 死亡后建议的音频延迟弹窗（非阻塞，按播放/退出可关闭） */}
       {!recordingMode && suggestedAudioDelayMs !== null && (

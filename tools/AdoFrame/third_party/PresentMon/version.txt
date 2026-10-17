@@ -1,0 +1,5 @@
+PresentMon 2.6.0
+Source: https://github.com/GameTechDev/PresentMon/releases/tag/v2.6.0
+Asset: PresentMon-2.6.0-x64.exe
+SHA256: B2A706BC6AD475749E3B7E3409263AA1E6906D45BDCF993F6DBC0F660188F1AF
+License: MIT (see LICENSE.txt)
