@@ -7120,7 +7120,10 @@ export class Player implements IPlayer {
              
              const currentAngle = isCW ? (startAngle - totalAngle) : (startAngle + totalAngle);
              
-             const dist = 1.0;
+             // 无限自转沿用上一砖的 radiusScale（ScaleRadius 是继承态，官方继承到段末）。
+             // `tileRadiusScale` 只覆盖到"最后一砖"，退回 1.0 会让半径在段尾突然变大
+             // （如 scale=50 时 0.5 → 1.0）。
+             const dist = this.tileRadiusScale[lastIndex] ?? this.tileRadiusScale[lastIndex - 1] ?? 1.0;
              this.applyMultiPlanetLayout(lastIndex, pivotX, pivotY, currentAngle, dist, this.tileIsCW[lastIndex] ? -1 : 1, this.getMultiPlanetAngleOffset(lastIndex));
              this.syncActivePlanets(lastIndex);
              
