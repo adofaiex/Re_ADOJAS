@@ -96,6 +96,10 @@ export default defineConfig(({ mode, command }) => {
             if (id.includes('node_modules/')) {
               return 'vendor-other'
             }
+            // App: filter pipeline / GLSL (kept separate from Player)
+            if (id.includes('/src/lib/Filters/')) {
+              return 'app-filters'
+            }
             // App: Player rendering engine
             if (id.includes('/src/lib/Player/')) {
               return 'app-player'

@@ -166,6 +166,9 @@ export class PositionTrackManager {
                 floats[i] = a === 999 ? (floats[i - 1] || 0) + 180 : a;
             }
         }
+        // 官方最后一个砖块的 exitAngle = entryAngle + π，即继承上一砖方向。
+        // 位置数组本身只用 floats[i] 推进到 i+1，但保持一致避免后续复用出错。
+        if (tileCount > 1) floats[tileCount - 1] = floats[tileCount - 2];
 
         let px = 0, py = 0;
         for (let i = 0; i < tileCount; i++) {

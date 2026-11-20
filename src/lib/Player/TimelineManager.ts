@@ -4,6 +4,9 @@ import { isEventActive, isFieldEnabled } from './EventUtils';
 import { debugLog } from './DebugLog';
 import type { TileBases } from './TileBases';
 
+/** 同一时刻的关键帧判定容差：谱面时间经过 BPM/pitch 换算后会有 KEY_EPS 级误差。 */
+const KEY_EPS = 1e-6;
+
 export interface Keyframe {
     time: number;
     value: number;
@@ -316,8 +319,14 @@ export class TimelineManager {
         // 应用顺序（ApplyEventsToFloors）：floor 升序，同 floor 按 id 升序。
         // 后处理的事件覆盖先处理的（RemoveKeyframes 删冲突区间）。
         for (const [tileIdx, events] of perTileMoveTrack) {
+            // 必须按实际触发时间排，而不是只按 floor/id。MoveTrack 的
+            // angleOffset 会把同 floor 的零时长事件放到 duration 事件之前：
+            // 例如 Arche 结尾的「duration=4 opacity=0 + angleOffset=-1
+            // duration=0 opacity=30」；若按 id 把 reset 放在 fade 之后，
+            // reset 的 Kill(complete) 会删掉 fade 的 tween，轨道就不会消失。
             events.sort((a, b) => {
-                if (a.floor !== b.floor) return a.floor - b.floor;
+                const dt = a.time - b.time;
+                if (Math.abs(dt) > KEY_EPS) return dt;
                 return (a.event.id ?? Infinity) - (b.event.id ?? Infinity);
             });
             this.buildTileMoveTrack(tileIdx, events, bases, tileIdx < this.tileStartTimes.length ? this.tileStartTimes[tileIdx] : 0);
@@ -563,9 +572,9 @@ export class TimelineManager {
         // Kill(complete:true) semantics: a zero-duration event discards
         // any in-flight tween of the same property. Without this, a superseded
         // tween's end keyframe (after `time`) survives and "resurrects" later.
-        this.removeAfter(kfs, time + 1e-9);
+        this.removeAfter(kfs, time - KEY_EPS);
         const idx = this.findKeyframeIndex(kfs, time);
-        if (idx >= 0 && Math.abs(kfs[idx].time - time) < 1e-9) {
+        if (idx >= 0 && Math.abs(kfs[idx].time - time) < KEY_EPS) {
             kfs[idx].value = value;
             kfs[idx].ease = null;
         } else {
@@ -642,7 +651,7 @@ export class TimelineManager {
         const kfs = this.ensureDiscreteTimeline(entity, property);
         // 同时间覆盖
         for (let i = 0; i < kfs.length; i++) {
-            if (Math.abs(kfs[i].time - time) < 1e-9) {
+            if (Math.abs(kfs[i].time - time) < KEY_EPS) {
                 kfs[i].value = value;
                 return;
             }
@@ -816,7 +825,7 @@ export class TimelineManager {
     public addKeyframe(entity: string, property: string, time: number, value: number, ease: string | null): void {
         const kfs = this.ensureTimeline(entity, property);
         const prevIdx = this.findKeyframeIndex(kfs, time);
-        if (prevIdx >= 0 && Math.abs(kfs[prevIdx].time - time) < 1e-9) {
+        if (prevIdx >= 0 && Math.abs(kfs[prevIdx].time - time) < KEY_EPS) {
             kfs[prevIdx].value = value;
             kfs[prevIdx].ease = ease;
             return;
@@ -831,7 +840,7 @@ export class TimelineManager {
         const actualStart = prevIdx >= 0
             ? this.interpolateTimeline(kfs, prevIdx, startTime)
             : (kfs[0]?.value ?? startValue);
-        this.removeAfter(kfs, startTime + 1e-9);
+        this.removeAfter(kfs, startTime + KEY_EPS);
         kfs.push({ time: startTime, value: actualStart, ease });
         kfs.push({ time: endTime, value: endValue, ease: null });
         if (kfs.length > 1) kfs.sort((a, b) => a.time - b.time);
@@ -867,17 +876,17 @@ export class TimelineManager {
             const left = kfs[prevIdx];
             const right = kfs[prevIdx + 1];
             const insideActive = left.ease !== null
-                && left.time <= startTime + 1e-9
-                && right.time > startTime + 1e-9;
+                && left.time <= startTime + KEY_EPS
+                && right.time > startTime + KEY_EPS;
             if (insideActive) {
                 // Kill(complete:true): old tween jumps to its end at startTime.
                 actualStart = right.value;
-                if (left.time < startTime - 1e-9) {
+                if (left.time < startTime - KEY_EPS) {
                     // Keep the old curve playable up to the snap point.
                     severedTail = { time: startTime, value: this.interpolateTimeline(kfs, prevIdx, startTime), ease: left.ease };
                 }
             } else {
-                actualStart = Math.abs(kfs[prevIdx].time - startTime) < 1e-9 ? kfs[prevIdx].value : this.interpolateTimeline(kfs, prevIdx, startTime);
+                actualStart = Math.abs(kfs[prevIdx].time - startTime) < KEY_EPS ? kfs[prevIdx].value : this.interpolateTimeline(kfs, prevIdx, startTime);
             }
         } else if (prevIdx >= 0) {
             actualStart = kfs[prevIdx].value;
@@ -885,7 +894,7 @@ export class TimelineManager {
             actualStart = kfs[0]?.value ?? fallbackStart;
         }
 
-        this.removeAfter(kfs, startTime + 1e-9);
+        this.removeAfter(kfs, startTime + KEY_EPS);
         if (severedTail) kfs.push(severedTail);
         kfs.push({ time: startTime, value: actualStart, ease });
         kfs.push({ time: endTime, value: endValue, ease: null });
@@ -908,7 +917,7 @@ export class TimelineManager {
 
         // Only remove keyframes strictly between start and end
         for (let i = kfs.length - 1; i >= 0; i--) {
-            if (kfs[i].time > startTime + 1e-9 && kfs[i].time < endTime) {
+            if (kfs[i].time > startTime + KEY_EPS && kfs[i].time < endTime) {
                 kfs.splice(i, 1);
             }
         }

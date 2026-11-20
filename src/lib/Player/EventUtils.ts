@@ -8,7 +8,9 @@
  * - missing = field defaults to enabled
  */
 export function isFieldEnabled(event: any, fieldName: string): boolean {
-    return event.disabled?.[fieldName] !== true;
+    // disabled 字段绝大多数是 boolean，但存档转换可能写字串（"Disabled"/
+    // "true"）；统一交给 isEnabled，避免把 "Disabled" 当成启用。
+    return !isEnabled(event?.disabled?.[fieldName], false);
 }
 
 /**
@@ -21,9 +23,10 @@ export function isFieldEnabled(event: any, fieldName: string): boolean {
  * - `event.editorOnly` events are always skipped
  */
 export function isEventActive(event: any): boolean {
-    if (event.active === false || event.active === 'Disabled') return false;
-    if (event.disabled?.active === true) return false;
-    if (event.editorOnly === true) return false;
+    if (!event) return false;
+    if (!isEnabled(event.active, true)) return false;
+    if (isEnabled(event.disabled?.active, false)) return false;
+    if (isEnabled(event.editorOnly, false)) return false;
     return true;
 }
 
@@ -39,5 +42,12 @@ export function isEventActive(event: any): boolean {
 export function isEnabled(value: any, defaultValue: boolean = false): boolean {
     if (value === undefined || value === null) return defaultValue;
     if (typeof value === 'boolean') return value;
-    return value === 'Enabled' || value === 'true';
+    if (typeof value === 'number') return value !== 0;
+    if (typeof value === 'string') {
+        const v = value.trim().toLowerCase();
+        if (v === 'enabled' || v === 'true' || v === '1' || v === 'yes' || v === 'on') return true;
+        if (v === 'disabled' || v === 'false' || v === '0' || v === 'no' || v === 'off') return false;
+        return defaultValue;
+    }
+    return Boolean(value);
 }

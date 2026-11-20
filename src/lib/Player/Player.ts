@@ -1,13 +1,17 @@
-import { Scene, OrthographicCamera, WebGLRenderer, Mesh, Vector3, Texture, BufferGeometry, WebGLRenderTarget, Color, Vector2, DirectionalLight, Float32BufferAttribute, Euler, Material, MeshBasicMaterial, TextureLoader, SRGBColorSpace, NearestFilter, LinearFilter, PlaneGeometry, BufferAttribute, Sprite, SpriteMaterial, RepeatWrapping, ClampToEdgeWrapping, LinearMipmapLinearFilter, VideoTexture, DoubleSide, Raycaster, Intersection } from 'three';
+import { Scene, Group, OrthographicCamera, WebGLRenderer, Mesh, Vector3, Texture, BufferGeometry, WebGLRenderTarget, Color, Vector2, DirectionalLight, Float32BufferAttribute, Euler, Material, MeshBasicMaterial, TextureLoader, SRGBColorSpace, NearestFilter, LinearFilter, PlaneGeometry, BufferAttribute, Sprite, SpriteMaterial, RepeatWrapping, ClampToEdgeWrapping, LinearMipmapLinearFilter, VideoTexture, DoubleSide, Raycaster, Intersection } from 'three';
 import {WebGPURenderer} from 'three/webgpu';
 import { IPlayer, ILevelData, IMusic, TargetFramerateType, RenderScaleType, AntialiasModeType, InputMethodType, InputQueue } from './types';
 import { Planet } from './Planet';
 import { HitsoundManager, HitsoundType, TimestampGroup, HitsoundSynthStatus } from './HitsoundManager';
 import { isCompactTiles, tileCount as tileCountOf, tileAngle, tileAngleOr, tileDirection, tileTwirl, tileActions, TilePositions } from './TileAccess';
 import { BloomEffect } from './BloomEffect';
+import { FilterManager } from '../Filters';
+import { BLOOM_FILTER_ORDER } from '../Filters/FilterCatalog';
+import { GENERATED_FILTER_SOURCES } from '../Filters/generated';
+import { HallOfMirrors } from '../ScreenEffects/HallOfMirrors';
 import { FlashEffect } from './FlashEffect';
 import { BlitPass } from './BackdropBlend';
-import createTrackMesh from '../Geo/mesh_reserve';
+import createTrackMesh, { baseFrustumSizeForShape } from '../Geo/mesh_reserve';
 import { EasingFunctions } from './Easing';
 import { HTMLAudioMusic, getSharedAudioContext } from './HTMLAudioMusic';
 import tileTextureUrl from '@/assets/texture.json';
@@ -19,6 +23,7 @@ import { loadCompressedTexture } from './TextureCompress';
 import { getEasingFunction } from './WasmEasing';
 import { CameraController, CameraTimelineEntry } from './CameraController';
 import { DecorationManager, DecPlacementType, DecorationRuntimeContext } from './DecorationManager';
+import type { DecorationEditorInfo, DecorationEditorPatch } from './DecorationManager';
 import { MoveTrackManager } from './MoveTrackManager';
 import { PositionTrackManager } from './PositionTrackManager';
 import { InstancedMeshManager } from './InstancedMeshManager';
@@ -281,6 +286,12 @@ export class Player implements IPlayer {
   private mouseDownPos: { x: number; y: number } = { x: 0, y: 0 };
   private raycaster: Raycaster = new Raycaster();
   public selectedTileIndex: number | null = null;
+  /** 编辑器装饰模式：开启后点击画布优先选中图片/文字/物件装饰。 */
+  public decorationSelectionEnabled = false;
+  public selectedDecorationId: string | null = null;
+  public onDecorationSelected: ((id: string | null) => void) | null = null;
+  /** 装饰 gizmo/panel 正在拖拽：吃掉随后可能落在 Canvas 上的 mouseup/click。 */
+  private editorInteractionActive = false;
   private selectionTime: number = 0;
   private _targetCamPos: Vector3 | null = null;
   private initialPinchDistance: number = 0;
@@ -339,7 +350,7 @@ export class Player implements IPlayer {
   private tilePlanetEase: string[] = [];
   private tilePlanetEaseParts: Float32Array = new Float32Array(0);
   private tilePlanetEaseBehavior: string[] = [];
-  // Pause 事件的“角度校准”（隐性缓速）：回正偏移（弧度）与回正时长（秒）
+  // Pause 事件的“角度校准”（隐性缓速）：校准偏移（弧度）与缓入时长（秒）
   private tilePauseOffset: Float32Array = new Float32Array(0);
   private tilePauseTweenDuration: Float32Array = new Float32Array(0);
   private tileEvents: Map<number, any[]> = new Map();
@@ -415,6 +426,12 @@ export class Player implements IPlayer {
 
   // Bloom Effect
   private bloomEffect: BloomEffect | null = null;
+  /** SetFilter 后处理；实现全部在 src/lib/Filters，不混入 Player。 */
+  private filterManager: FilterManager | null = null;
+  /** HallOfMirrors 屏幕效果；实现全部在 src/lib/ScreenEffects。 */
+  private hallOfMirrors: HallOfMirrors | null = null;
+  private homEnabled = false;
+  private homEverUsed = false;
   private bloomEnabled: boolean = false;
   private bloomThreshold: number = 50;
   private bloomIntensity: number = 100;
@@ -464,6 +481,12 @@ export class Player implements IPlayer {
   private backdropRT: WebGLRenderTarget | null = null;
   private blitPass: BlitPass | null = null;
   private blitCamera: OrthographicCamera | null = null;
+  /** 背景层独立 pass：背景图/视频 + depth>=0 装饰先合成，再画主场景。 */
+  private backgroundBaseScene: Scene = new Scene();
+  private backgroundBaseGroup: Group = new Group();
+  private backgroundBaseRT: WebGLRenderTarget | null = null;
+  private backgroundFinalRT: WebGLRenderTarget | null = null;
+  private backgroundPassEnabled = false;
 
   // Renderer state
   private isRestoringContext: boolean = false;
@@ -572,8 +595,6 @@ export class Player implements IPlayer {
 
     // SetPlanetRotation：解析逐砖继承的星球旋转缓速（ease/easeParts/easePartBehavior）
     this.buildTilePlanetEase();
-    // Pause：解析逐砖的角度校准回正（隐性星球缓速）
-    this.buildPauseTweens();
 
     // Initialize HitsoundManager
     // Default type is used as fallback when no per-tile override exists
@@ -584,6 +605,8 @@ export class Player implements IPlayer {
 
     // Initialize Three.js components
     this.scene = new Scene();
+    this.backgroundBaseGroup.name = 'BackgroundBaseGroup';
+    this.backgroundBaseScene.add(this.backgroundBaseGroup);
     this.judgmentDisplay?.setScene(this.scene);
 
     // Initialize InstancedMeshManager
@@ -607,6 +630,11 @@ export class Player implements IPlayer {
     // Set background color from level settings
     const bgColor = this.levelData.settings?.backgroundColor || '000000';
     this.scene.background = new Color(this.formatHexColor(bgColor));
+
+    // ADOUAC ScreenTimeline.UsesHallOfMirrors：谱面里只要出现（启用的）HOM 事件，
+    // 从第一帧起就要持续 CaptureHistory，不能等到事件真正生效才开始存。
+    this.homEverUsed = Array.isArray(this.levelData.actions)
+      && this.levelData.actions.some((a: any) => a?.eventType === 'HallOfMirrors' && isEventActive(a));
     
     // Initialize video settings
     this.videoOffset = this.levelData.settings?.vidOffset || 0;
@@ -641,6 +669,10 @@ export class Player implements IPlayer {
 
     // Calculate cumulative rotations
     this.calculateCumulativeRotations();
+    // Pause 角度校准必须在 calculateCumulativeRotations 之后：
+    // buildPauseTweens 要读 tileStartAngle / tileTotalAngle / tileIsCW / tileBPM，
+    // 之前提前调用时这些数组还都是空的，算出的回正量全是 0（表现为球不校准/偏角）。
+    this.buildPauseTweens();
     // ScalePlanets（时间轴）：预计算事件列表（需要 tileStartTimes / tileBPM）
     this.buildScalePlanetEvents();
     // ScaleRadius：把累积偏移叠加到砖位（需要 entryangle = tileStartAngle）
@@ -875,6 +907,51 @@ export class Player implements IPlayer {
     // Flash 探针：__adojasFlash() → 两条 plane（FG/BG）的过渡状态与材质实际色/透明度。
     // 判定"屏幕全白"：看 bg.active/材料 opacity 是否停在起始的 100% 白。
     (window as any).__adojasFlash = () => this.flashEffect?.debugSnapshot?.() ?? null;
+    // 滤镜调试：__adojasFilter('Grayscale', 100, 0) / __adojasFilterState()
+    (window as any).__adojasFilter = (
+        filter: string = 'Grayscale',
+        intensity: number = 100,
+        duration: number = 0,
+        enabled: boolean = true,
+    ) => {
+        const now = this.elapsedTime / 1000;
+        this.filterManager?.handleEvent(
+            { eventType: 'SetFilter', filter, intensity, duration, enabled, ease: 'Linear' },
+            now,
+            0.1,
+        );
+        this.filterManager?.update(now);
+        return this.filterManager?.debugSnapshot?.() ?? null;
+    };
+    (window as any).__adojasFilterState = () => this.filterManager?.debugSnapshot?.() ?? null;
+    (window as any).__adojasFilterInfo = (name: string) => this.filterManager?.resolveFilterInfo?.(name) ?? null;
+    // 编译探针：验证 ADOUAC HLSL 自动生成的 GLSL 是否全部能被 WebGL2 接受。
+    (window as any).__adojasCompileGeneratedFilters = () => {
+      if (this.rendererType !== 'webgl' || !this.renderer) return { error: 'not webgl' };
+      const gl = (this.renderer as WebGLRenderer).getContext();
+      const errors: Array<{ name: string; log: string; line?: number; at?: string }> = [];
+      let ok = 0;
+      const names = Object.keys(GENERATED_FILTER_SOURCES);
+      for (const name of names) {
+        const sh = gl.createShader(gl.FRAGMENT_SHADER);
+        if (!sh) { errors.push({ name, log: 'createShader failed' }); continue; }
+        gl.shaderSource(sh, '#version 300 es\n' + GENERATED_FILTER_SOURCES[name]);
+        gl.compileShader(sh);
+        if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+          const log = gl.getShaderInfoLog(sh) ?? '';
+          const line = Number(log.match(/0:(\d+):/)?.[1] ?? 0);
+          const at = line > 0 ? (GENERATED_FILTER_SOURCES[name].split('\n')[line - 2] ?? '') : '';
+          errors.push({ name, log, line, at });
+        } else ok++;
+        gl.deleteShader(sh);
+      }
+      return { total: names.length, ok, errors: errors.slice(0, 30) };
+    };
+    // 全局滤镜 wet/dry 强度：__adojasFilterScale(0.3) / __adojasFilterScale()
+    (window as any).__adojasFilterScale = (scale?: number) => {
+        if (scale !== undefined) this.filterManager?.setEffectScale(scale);
+        return this.filterManager?.effectScale ?? null;
+    };
     // 打拍音探针：__adojasHitsound() → 分块模式/缓存/活跃音源/最近各块峰值。
     (window as any).__adojasHitsound = () => this.hitsoundManager?.debugSnapshot?.() ?? null;
     // MultiPlanet 探针：
@@ -1109,6 +1186,34 @@ export class Player implements IPlayer {
     };
     // 运行时状态快照（排查 canvas 卡死）：冻结时在控制台执行 __adojasState()。
     (window as any).__adojasState = () => this.debugState();
+    (window as any).__adojasTileTimeline = (index: number) => ({
+      keys: this.timelineManager?.debugKeyframes(`tile:${index}`) ?? '',
+      start: this.tileStartTimes[index] ?? null,
+      bpm: this.tileBPM[index] ?? null,
+    });
+    (window as any).__adojasTileSample = (index: number, property: string, time: number) =>
+      this.timelineManager?.sample(`tile:${index}`, property, time) ?? null;
+    // 调试跳转：__adojasSeekFloor(1925) 定位到某砖，主要用于核对装饰可见性/粒子起始。
+    (window as any).__adojasSeekFloor = (floor: number, visualOnly = true) => {
+      const i = Math.max(0, Math.min(this.tileCount - 1, Math.floor(Number(floor) || 0)));
+      const timeMs = this.getTileTimeMs(i);
+      this.seekTo(timeMs, visualOnly);
+      return { floor: i, timeMs, elapsedMs: this.elapsedTime };
+    };
+    (window as any).__adojasBG = () => ({
+      enabled: this.backgroundPassEnabled,
+      hasDecorations: this.decorationManager?.hasBackgroundDecorations() ?? false,
+      baseRT: this.backgroundBaseRT ? [this.backgroundBaseRT.width, this.backgroundBaseRT.height] : null,
+      finalRT: this.backgroundFinalRT ? [this.backgroundFinalRT.width, this.backgroundFinalRT.height] : null,
+    });
+    (window as any).__adojasHOM = (on?: boolean) => {
+      if (typeof on === 'boolean') this.homEnabled = on;
+      return {
+        enabled: this.homEnabled,
+        used: this.homEverUsed,
+        captured: this.hallOfMirrors?.hasHistory() ?? false,
+      };
+    };
     // 长帧归因：__adojasSpikes() → 最近的长帧记录，按耗时降序。
     // 自动记录（帧尾），不需要在卡顿当时操作 DevTools。
     (window as any).__adojasSpikes = () => {
@@ -1966,17 +2071,19 @@ export class Player implements IPlayer {
   }
 
   /**
-   * Pause 事件的“角度校准”（HandlePause 的暂停角度缓动）：
-   * 逐砖算出 pause 后需要回正的修饰角偏移 `-num7` 与回正时长（一个 crotchet），
-   * 播放时在砖块起始按 OutSine 把该偏移回零——这就是隐性的星球“缓速/校准”。
+   * Pause 事件的“角度校准”（官方 scrPlanet.HandlePause 的暂停角度缓动）：
+   * 逐砖算出暂停后 snappedLastAngle 应到达的校准偏移（wrap(snap-entry)）与
+   * 回正时长（一个 crotchet），播放时在砖块起始按 OutSine 从 0 缓入到该偏移
+   * ——这就是隐性的星球“缓速/校准”。
    *
    * HandlePause 的量在 ADOJAS 角坐标系下的对应：
    *   dir  = isCW ? 1 : -1
    *   base = totalAngle + dir*extraBeats*π         // 还原成 floor.angleLength（基础弧）
    *   de   = (|base|≈0 或 ≈2π) ? 0 : (π - |base|) * dir
    *   exit = entry + base                          // 出口方向（num4）
-   *   snap = exit - π*(extraBeats+1)*dir + de      // num5
-   *   num7 = angleCorrectionType * (mod(entry) - mod(snap)) * dir * sign(mod(snap) < mod(entry))
+   *   snap = exit + π*(extraBeats+1)*dir - de      // num5（坐标镜像后符号取反）
+   *   num7 = angleCorrectionType * (mod(entry)-mod(snap)) * dir * sign(...)
+   * 缓动方向用 -num7；None 时用 wrap(snap-entry) 作为常量终点。
    */
   private buildPauseTweens(): void {
     const n = this.levelData.tiles?.length ?? 0;
@@ -1986,15 +2093,16 @@ export class Player implements IPlayer {
     const actions = this.levelData.actions;
     if (!actions) return;
 
-    // 逐 floor 累计 extraBeats，并取该 floor 最后一个 Pause/FreeRoam 的 angleCorrectionDir
-    const extraBeats = new Array(n).fill(0);
-    const correction = new Array(n).fill(0);
+    // 原版 Pause 的默认 angleCorrectionType 是 Backward(-1)（scrFloor 初始值），
+    // 只有事件显式写了 angleCorrectionDir 才覆盖。旧实现默认 0，导致大多数
+    // 没有该字段的 Pause 完全不校准，球会在暂停后偏一个角度。
+    const correction = new Array(n).fill(-1);
     for (let i = 0; i < actions.length; i++) {
       const a = actions[i];
-      if (a?.eventType !== 'Pause' && a?.eventType !== 'FreeRoam') continue;
+      if (a?.eventType !== 'Pause' || !isEventActive(a)) continue;
       const f = Math.max(0, Math.floor(a.floor ?? 0));
-      if (f >= n) continue;
-      extraBeats[f] += (typeof a.duration === 'number' ? a.duration : 0);
+      // 原版只在有下一砖且不是 midspin 的 floor 上应用 Pause。
+      if (f >= n - 1 || tileDirection(this.levelData.tiles, f) === 999) continue;
       const dir = a.angleCorrectionDir;
       if (dir === 'Forward') correction[f] = 1;
       else if (dir === 'None') correction[f] = 0;
@@ -2006,9 +2114,11 @@ export class Player implements IPlayer {
     const mod2pi = (x: number) => ((x % TWO_PI) + TWO_PI) % TWO_PI;
 
     for (let i = 0; i < n - 1; i++) {
-      const eb = extraBeats[i];
+      // calculateCumulativeRotations 已按官方条件把 Pause 的 extraBeats 写进
+      // tileExtraRotations（单位是半拍/π）。
+      const eb = (this.tileExtraRotations[i] ?? 0) * 2;
       const act = correction[i];
-      if (eb <= 0 || act === 0) continue;
+      if (eb <= 0) continue;
       const totalAngle = this.tileTotalAngle[i] ?? 0;
       const B = this.tileIsCW[i] ? 1 : -1;
       const entry = this.tileStartAngle[i] ?? 0;
@@ -2018,13 +2128,18 @@ export class Player implements IPlayer {
       const aLen = Math.abs(baseAngle);
       const de = (aLen < 0.002 || Math.abs(aLen - TWO_PI) < 0.002) ? 0 : (Math.PI - aLen) * B;
       const targetExit = entry + baseAngle;              // 该砖出口方向（原版 num4）
-      const snap = targetExit - Math.PI * (eb + 1) * B + de;
+      // 官方 num5 在 ADOJAS 的镜像角坐标系里，π 项与 de 的符号都要翻过来；
+      // 之前沿用非镜像公式会多出整整 π（暂停后球直接偏半圈）。
+      const snap = targetExit + Math.PI * (eb + 1) * B - de;
       const m2 = mod2pi(entry);
       const m6 = mod2pi(snap);
       const num7 = act * (m2 - m6) * B * (m6 < m2 ? 1 : -1);
-      this.tilePauseOffset[i] = -num7;
+      // Backward/Forward 决定缓动的方向（-num7）；None 不缓动，但仍采用
+      // snappedLastAngle=snap 的终点，所以直接取 wrap(snap-entry)。
+      const delta = Math.atan2(Math.sin(snap - entry), Math.cos(snap - entry));
+      this.tilePauseOffset[i] = act === 0 ? delta : -num7;
       const bpm = this.tileBPM[i] || 100;
-      this.tilePauseTweenDuration[i] = 60 / (bpm * this.songPitch);
+      this.tilePauseTweenDuration[i] = act === 0 ? 0 : 60 / (bpm * this.songPitch);
     }
   }
 
@@ -2637,7 +2752,16 @@ export class Player implements IPlayer {
       for (let i = 0; i < count; i++) {
         resolved[i] = angleData[i] === 999 ? (resolved[i - 1] || 0) + 180 : angleData[i];
       }
+      // 官方 scrLevelMaker：最后一个砖块没有下一块，exitangle 必须继承
+      // 上一块的方向（entryangle + π），即 relativeAngle=180。
+      // 谱面文件里的最后一个 angleData 可能是 0/右，不能拿它决定出口朝向。
+      if (count > 1) resolved[count - 1] = resolved[count - 2];
       this.resolvedTileDirections = resolved;
+    }
+    // appendExtraTile 会在 angleData 末尾之外再加一块哨兵砖；
+    // 它没有 angleData，出口方向同样继承上一块。
+    if (index >= this.resolvedTileDirections.length) {
+      return index > 0 ? this.getResolvedTileDirection(index - 1) : 0;
     }
     return this.resolvedTileDirections[index] ?? 0;
   }
@@ -2958,8 +3082,12 @@ export class Player implements IPlayer {
        }
     }
 
-    // Direction (absolute angle in degrees)
-    const direction = tileDirection(tiles, n0 - 1);
+    // Direction (absolute angle in degrees)。
+    // 最后一砖的 exitAngle 继承上一砖的方向（官方 relativeAngle=180）；
+    // 不能用最后一个 angleData（可能恒为 0/右）。
+    const direction = n0 > 1
+        ? this.getResolvedTileDirection(n0 - 2)
+        : this.getResolvedTileDirection(n0 - 1);
     const rad = (direction * Math.PI) / 180;
     const newX = this.tilePositions.getX(n0 - 1) + Math.cos(rad) * length;
     const newY = this.tilePositions.getY(n0 - 1) + Math.sin(rad) * length;
@@ -3125,7 +3253,11 @@ export class Player implements IPlayer {
                         currentBPM = event.beatsPerMinute;
                     }
                 } else if (event.eventType === 'Pause') {
-                    extraRotation += (event.duration || 0) / 2.0;
+                    // 原版只在有下一砖且非 midspin 的 floor 上应用 Pause 的
+                    // extraBeats；midspin 的 Pause 不应延长/加转。
+                    if (tileDirection(tiles, i) !== 999) {
+                        extraRotation += (event.duration || 0) / 2.0;
+                    }
                 } else if (event.eventType === 'AutoPlayTiles') {
                     autoPlayTiles = event.enabled !== false;
                 } else if (event.eventType === 'MultiPlanet') {
@@ -3397,9 +3529,23 @@ export class Player implements IPlayer {
       this.decorationManager.backdropBlendEnabled = (this.rendererType === 'webgl');
     }
 
-    // Initialize Bloom Effect (WebGL only)
+    // Initialize Bloom / Filters (WebGL only)
     if (this.rendererType === 'webgl') {
       this.bloomEffect = new BloomEffect();
+      this.filterManager?.dispose();
+      this.filterManager = new FilterManager();
+      this.filterManager.onBloom = (enabled, intensity) => {
+        this.bloomEnabled = enabled;
+        this.bloomIntensity = intensity * 100;
+        this.bloomEffect?.setEnabled(enabled);
+        this.bloomEffect?.setIntensity(this.bloomIntensity / 100);
+      };
+      const fw = this.container?.clientWidth || window.innerWidth;
+      const fh = this.container?.clientHeight || window.innerHeight;
+      this.filterManager.setSize(fw, fh);
+      this.hallOfMirrors?.dispose();
+      this.hallOfMirrors = new HallOfMirrors();
+      this.hallOfMirrors.setSize(fw, fh);
       // 重建（含 WebGL 上下文恢复）时清掉旧实例，避免它的背景闪光平面留在主场景里
       if (this.flashEffect) {
         this.flashEffect.dispose();
@@ -3429,8 +3575,9 @@ export class Player implements IPlayer {
       canvas.addEventListener('webglcontextrestored', () => {
         console.log('WebGL context restored');
         this.isRestoringContext = false;
-        // Next render frame will trigger re-initialization via initRenderer
-        this.onWindowResize();
+        // 上下文恢复时可能正处在 renderer 重建/销毁的中间态；没有 renderer
+        //（或 HMR 已销毁旧 Player）时不要在旧 canvas 回调里 setSize。
+        if (this.renderer) this.onWindowResize();
       }, false);
     }
     
@@ -3730,7 +3877,20 @@ export class Player implements IPlayer {
 
   // --- Interaction Handlers ---
 
+  /** 编辑器浮层（装饰面板/gizmo）上的鼠标、滚轮、触摸不能驱动相机或选砖。 */
+  private isDecorationEditorUiEvent(event: Event): boolean {
+    const target = event.target as HTMLElement | null;
+    return !!target?.closest?.('[data-decoration-editor-ui]');
+  }
+
   private onMouseDown(event: MouseEvent): void {
+    if (this.isDecorationEditorUiEvent(event)) {
+      // 面板拖窗/滚动时不要留下一个“上一帧 mousedown 坐标”，
+      // 否则指针在 Canvas 上松开会被误判成点击。
+      this.isDragging = false;
+      this.mouseDownPos = { x: -1e9, y: -1e9 };
+      return;
+    }
     if (event.button === 0) { // Left click
       if (this.isManualPlayViewLocked) return; // 手动播放中：拖动不带动预览视角
       this.isDragging = true;
@@ -3740,6 +3900,7 @@ export class Player implements IPlayer {
   }
 
   private onMouseMove(event: MouseEvent): void {
+    if (this.isDecorationEditorUiEvent(event)) return;
     if (!this.isDragging) return;
     if (this.isManualPlayViewLocked) return; // 手动播放中：即使已在拖动也不移动视角
 
@@ -3763,6 +3924,14 @@ export class Player implements IPlayer {
   }
 
   private onMouseUp(event: MouseEvent): void {
+    if (this.editorInteractionActive) {
+      this.isDragging = false;
+      return;
+    }
+    if (this.isDecorationEditorUiEvent(event)) {
+      this.isDragging = false;
+      return;
+    }
     const dx = event.clientX - this.mouseDownPos.x;
     const dy = event.clientY - this.mouseDownPos.y;
     const wasClick = Math.sqrt(dx * dx + dy * dy) < 5;
@@ -3774,11 +3943,23 @@ export class Player implements IPlayer {
   }
 
   private handleTileClick(event: MouseEvent): void {
+    if (this.editorInteractionActive) return;
     if (this.isPlaying) return;
     if (!this.container) return;
     // Ignore clicks on UI overlays (buttons, etc.) — only handle canvas area
     if (event.target !== this.container && !(event.target as HTMLElement)?.closest?.('canvas')) return;
     const rect = this.container.getBoundingClientRect();
+
+    // 编辑器装饰选择优先于砖块选择；点击空白仍可继续选砖。
+    if (this.decorationSelectionEnabled) {
+      const decoId = this.pickDecorationAt(event.clientX, event.clientY);
+      if (decoId) {
+        this.selectDecoration(decoId);
+        return;
+      }
+      this.selectDecoration(null);
+    }
+
     const x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
     const y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
     this.raycaster.setFromCamera(new Vector2(x, y), this.camera);
@@ -3820,6 +4001,110 @@ export class Player implements IPlayer {
     }
     this.selectedTileIndex = null;
     this._targetCamPos = null;
+  }
+
+  // ── Editor decoration selection / transform ─────────────────────────────
+
+  public setDecorationSelectionEnabled(enabled: boolean): void {
+    this.decorationSelectionEnabled = enabled;
+    if (!enabled) this.selectDecoration(null);
+  }
+
+  public setEditorInteractionActive(active: boolean): void {
+    this.editorInteractionActive = active;
+    if (active) this.isDragging = false;
+  }
+
+  public selectDecoration(id: string | null): void {
+    if (this.selectedDecorationId === id) return;
+    this.selectedDecorationId = id;
+    if (id) {
+      this.deselectTile();
+      // 选中时刷新一次 Camera/parallax 位置，避免 gizmo 用初始化时的
+      // container 位置，和实际图片屏幕位置不一致。
+      this.updateDecorations();
+    }
+    this.onDecorationSelected?.(id);
+  }
+
+  public getDecorationEditorList(): DecorationEditorInfo[] {
+    return this.decorationManager?.getDecorationEditorInfo() ?? [];
+  }
+
+  public updateDecorationTransform(id: string, patch: DecorationEditorPatch): boolean {
+    const ok = this.decorationManager?.updateDecorationTransform(id, patch) ?? false;
+    if (ok) {
+      this._decorationEditorDirty = true;
+      // 暂停/编辑器空闲帧不会自动跑装饰更新；立即应用一次，保证
+      // Camera/parallax/instanced 路径与 gizmo 框同步（无需开始播放）。
+      this.updateDecorations();
+    }
+    return ok;
+  }
+
+  public resetDecorationTransform(id: string): boolean {
+    const ok = this.decorationManager?.resetDecorationTransform(id) ?? false;
+    if (ok) {
+      this._decorationEditorDirty = true;
+      this.updateDecorations();
+    }
+    return ok;
+  }
+
+  public getDecorationScreenBox(id: string): {
+    left: number; top: number; right: number; bottom: number;
+    centerX: number; centerY: number; width: number; height: number;
+  } | null {
+    if (!this.container || !this.camera || !this.decorationManager) return null;
+    const corners = this.decorationManager.getDecorationEditorCorners(id);
+    if (corners.length === 0) return null;
+    const rect = this.container.getBoundingClientRect();
+    this.camera.updateMatrixWorld();
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const [wx, wy] of corners) {
+      const v = new Vector3(wx, wy, 0).project(this.camera);
+      const sx = rect.left + (v.x + 1) * 0.5 * rect.width;
+      const sy = rect.top + (1 - v.y) * 0.5 * rect.height;
+      minX = Math.min(minX, sx); maxX = Math.max(maxX, sx);
+      minY = Math.min(minY, sy); maxY = Math.max(maxY, sy);
+    }
+    if (!isFinite(minX) || !isFinite(minY)) return null;
+    return {
+      left: minX, top: minY, right: maxX, bottom: maxY,
+      centerX: (minX + maxX) / 2, centerY: (minY + maxY) / 2,
+      width: maxX - minX, height: maxY - minY,
+    };
+  }
+
+  private pickDecorationAt(clientX: number, clientY: number): string | null {
+    const list = this.getDecorationEditorList();
+    let best: { id: string; area: number; z: number } | null = null;
+    for (const info of list) {
+      if (!info.visible || info.maskingType === 'Mask') continue;
+      const box = this.getDecorationScreenBox(info.id);
+      if (!box) continue;
+      if (clientX < box.left || clientX > box.right || clientY < box.top || clientY > box.bottom) continue;
+      const area = Math.max(1, box.width * box.height);
+      const z = info.worldPosition[2] ?? 0;
+      // 前景（z 大）优先；同一层取更小的包围框，避免大背景抢走点击。
+      if (!best || z > best.z + 1e-5 || (Math.abs(z - best.z) <= 1e-5 && area < best.area)) {
+        best = { id: info.id, area, z };
+      }
+    }
+    return best?.id ?? null;
+  }
+
+  /** Convert a screen-space drag (CSS pixels, y down) to a world-space delta. */
+  public screenDeltaToWorld(dx: number, dy: number): { x: number; y: number } {
+    if (!this.container || !this.camera) return { x: 0, y: 0 };
+    const h = Math.max(1, this.container.clientHeight);
+    const unitsPerPx = ((this.camera.top - this.camera.bottom) / (this.camera.zoom || 1)) / h;
+    const rot = this.camera.rotation.z;
+    const c = Math.cos(rot), s = Math.sin(rot);
+    return {
+      x: (dx * c + dy * s) * unitsPerPx,
+      y: (dx * s - dy * c) * unitsPerPx,
+    };
   }
 
   public resetCameraZoomRotation(): void {
@@ -3884,6 +4169,7 @@ export class Player implements IPlayer {
   }
 
   private onWheel(event: WheelEvent): void {
+    if (this.isDecorationEditorUiEvent(event)) return;
     event.preventDefault();
     
     const zoomSpeed = 0.1;
@@ -3901,6 +4187,7 @@ export class Player implements IPlayer {
 
   // Touch support (simplified)
   private onTouchStart(event: TouchEvent): void {
+    if (this.isDecorationEditorUiEvent(event)) return;
     if (event.touches.length === 1) {
       // 手动播放中：单指是打歌输入，不启动视角拖动（见 isManualPlayViewLocked）
       if (this.isManualPlayViewLocked) return;
@@ -3922,6 +4209,7 @@ export class Player implements IPlayer {
   }
 
   private onTouchMove(event: TouchEvent): void {
+    if (this.isDecorationEditorUiEvent(event)) return;
     event.preventDefault();
     if (this.isDragging && event.touches.length === 1) {
       if (this.isManualPlayViewLocked) return; // 手动播放中：拖动不带动预览视角
@@ -4408,6 +4696,7 @@ export class Player implements IPlayer {
     // Handle rewind side effects
     if (this.timelineManager.isRewound(t0)) {
       this.bloomEnabled = false;
+      this.filterManager?.reset();
       this.tileColorManager?.initTileColors();
       this.tiles?.forEach((_, id) => this.updateTileMeshColor(parseInt(id)));
     }
@@ -4421,6 +4710,9 @@ export class Player implements IPlayer {
       for (const ev of triggeredEvents) {
         switch (ev.eventType) {
           case 'Bloom': this.processBloomEvent(ev); break;
+          case 'HallOfMirrors': this.processHallOfMirrorsEvent(ev); break;
+          case 'SetFilter':
+          case 'SetFilterAdvanced': this.processFilterEvent(ev, t0); break;
           case 'Flash': this.processFlashEvent(ev); break;
           case 'ShakeScreen': this.processShakeScreenEvent(ev); break;
           case 'SetCustomBG':
@@ -4434,6 +4726,7 @@ export class Player implements IPlayer {
             break;
         }
       }
+      this.filterManager?.update(t0);
       this.perfAdd('events', performance.now() - tP);
     }
 
@@ -4562,6 +4855,8 @@ export class Player implements IPlayer {
   
   private updateDecorations(): void {
     if (!this.decorationManager) return;
+    // HMR/销毁过渡期可能 renderer 已置空，但面板还在发 transform 请求。
+    if (!this.renderer) return;
     // 装饰物仍在分帧创建 / 构建时间轴：跳过逐帧更新。否则每帧 O(装饰数) 的采样
     // 会与分帧加载抢主线程，导致加载时页面几乎卡死（页面在渲染但进度不动）。
     if (!this._decorationsBuilt) return;
@@ -4674,6 +4969,37 @@ export class Player implements IPlayer {
             this.applyTileColor(index, rendered.color, rendered.bgcolor, rendered.opacity);
         }
     }
+    this._decorationEditorDirty = false;
+  }
+
+  /**
+   * HOM 开启时：先把上一帧铺到当前颜色目标，再画当前场景。
+   * 关键点与 ADOUAC BackgroundPass 一致：历史帧不限制 alpha、场景不能再清颜色；
+   * 深度要清掉，否则历史全屏 quad 不写深度但上一帧的深度可能残留。
+   */
+  private renderSceneWithHallOfMirrors(target: WebGLRenderTarget | null, historyLinear: boolean): void {
+    const renderer = this.renderer as WebGLRenderer;
+    const hom = this.hallOfMirrors;
+    const drewHistory = !!hom && this.homEnabled && hom.hasHistory()
+      && hom.drawHistory(renderer, target, historyLinear);
+
+    renderer.setRenderTarget(target);
+    if (!drewHistory) {
+      renderer.render(this.scene, this.camera);
+      return;
+    }
+
+    renderer.clearDepth();
+    const oldBackground = this.scene.background;
+    const oldAutoClear = renderer.autoClear;
+    this.scene.background = null;
+    renderer.autoClear = false;
+    try {
+      renderer.render(this.scene, this.camera);
+    } finally {
+      this.scene.background = oldBackground;
+      renderer.autoClear = oldAutoClear;
+    }
   }
 
   public renderPlayer(delta: number): void {
@@ -4697,7 +5023,7 @@ export class Player implements IPlayer {
       // 静止早退：时间/相机/缩放/选中均未变（编辑器空闲、暂停不拖动）时跳过
       // 装饰的逐帧采样——相机相对/动画装饰在手机端是空闲帧的固定主线程开销。
       // 装饰重建（_decorationsBuilt 置位）与 seek/拖动/缩放/编辑都会改变签名。
-      const idleSig = `${this.elapsedTime.toFixed(3)}|${this.camera.position.x.toFixed(4)}|${this.camera.position.y.toFixed(4)}|${this.camera.rotation.z.toFixed(5)}|${this.camera.zoom.toFixed(4)}|${this.zoomMultiplier.toFixed(4)}|${this.adoZoom.toFixed(4)}|${this.selectedTileIndex ?? -1}`;
+      const idleSig = `${this.elapsedTime.toFixed(3)}|${this.camera.position.x.toFixed(4)}|${this.camera.position.y.toFixed(4)}|${this.camera.rotation.z.toFixed(5)}|${this.camera.zoom.toFixed(4)}|${this.zoomMultiplier.toFixed(4)}|${this.adoZoom.toFixed(4)}|${this.selectedTileIndex ?? -1}|${this._decorationEditorDirty ? 1 : 0}`;
       if (idleSig !== this._idleDecorSig) {
         this._idleDecorSig = idleSig;
         this.updateDecorations();
@@ -4790,12 +5116,43 @@ export class Player implements IPlayer {
         }
 
         // Overlay/SoftLight 装饰需要采样背景：主场景先渲染进 RT，之后再单独叠这些装饰。
+        // 背景层（depth>=0）先和背景图/视频合成；主场景不再包含这些装饰。
+        const backgroundPass = !isWebGPU && this.syncBackgroundPassState();
+        const backgroundTexture = backgroundPass ? this.renderBackgroundPass() : null;
+
         const backdropActive = !isWebGPU && !!this.decorationManager
           && this.decorationManager.hasActiveBackdropBlend();
         if (backdropActive) this.ensureBackdropTarget();
         const backdropReady = backdropActive && !!this.backdropRT && !!this.blitPass;
 
-        if (this.bloomEnabled && !isWebGPU && this.bloomEffect && this.bloomEffect.getEnabled()) {
+        const bloomActive = this.bloomEnabled && !isWebGPU
+          && !!this.bloomEffect && this.bloomEffect.getEnabled();
+        const filtersActive = !isWebGPU && !!this.filterManager && this.filterManager.hasActive();
+        const finalTarget = backdropReady ? this.backdropRT : null;
+
+        if (filtersActive) {
+          // 滤镜链自己管理 source/ping-pong RT；主场景先写进 source。
+          const fm = this.filterManager!;
+          const vw = this.container?.clientWidth || window.innerWidth;
+          const vh = this.container?.clientHeight || window.innerHeight;
+          fm.setSize(vw, vh);
+          const input = fm.getInputTarget();
+          if (backgroundTexture) this.renderMainOverBackground(input, backgroundTexture);
+          else this.renderSceneWithHallOfMirrors(input, true);
+
+          // Bloom is a fixed slot in ADOUAC ForegroundOrder (after EightiesTV),
+          // not an always-first/always-last effect.
+          fm.bloomChain = bloomActive ? {
+            order: BLOOM_FILTER_ORDER,
+            enabled: true,
+            render: (r, src, dst) => {
+              this.bloomEffect!.render(r, src, dst);
+              return dst?.texture ?? null;
+            },
+          } : null;
+          fm.render(this.renderer as WebGLRenderer, input.texture, finalTarget, true);
+          fm.bloomChain = null;
+        } else if (bloomActive) {
           if (!this.renderTarget) {
             this.renderTarget = new WebGLRenderTarget(
               this.container?.clientWidth || window.innerWidth,
@@ -4804,27 +5161,29 @@ export class Player implements IPlayer {
             );
           }
           
-          this.renderer.setRenderTarget(this.renderTarget);
-          this.renderer.render(this.scene, this.camera);
+          if (backgroundTexture) this.renderMainOverBackground(this.renderTarget!, backgroundTexture);
+          else this.renderSceneWithHallOfMirrors(this.renderTarget, true);
           // bloom 合成输出：backdrop 激活时必须写进 backdropRT（随后 blit 上屏 + 叠背景混合装饰）。
           // 注意目标要通过参数传给 bloom —— 它内部渲染时会自行 setRenderTarget，
           // 只在外面 setRenderTarget 会被覆盖，导致 backdropRT 全空、blit 出黑屏。
-          this.bloomEffect.render(
+          this.bloomEffect!.render(
             this.renderer as WebGLRenderer,
             this.renderTarget.texture,
-            backdropReady ? this.backdropRT : null,
+            finalTarget,
           );
         } else if (backdropReady) {
-          this.renderer.setRenderTarget(this.backdropRT);
-          this.renderer.render(this.scene, this.camera);
+          if (backgroundTexture) this.renderMainOverBackground(this.backdropRT, backgroundTexture);
+          else this.renderSceneWithHallOfMirrors(this.backdropRT, true);
           this.renderer.setRenderTarget(null);
         } else {
-          if (this.renderMethod === 'async' || isWebGPU) {
+          if (backgroundTexture) {
+            this.renderMainOverBackground(null, backgroundTexture);
+          } else if (this.renderMethod === 'async' || isWebGPU) {
             (this.renderer as any).renderAsync(this.scene, this.camera).catch((e: Error) => {
               console.warn('Render error:', e.message);
             });
           } else {
-            this.renderer.render(this.scene, this.camera);
+            this.renderSceneWithHallOfMirrors(null, false);
           }
         }
 
@@ -4846,6 +5205,13 @@ export class Player implements IPlayer {
         // Foreground 闪光叠在最上层（Background 已随主场景画在砖块下面）
         if (this.flashEffect && this.flashEffect.isFGActive()) {
           this.flashEffect.renderFG(this.renderer as WebGLRenderer, this.elapsedTime / 1000);
+        }
+
+        // 谱面只要出现过 HallOfMirrors，就持续保留最终画面（原版 CaptureHistory 与
+        // 当前 enabled 无关）。否则第一次打开 HOM 时没有可用的上一帧。
+        if (!isWebGPU && this.hallOfMirrors && this.homEverUsed) {
+          this.renderer.setRenderTarget(null);
+          this.hallOfMirrors.capture(this.renderer as WebGLRenderer);
         }
       } catch (e) {
         console.warn('Render error:', e);
@@ -5044,6 +5410,49 @@ export class Player implements IPlayer {
     if (synthesized && startAtMs <= 0) {
         this.hitsoundManager.start(hitsoundStartDelay);
     }
+
+    // 从中间开始播放时，HOM 状态由当前时间决定，不依赖事件重新触发。
+    this.applyHallOfMirrorsAt(this.elapsedTime / 1000 - this.getTimeOrigin());
+  }
+
+  private processHallOfMirrorsEvent(event: any): void {
+      const v = event?.enabled;
+      this.homEnabled = !(v === false || v === 0 || v === '0' || v === 'Disabled' || v === 'false');
+      if (this.homEnabled) this.homEverUsed = true;
+      // 一旦关卡里用过 HOM，就持续更新 history；关闭期间也更新，
+      // 这样重新开启时看到的是上一帧而不是很久以前的画面。
+      if (this.homEnabled || this.homEverUsed) this.homEverUsed = true;
+  }
+
+  /** 跳转/从中间开始播放时，按当前时间重算 HOM 开关（不能只等事件再次触发）。 */
+  private applyHallOfMirrorsAt(timeInLevel: number): void {
+      let on = false;
+      let latest = -Infinity;
+      const actions = this.levelData?.actions;
+      if (Array.isArray(actions)) {
+          for (const ev of actions) {
+              if (ev?.eventType !== 'HallOfMirrors' || !isEventActive(ev)) continue;
+              const floor = Math.max(0, Math.min(this.tileCount - 1, Number(ev.floor) || 0));
+              const bpm = this.tileBPM[floor] || this.levelData.settings?.bpm || 100;
+              const when = (this.tileStartTimes[floor] || 0)
+                  + ((Number(ev.angleOffset) || 0) / 180) * (60 / bpm);
+              if (when > timeInLevel + 1e-6 || when < latest) continue;
+              latest = when;
+              const v = ev.enabled;
+              on = !(v === false || v === 0 || v === '0' || v === 'Disabled' || v === 'false');
+          }
+      }
+      this.homEnabled = on;
+      if (on) this.homEverUsed = true;
+  }
+
+  private processFilterEvent(event: any, eventTimeSec: number): void {
+      if (!this.filterManager) return;
+      const floor = Number(event?.floor ?? 0);
+      const bpm = this.tileBPM[floor] || 100;
+      // 官方 duration 以当前砖的 crotchet 为单位；songPitch 与判定/装饰事件一致。
+      const secPerBeat = (60 / bpm) / Math.max(0.1, this.songPitch);
+      this.filterManager.handleEvent(event, eventTimeSec, secPerBeat);
   }
 
   private processBloomEvent(event: any): void {
@@ -5114,7 +5523,7 @@ export class Player implements IPlayer {
       if (!imagePath || imagePath === '') {
           // Remove custom background
           if (this.customBGMesh) {
-              this.scene.remove(this.customBGMesh);
+              this.customBGMesh.removeFromParent();
               if (this.customBGMesh.geometry) this.customBGMesh.geometry.dispose();
               if (this.customBGMesh.material instanceof Material) {
                   this.customBGMesh.material.dispose();
@@ -5140,7 +5549,7 @@ export class Player implements IPlayer {
           this.customBGTexture.dispose();
       }
       if (this.customBGMesh) {
-          this.scene.remove(this.customBGMesh);
+          this.customBGMesh.removeFromParent();
           if (this.customBGMesh.geometry) this.customBGMesh.geometry.dispose();
           if (this.customBGMesh.material instanceof Material) {
               this.customBGMesh.material.dispose();
@@ -5200,7 +5609,7 @@ export class Player implements IPlayer {
           
           this.customBGMesh = new Mesh(geometry, material);
           this.customBGMesh.renderOrder = -1000000; // 最先画（背景闪光要压在它上面）
-          this.scene.add(this.customBGMesh);
+          this.addBackgroundObject(this.customBGMesh);
           
           // Store parallax for update
           (this.customBGMesh as any).parallaxData = {
@@ -5270,6 +5679,143 @@ export class Player implements IPlayer {
    * 准备 Overlay/SoftLight 的 backdrop 渲染目标（尺寸 = drawing buffer，带 stencil，
    * 颜色空间与渲染器输出一致，这样贴回屏幕时不需要额外转换）。
    */
+  /** 背景图/视频进独立背景层还是主场景（WebGL 背景 pass 开启时）。 */
+  private addBackgroundObject(obj: Mesh): void {
+    if (this.backgroundPassEnabled) this.backgroundBaseGroup.add(obj);
+    else this.scene.add(obj);
+  }
+
+  private ensureBlitPass(): void {
+    if (!this.blitPass) {
+      this.blitPass = new BlitPass();
+      this.blitCamera = new OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    }
+  }
+
+  /**
+   * 背景装饰 depth>=0 独立 pass。只在确实存在深度 >=0 的 Image/Text/Particle
+   * 时开启；没这类装饰的谱面继续走原路径，不额外增加 RT。
+   */
+  private syncBackgroundPassState(): boolean {
+    const on = this.rendererType === 'webgl' && this._decorationsBuilt
+      && !!this.decorationManager && this.decorationManager.hasBackgroundDecorations();
+    if (on === this.backgroundPassEnabled) return on;
+    this.backgroundPassEnabled = on;
+    this.decorationManager?.setBackgroundPassEnabled(on);
+    for (const obj of [this.customBGMesh, this.videoMesh]) {
+      if (!obj) continue;
+      if (on) this.backgroundBaseGroup.add(obj);
+      else this.scene.add(obj);
+    }
+    return on;
+  }
+
+  private ensureBackgroundTargets(): void {
+    if (this.rendererType !== 'webgl' || !this.renderer) return;
+    const dpr = (this.renderer as WebGLRenderer).getPixelRatio?.() || window.devicePixelRatio || 1;
+    const w = Math.max(1, Math.floor((this.container?.clientWidth || window.innerWidth) * dpr));
+    const h = Math.max(1, Math.floor((this.container?.clientHeight || window.innerHeight) * dpr));
+    if (!this.backgroundBaseRT) {
+      this.backgroundBaseRT = new WebGLRenderTarget(w, h, {
+        depthBuffer: false,
+        stencilBuffer: false,
+        generateMipmaps: false,
+      });
+    } else if (this.backgroundBaseRT.width !== w || this.backgroundBaseRT.height !== h) {
+      this.backgroundBaseRT.setSize(w, h);
+    }
+    if (!this.backgroundFinalRT) {
+      this.backgroundFinalRT = new WebGLRenderTarget(w, h, {
+        depthBuffer: true,
+        stencilBuffer: true,
+        generateMipmaps: false,
+      });
+    } else if (this.backgroundFinalRT.width !== w || this.backgroundFinalRT.height !== h) {
+      this.backgroundFinalRT.setSize(w, h);
+    }
+    for (const rt of [this.backgroundBaseRT, this.backgroundFinalRT]) {
+      rt.texture.generateMipmaps = false;
+    }
+    this.ensureBlitPass();
+  }
+
+  /**
+   * 背景层 -> 背景色/背景图/视频 -> 上一帧 HOM -> depth>=0 装饰。
+   * 输出是线性颜色，后续主场景/filters 直接继续叠。
+   */
+  private renderBackgroundPass(): Texture | null {
+    const renderer = this.renderer as WebGLRenderer;
+    this.ensureBackgroundTargets();
+    const base = this.backgroundBaseRT;
+    const fin = this.backgroundFinalRT;
+    if (!base || !fin || !this.blitPass || !this.blitCamera) return null;
+
+    const hom = this.hallOfMirrors;
+    const drawHistory = !!(hom && this.homEnabled && hom.hasHistory());
+    const oldBg = this.backgroundBaseScene.background;
+    this.backgroundBaseScene.background = drawHistory ? null : this.scene.background;
+    renderer.setRenderTarget(base);
+    if (drawHistory) {
+      hom!.drawHistory(renderer, base, true);
+      renderer.setRenderTarget(base);
+      renderer.clearDepth();
+      const oldAuto = renderer.autoClear;
+      renderer.autoClear = false;
+      try {
+        renderer.render(this.backgroundBaseScene, this.camera);
+      } finally {
+        renderer.autoClear = oldAuto;
+      }
+    } else {
+      const oldAuto = renderer.autoClear;
+      renderer.autoClear = true;
+      try {
+        renderer.render(this.backgroundBaseScene, this.camera);
+      } finally {
+        renderer.autoClear = oldAuto;
+      }
+    }
+    this.backgroundBaseScene.background = oldBg;
+
+    renderer.setRenderTarget(fin);
+    this.blitPass.render(renderer, base.texture, this.blitCamera);
+    renderer.clear(false, true, true);
+    if (this.decorationManager) {
+      this.decorationManager.updateBackgroundUniforms(
+        base.texture, base.width, base.height);
+      const oldAuto = renderer.autoClear;
+      renderer.autoClear = false;
+      try {
+        renderer.render(this.decorationManager.getBackgroundScene(), this.camera);
+      } finally {
+        renderer.autoClear = oldAuto;
+      }
+    }
+    return fin.texture;
+  }
+
+  /** 把背景层贴到目标，再不清颜色地叠主场景。 */
+  private renderMainOverBackground(
+    target: WebGLRenderTarget | null,
+    background: Texture,
+  ): void {
+    const renderer = this.renderer as WebGLRenderer;
+    this.ensureBlitPass();
+    renderer.setRenderTarget(target);
+    this.blitPass!.render(renderer, background, this.blitCamera!);
+    renderer.clear(false, true, true);
+    const oldBg = this.scene.background;
+    const oldAuto = renderer.autoClear;
+    this.scene.background = null;
+    renderer.autoClear = false;
+    try {
+      renderer.render(this.scene, this.camera);
+    } finally {
+      this.scene.background = oldBg;
+      renderer.autoClear = oldAuto;
+    }
+  }
+
   private ensureBackdropTarget(): void {
     if (this.rendererType !== 'webgl' || !this.renderer) return;
     const dpr = (this.renderer as WebGLRenderer).getPixelRatio?.() || window.devicePixelRatio || 1;
@@ -5351,6 +5897,10 @@ export class Player implements IPlayer {
       this.shakeScreen.stop();
     }
     
+        // HOM 的 history 属于上一段播放画面，重新开始时必须丢弃。
+        this.homEnabled = false;
+        this.hallOfMirrors?.reset();
+
         // Reset decorations
         if (this.decorationManager) {
           this.decorationManager.reset();
@@ -5527,6 +6077,14 @@ export class Player implements IPlayer {
     }
     if (this.flashEffect) {
       this.flashEffect.stop();
+    }
+    // 跳转后 history 是旧时间点的画面，继续铺会形成错误残影。
+    this.hallOfMirrors?.reset();
+    this.applyHallOfMirrorsAt(timeInLevel);
+    // 装饰时间线是有状态的逐帧采样：往回/跨段 seek 后必须恢复 Add 初始值，
+    // 再采样当前时间。否则首个关键帧之前的 opacity/visible 会沿用旧段落状态。
+    if (this.decorationManager && this._decorationsBuilt) {
+      this.decorationManager.reset();
     }
 
     // In preview mode at time 0, show base state (not appear animation initial state)
@@ -5939,16 +6497,21 @@ export class Player implements IPlayer {
 
   public onWindowResize(): void {
     if (!this.container) return;
-    
+    // HMR / destroyPlayer / WebGL context restore 可能在新 renderer 挂上之前
+    // 触发 resize；此时 renderer 为 null，直接跳过（下一次 init 会再调用）。
+    if (!this.renderer || !this.camera) return;
+
     const width = this.container.clientWidth;
     const height = this.container.clientHeight;
+    if (width <= 0 || height <= 0) return;
     
     const aspect = width / height;
-    // 官方可视高度 = 2 × orthographicSize = 10（官方单位），但官方砖块间距是
-    // tileSize ≈ 1.71 而我们是 1.0 → 换到我们的单位要乘 1/1.71 ≈ 0.585：
-    //   10 × 0.585 ≈ 5.7  → 同一 zoom 下视野内的砖块数与官方一致（实测 5.85 块）。
-    // 与 DECO_SIZE_SCALE 是一组（K = H/10 = 0.57），改这里要同步改那个常数。
-    const baseFrustumSize = 5.47;
+    // ADOFAI 相机：orthographicSize = 5 → 可视高度 10（zoom = 100）。
+    // 官方砖距 Long=1.5 / Short=1.0，本地砖距固定 1.0：
+    //   localH = 10 × 本地砖距 / 官方砖距
+    // 这样同一 zoom 下视野内的砖块数、装饰相对轨道/屏幕的比例都与官方一致。
+    // DecorationManager 的屏幕锚定/剔除也使用同一个动态值。
+    const baseFrustumSize = baseFrustumSizeForShape(this.levelData?.settings?.tileShape);
     
     this.camera.left = -baseFrustumSize * aspect / 2;
     this.camera.right = baseFrustumSize * aspect / 2;
@@ -5973,6 +6536,8 @@ export class Player implements IPlayer {
         this.flashEffect.setSize(width, height);
       }
     }
+    this.filterManager?.setSize(width, height);
+    this.hallOfMirrors?.setSize(width, height);
     
     this.updateVideoSize();
     this.updateVisibleTiles();
@@ -6283,7 +6848,7 @@ export class Player implements IPlayer {
       if (pOff !== 0) {
         const pd = this.tilePauseTweenDuration[tileIndex];
         const k = pd > 0 ? Math.min(1, Math.max(0, (timeInLevel - st) / pd)) : 1;
-        pauseOffset = pOff * (1 - EasingFunctions.OutSine(k));
+        pauseOffset = pOff * EasingFunctions.OutSine(k);
       }
 
       const ca = startAngle + this.tileTotalAngle[tileIndex] * easedProgress + pauseOffset;
@@ -6540,6 +7105,8 @@ export class Player implements IPlayer {
   private lastVisibleCheckZoom = -1;
   /** 静止早退签名：装饰重建/seek 时置空，强制下一次 updateDecorations 执行。 */
   private _idleDecorSig = '';
+  /** 装饰编辑器改过 transform：即使相机/时间静止也强制刷新一次装饰。 */
+  private _decorationEditorDirty = false;
   // Sorted ids of the last assigned visible set (avoids re-layering when unchanged)
   private _lastSortedVisible: number[] = [];
   /** 每块砖当前的层级 z（updateVisibleTiles 写入），供 syncFloorDepth 装饰继承。 */
@@ -7205,14 +7772,14 @@ export class Player implements IPlayer {
         const easedProgress = (progress >= 0 && planetEase && planetEase !== 'Linear')
             ? this.easedAngleProgress(progress, planetEase, this.tilePlanetEaseParts[tileIndex], this.tilePlanetEaseBehavior[tileIndex])
             : progress;
-        // Pause 角度校准：砖块起始把修饰角偏移按 OutSine 回零（隐性星球缓速）
+        // Pause 角度校准：从砖块起始按 OutSine 缓入到校准偏移（隐性星球缓速）
         let pauseOffset = 0;
         const pOff = this.tilePauseOffset[tileIndex];
         if (pOff !== 0) {
             const pd = this.tilePauseTweenDuration[tileIndex];
             const elapsed = timeInLevel - startTime;
             const k = pd > 0 ? Math.min(1, Math.max(0, elapsed / pd)) : 1;
-            pauseOffset = pOff * (1 - EasingFunctions.OutSine(k));
+            pauseOffset = pOff * EasingFunctions.OutSine(k);
         }
         const currentAngle = startAngle + totalAngle * easedProgress + pauseOffset;
 
@@ -7302,7 +7869,10 @@ export class Player implements IPlayer {
       const adoZoom = this.cameraController.getCameraZoom();
       this.adoZoom = adoZoom;
       if (adoZoom > 0) {
-          this.zoom = 100 / adoZoom;
+          // ADOUAC CameraFollow applies the 4.9→5 hit pulse to BaseSize.
+          const timeInLevel = this.elapsedTime / 1000 - this.getTimeOrigin();
+          const pulse = this.cameraController.getPulseScale(timeInLevel, this.currentTileIndex);
+          this.zoom = (100 / adoZoom) / Math.max(1e-6, pulse);
           this.camera.zoom = this.zoom * this.zoomMultiplier;
           this.camera.updateProjectionMatrix();
       }
@@ -7389,7 +7959,7 @@ export class Player implements IPlayer {
         this.videoTexture = null;
     }
     if (this.videoMesh) {
-        this.scene.remove(this.videoMesh);
+        this.videoMesh.removeFromParent();
         if (this.videoMesh.geometry) this.videoMesh.geometry.dispose();
         if (this.videoMesh.material instanceof Material) {
             this.videoMesh.material.dispose();
@@ -7429,7 +7999,7 @@ export class Player implements IPlayer {
     this.videoMesh = new Mesh(geometry, material);
     this.videoMesh.position.set(0, 0, -500);
     this.videoMesh.renderOrder = -1000000; // 背景层：背景闪光要压在它上面
-    this.scene.add(this.videoMesh);
+    this.addBackgroundObject(this.videoMesh);
 
     video.onloadedmetadata = () => {
         this.updateVideoSize();
@@ -7647,6 +8217,9 @@ export class Player implements IPlayer {
     for (let i = 0; i < n; i++) {
       floats[i] = angleData[i] === 999 ? (floats[i - 1] || 0) + 180 : angleData[i];
     }
+    // 最后一砖没有下一块：exitAngle 继承上一砖，不能使用文件末尾的
+    // 占位 angleData（常见为 0，导致出口恒指向右）。
+    if (n > 1) floats[n - 1] = floats[n - 2];
 
     // Calculate positions
     for (let i = 0; i < n; i++) {
@@ -7685,7 +8258,7 @@ export class Player implements IPlayer {
         this.videoTexture = null;
     }
     if (this.videoMesh) {
-        this.scene.remove(this.videoMesh);
+        this.videoMesh.removeFromParent();
         if (this.videoMesh.geometry) this.videoMesh.geometry.dispose();
         if (this.videoMesh.material instanceof Material) {
             this.videoMesh.material.dispose();
@@ -7746,10 +8319,23 @@ export class Player implements IPlayer {
       this.backdropRT.dispose();
       this.backdropRT = null;
     }
+    if (this.backgroundBaseRT) {
+      this.backgroundBaseRT.dispose();
+      this.backgroundBaseRT = null;
+    }
+    if (this.backgroundFinalRT) {
+      this.backgroundFinalRT.dispose();
+      this.backgroundFinalRT = null;
+    }
+    this.backgroundBaseScene.clear();
     if (this.blitPass) {
       this.blitPass.dispose();
       this.blitPass = null;
       this.blitCamera = null;
+    }
+    if (this.filterManager) {
+      this.filterManager.dispose();
+      this.filterManager = null;
     }
     if (this.bloomEffect) {
       this.bloomEffect.dispose();

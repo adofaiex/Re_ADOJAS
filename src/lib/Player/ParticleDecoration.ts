@@ -189,6 +189,21 @@ export class ParticleDecorationSystem {
     return a.alpha + (b.alpha - a.alpha) * f
   }
 
+  /** AddParticle.autoPlay: false 时只能由 SetParticle(start) / 显式 play 启动。 */
+  public get autoPlay(): boolean {
+    return this.cfg.autoPlay
+  }
+
+  /** 调试用：是否真的开始发射，以及当前存活粒子数。 */
+  public get debugState(): { autoPlay: boolean; started: boolean; count: number; meshVisible: boolean } {
+    return {
+      autoPlay: this.cfg.autoPlay,
+      started: this.started,
+      count: this.particles.length,
+      meshVisible: !!this.mesh?.visible,
+    }
+  }
+
   public play(restart = false): void {
     if (restart) this.clearParticles()
     if (this.started && !restart) return

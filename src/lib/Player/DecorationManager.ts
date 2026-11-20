@@ -1,6 +1,6 @@
 import { Group, Mesh, Sprite, Vector2, Color, Texture, MeshBasicMaterial, SpriteMaterial, Material, CanvasTexture, CircleGeometry, BufferGeometry, BufferAttribute, SRGBColorSpace, DoubleSide, Scene, PlaneGeometry, Vector3, WebGLRenderTarget, Float32BufferAttribute, NormalBlending, AdditiveBlending, MultiplyBlending, CustomBlending, AddEquation, ReverseSubtractEquation, OneFactor, OneMinusSrcColorFactor, OneMinusSrcAlphaFactor, LinearFilter, LinearMipMapLinearFilter, NearestFilter, RepeatWrapping, ClampToEdgeWrapping, Blending, AlwaysStencilFunc, EqualStencilFunc, NotEqualStencilFunc, ReplaceStencilOp, KeepStencilOp } from 'three';
 import { TimelineManager, computeEntryBeats } from './TimelineManager';
-import createTrackMesh, { DECO_SIZE_SCALE, DECO_POSITION_SCALE } from '../Geo/mesh_reserve';
+import createTrackMesh, { BASE_FRUSTUM_SIZE, DECO_SIZE_SCALE, DECO_POSITION_SCALE, LOCAL_TILE_SPACING, baseFrustumSizeForShape, decoSizeScaleForShape, officialTileSizeForShape } from '../Geo/mesh_reserve';
 import { isEventActive, isEnabled } from './EventUtils';
 import { getIconTexture, getIconTextureForCustomFloor, createIconSprite, getPlanetTexture, planetPresetColor, configurePlanetTexture, applyPlanetFrame } from './IconLoader';
 import type { IconType } from './IconLoader';
@@ -11,6 +11,8 @@ import { ParticleDecorationSystem } from './ParticleDecoration';
 import type { ParticleConfig } from './ParticleDecoration';
 import { DecorationTextureStore } from './DecorationTextures';
 import { ObjectFloorBatchManager } from './ObjectFloorBatch';
+import { evaluateDecorationPose } from '../Decorations/DecorationPose';
+import { decorationFontFamily, ensureDefaultDecorationFont, isDefaultDecorationFontReady } from '../Decorations/DecorationFonts';
 
 /**
  * Object(Floor) 装饰是否走实例化批次（true）还是每个装饰各建 mesh（false）。
@@ -216,15 +218,11 @@ const NO_TAG_MASK = 'NO TAG';
 const IMAGE_PREFETCH_AHEAD = 8;
 
 /**
- * 官方 `ffxMoveDecorationsPlus.Decode` 把 `positionOffset` / `pivotOffset` /
- * `parallaxOffset` **一律**乘 `tileSize`（第 503/518/521/524 行），与 `relativeTo` 无关；
- * 而创建时 Camera / CameraAspect 的 `position`/`pivotOffset` 是**不乘** `tileSize` 的
- * （自定义屏幕单位：`UpdateScreenClamp` 里 /20 × 视口）。
- * 也就是官方这两处单位本来就不一致（cam 装饰上差 tileSize 倍）。之前我们为了
- * "让关键帧与创建用同一套系数"给 cam 用了 1，结果与官方差 ≈1.71 倍。
- * 关掉可回退到旧行为。
+ * Camera/CameraAspect 的屏幕单位与普通世界单位不同：
+ * 创建时 position/pivotOffset 不乘官方 tileSize，而 MoveDecorations 的偏移乘官方
+ * tileSize。普通装饰则统一使用本地缩放后的 tileSize。二者分别在 createDecoration
+ * 和 buildTimelineKeyframes 中用 officialTileSize / tileSize 处理。
  */
-const OFFICIAL_UNIFORM_TILE_SIZE_OFFSETS = true;
 
 /**
  * 遮罩配对按**官方反编译代码**（scrVisualDecoration / SpriteAlphaMaskUtils）：
@@ -315,6 +313,8 @@ export interface DecorationConfig {
     decorationType: DecorationType;
     decorationImage: string;
     decText?: string;
+    /** AddText 的 FontName（Default/Arial/ComicSansMS/...）。 */
+    font?: string;
     position: [number, number];
     positionOffset: [number, number];
     relativeTo: DecPlacementType;
@@ -324,6 +324,10 @@ export interface DecorationConfig {
     parallax: [number, number];
     parallaxOffset: [number, number];
     pivotOffset: [number, number];
+    /** v19：压缩过的图片记录原图像素尺寸，显示大小仍按原图算。 */
+    originalSize?: [number, number];
+    /** v19：裁掉透明边后图片中心的额外偏移（原版像素/100）。 */
+    cropPivotOffset?: [number, number];
     depth: number;
     color: string;
     opacity: number;
@@ -370,11 +374,53 @@ export interface DecorationConfig {
     imageSmoothing?: boolean;
 }
 
+/** Read-only data for the editor decoration inspector. */
+export interface DecorationEditorInfo {
+    id: string;
+    eventType: string;
+    objectType?: string;
+    tag: string;
+    image: string;
+    floor?: number;
+    relativeTo: string;
+    position: [number, number];
+    scale: [number, number];
+    rotation: number;
+    depth: number;
+    opacity: number;
+    pivotOffset: [number, number];
+    visible: boolean;
+    maskingType: string;
+    blendMode: string;
+    /** Local world size of the source texture at scale=100. */
+    baseWidth: number;
+    baseHeight: number;
+    /** Current anchor (container origin) in world coordinates. */
+    worldPosition: [number, number, number];
+    /** Raw-position unit: world units per one `position` unit. */
+    positionUnit: number;
+    defaultPosition: [number, number];
+    defaultScale: [number, number];
+    defaultRotation: number;
+    defaultDepth: number;
+    defaultPivotOffset: [number, number];
+}
+
+export interface DecorationEditorPatch {
+    position?: [number, number];
+    scale?: [number, number];
+    rotation?: number;
+    depth?: number;
+    opacity?: number;
+    pivotOffset?: [number, number];
+    visible?: boolean;
+}
+
 /**
  * Uniform spatial grid for static decorations.
  * Static decorations have a fixed world position (no parallax / lock / stickToFloor),
  * so they can be culled cheaply by skipping cells outside the camera view.
- * Cell size is chosen relative to typical camera view height (~8 / camZoom units)
+ * Cell size is chosen relative to typical camera view height (~BASE_FRUSTUM_SIZE / camZoom units)
  * to keep visible cell count low (single-digit typically).
  */
 class DecorationSpatialGrid {
@@ -504,6 +550,14 @@ class DecorationInstance {
     private _trailBuilt = false;
     private _trailBuiltN = 0;
     public sourceEvent: any = null;
+    /** 原始关卡事件（用于把编辑器里的修改写回导出数据）。 */
+    public originEvent: any = null;
+    // 编辑器 inspector 的默认值（载入时的值），Reset 用
+    public defaultPosition: [number, number] = [0, 0];
+    public defaultScale: [number, number] = [100, 100];
+    public defaultRotation = 0;
+    public defaultDepth = 0;
+    public defaultPivotOffset: [number, number] = [0, 0];
     private instRenderer: DecorationInstancedRenderer | null = null;
     private originalVisible: boolean = true;
     private originalDepth: number = 0;
@@ -551,9 +605,12 @@ class DecorationInstance {
 
     /** 颜色是否随时间变化（用到 pulse 相位的类型）。 */
     public get objColorAnimated(): boolean {
+        // trackColorPulse 对 Single/Stripes 等静止色型也有脉冲；只判断
+        // Glow/Blink/... 会漏掉这一整类（尤其 Object(Floor) 的实例化路径）。
         return this.objColorType === 'Glow' || this.objColorType === 'Blink'
             || this.objColorType === 'Switch' || this.objColorType === 'Rainbow'
-            || this.objColorType === 'Volume';
+            || this.objColorType === 'Volume'
+            || (this.objColorPulse !== undefined && this.objColorPulse !== 'None');
     }
     // 同深度平局的排名偏移（updateZRank 每帧按创建序分配）
     private _zRankOffset = 0;
@@ -598,6 +655,11 @@ class DecorationInstance {
 
     constructor(config: Partial<DecorationConfig>) {
         this.config = { ...defaultDecorationConfig, ...config };
+        this.defaultPosition = [...this.config.position] as [number, number];
+        this.defaultScale = [...this.config.scale] as [number, number];
+        this.defaultRotation = this.config.rotation;
+        this.defaultDepth = this.config.depth;
+        this.defaultPivotOffset = [...this.config.pivotOffset] as [number, number];
         this.container = new Group();
         this.container.name = `decoration_${this.config.tag || 'untagged'}`;
         this.visualGroup = new Group();
@@ -622,6 +684,12 @@ class DecorationInstance {
         this.originalVisible = this.config.visible;
         this.originalDepth = this.config.depth;
         this.refreshStaticWorld();
+    }
+
+    /** 编辑器直接改 opacity 百分比（0..100）。 */
+    public setOpacityPercent(value: number): void {
+        this._opacityProp = value / 100;
+        this.recomputeOpacity();
     }
 
     /** 由 opacity 属性值 × 颜色 alpha 合成最终不透明度（Object 走 trackOpacity，不调用）。 */
@@ -650,6 +718,20 @@ class DecorationInstance {
             && !c.stickToFloor;
     }
 
+    /** v19 cropPivotOffset：原版像素/100 → 本地世界单位。 */
+    private getCropPivotOffsetLocal(): [number, number] {
+        const crop = this.config.cropPivotOffset;
+        if (!crop || this.config.decorationType !== DecorationType.Image) return [0, 0];
+        const s = this._manager?.decorationSizeScale ?? DECO_SIZE_SCALE;
+        return [crop[0] / 100 * s, crop[1] / 100 * s];
+    }
+
+    /** 图片可见内容中心相对轴心的最终偏移。 */
+    public getEffectivePivotOffset(): [number, number] {
+        const crop = this.getCropPivotOffsetLocal();
+        return [this.config.pivotOffset[0] + crop[0], this.config.pivotOffset[1] + crop[1]];
+    }
+
     public setupVisual(texture: Texture | null): void {
         this.clearVisual();
         // 重建时必须清掉上次的 alpha 裁剪偏移（无贴图分支不会重新计算它）
@@ -657,7 +739,19 @@ class DecorationInstance {
         this.cropOffY = 0;
         if (this.config.decorationType === DecorationType.Object) return;
         const blend = getBlendMode(this.config.blendMode);
-        this.visualGroup.position.set(this.config.pivotOffset[0], this.config.pivotOffset[1], 0);
+        const pivot = this.getEffectivePivotOffset();
+        this.visualGroup.position.set(pivot[0], pivot[1], 0);
+        // 纹理可能仍在异步解码：image 为 null 时不能直接挂到材质/实例批次，
+        // 否则 THREE 上传时会报 “no image data found”，部分后端还会中断整帧。
+        const image: any = (texture as any)?.image;
+        const mapReady = !!image
+            && (image.complete === undefined || image.complete !== false)
+            && (image.width ?? 0) > 0;
+        const noImage = !this.config.decorationImage;
+        const transparentTex = (this._manager as any)?.textures?.transparent ?? null;
+        const safeMap = texture
+            ? (mapReady ? texture : (noImage ? this._manager?.getPlaceholderTexture() : transparentTex) ?? null)
+            : null;
         // Overlay / SoftLight 即使**没有贴图**也要走 backdrop pass（纯色滤镜，原版 uUseMap==0 分支）
         const bdNoTex = (this._manager?.backdropBlendEnabled
             && this.config.maskingType === MaskingType.None
@@ -670,9 +764,7 @@ class DecorationInstance {
             //     否则 1×1 白色占位会被 Overlay/SoftLight 铺成一整屏白，把轨道和背景全糊掉
             //     （Rainy Gate 未加载图片时的"屏幕全白、只剩判定"就是这个）。
             //   - 装饰本来就没有图（纯色滤镜，官方 uUseMap==0 分支）→ 用白色占位，颜色才出得来。
-            const noImage = !this.config.decorationImage;
-            const transparentTex = (this._manager as any)?.textures?.transparent ?? null;
-            const map = texture ?? (noImage ? this._manager?.getPlaceholderTexture() : transparentTex) ?? null;
+            const map = safeMap ?? (noImage ? this._manager?.getPlaceholderTexture() : transparentTex) ?? null;
             this.backdropMode = bdNoTex;
             const mat = createBackdropBlendMaterial(map as Texture, bdNoTex);
             (mat.uniforms.uColor.value as any).set(
@@ -717,8 +809,22 @@ class DecorationInstance {
             const hasOrig = Number.isFinite(oW) && Number.isFinite(oH) && oW > 0 && oH > 0;
             const texW = hasOrig ? oW : (texture.image?.width || 100);
             const texH = hasOrig ? oH : (texture.image?.height || 100);
-            this.baseSizeX = (texW / 100) * DECO_SIZE_SCALE;
-            this.baseSizeY = (texH / 100) * DECO_SIZE_SCALE;
+            // 尺寸换算分两类：
+            //   - Tile/Global/Planet 等轨道系：按本地砖距换算（Long 1/1.5、Short 1/1），
+            //     保证图片相对轨道的比例与官方一致；
+            //   - Camera/CameraAspect：按相机视口换算（本地的 5.47/10），保证屏幕锚定的
+            //     装饰占屏比不变（否则标题/UI 类贴图会突然放大 1.219 倍）。
+            const isCameraPlacement = this.config.relativeTo === DecPlacementType.Camera
+                || this.config.relativeTo === DecPlacementType.CameraAspect;
+            const decoScale = isCameraPlacement
+                ? (this._manager?.cameraSizeScale ?? BASE_FRUSTUM_SIZE / 10)
+                : (this._manager?.decorationSizeScale ?? DECO_SIZE_SCALE);
+            // v19：压缩图片的 originalSize 优先于纹理实际尺寸。
+            const orig = this.config.originalSize;
+            const logicalW = orig && orig[0] > 0 ? orig[0] : texW;
+            const logicalH = orig && orig[1] > 0 ? orig[1] : texH;
+            this.baseSizeX = (logicalW / 100) * decoScale;
+            this.baseSizeY = (logicalH / 100) * decoScale;
 
             // alpha 裁剪：UV 只采样内容区（texture.offset/repeat 或批次 uniform）→
             // 四边形按裁剪比例缩小 + 按内容中心偏移，可见内容的**世界尺寸/位置保持不变**。
@@ -739,14 +845,18 @@ class DecorationInstance {
             // 用普通 Mesh + 自定义 ShaderMaterial；world 变换仍由 three 常规管线处理。
             // backdrop pass 是在主场景之后整层叠上去的，所以只处理**轨道之前**（depth < 0）
             // 且无遮罩的装饰；背景层（depth ≥ 0）的仍走 Sprite 路径（退回 Normal 混合）。
-            const bdMode = (this._manager?.backdropBlendEnabled
-                && this.config.maskingType === MaskingType.None
-                && (this.config.depth ?? 0) < 0)
+            const depth = this.config.depth ?? 0;
+            const isBackgroundLayer = depth >= 0;
+            const canBackdrop = isBackgroundLayer
+                ? !!this._manager?.backgroundBlendEnabled
+                : !!this._manager?.backdropBlendEnabled;
+            const bdMode = (canBackdrop
+                && this.config.maskingType === MaskingType.None)
                 ? backdropBlendModeOf(this.config.blendMode)
                 : BackdropBlendMode.None;
             if (bdMode !== BackdropBlendMode.None) {
                 this.backdropMode = bdMode;
-                const mat = createBackdropBlendMaterial(texture, bdMode);
+                const mat = createBackdropBlendMaterial(safeMap as Texture, bdMode);
                 // Color 只有 RGB；颜色 alpha 已经并进 currentOpacity（= opacityProp × colorAlpha）
                 (mat.uniforms.uColor.value as any).set(
                     this.currentColor.r, this.currentColor.g, this.currentColor.b, 1);
@@ -757,10 +867,13 @@ class DecorationInstance {
                 this.backdropMat = mat;
                 this.mesh = mesh;
                 this.visualGroup.add(mesh);
-                this._manager?.attachToBackdrop(this);
+                if (isBackgroundLayer) this._manager?.attachToBackground(this);
+                else this._manager?.attachToBackdrop(this);
                 this._manager?.noteDecoExtent(
-                    this.baseSizeX * Math.abs(this.config.scale[0]) / 200,
-                    this.baseSizeY * Math.abs(this.config.scale[1]) / 200,
+                    this.baseSizeX * Math.abs(this.config.scale[0]) / 200
+                        + Math.abs(this.config.pivotOffset[0]) * Math.abs(this.config.scale[0]) / 100,
+                    this.baseSizeY * Math.abs(this.config.scale[1]) / 200
+                        + Math.abs(this.config.pivotOffset[1]) * Math.abs(this.config.scale[1]) / 100,
                 );
                 this.updateTransform();
                 return;
@@ -769,18 +882,21 @@ class DecorationInstance {
             // Instanced path for Image/Text (no masking). Mask decorations keep Sprite fallback.
             // Batch by texture+blend+renderOrder(-depth) so layering matches the sprite path.
             const canInstance = this.instRenderer
+                && mapReady
+                && !isBackgroundLayer
                 && this.config.maskingType === MaskingType.None
                 && isBatchableBlendMode(this.config.blendMode)
                 && (this.config.decorationType === DecorationType.Image
                     || this.config.decorationType === DecorationType.Text);
             if (canInstance) {
                 const [, ro] = this.depthZ();
+                const pivot = this.getEffectivePivotOffset();
                 this.instSlot = this.instRenderer!.alloc(
                     texture, blend as Blending, ro,
                     this.baseSizeX, this.baseSizeY,
-                    // alpha 裁剪的内容中心偏移直接加到 pivot（write() 里 pivot 与 baseW 同单位）
-                    this.config.pivotOffset[0] + this.cropOffX,
-                    this.config.pivotOffset[1] + this.cropOffY,
+                    // alpha 裁剪/cropPivotOffset 的内容中心偏移直接加到 pivot
+                    pivot[0] + this.cropOffX,
+                    pivot[1] + this.cropOffY,
                     // tile（平铺次数）→ 批次 uUvRepeat。官方把 `_Tile` 交给材质；
                     // 不传就会把一张图拉满整个四边形（mountain 这类 tile=[10,1] 的会横向拉伸 10 倍）。
                     this.config.tile?.[0] ?? 1,
@@ -790,12 +906,8 @@ class DecorationInstance {
                 // 用 **Mesh（world 空间四边形）**，不用 Sprite：Sprite 永远面向相机、
                 // 且**忽略父级/世界旋转** —— 装饰自身的 rotation、lockRotation、
                 // 以及相机旋转都会失效（与 WebADOFAI/原版观感不同）。
-                // 贴图还没解码完（image 为 null）时不能直接当 map 交出去：
-                // three 上传贴图会读 image.complete，拿 null 会抛错并中断整帧渲染
-                // （表现为画面卡死）。此时退回占位贴图，等真图就绪后由
-                // loadDecoTexture 的完成回调重新挂上。
-                const mapReady = !!(texture as any)?.image;
-                const safeMap = mapReady ? texture : (this._manager?.getPlaceholderTexture() ?? null);
+                // 贴图还没解码完时使用透明/占位 map；真图就绪后由 loadDecoTexture
+                // 的完成回调重新 setupVisual。
                 const mat = new MeshBasicMaterial({
                     map: safeMap, color: 0xffffff, transparent: true, opacity: this.currentOpacity,
                     blending: blend as Blending, depthWrite: false, side: DoubleSide,
@@ -809,13 +921,21 @@ class DecorationInstance {
                 //   - 没命中 → 不做任何测试：Inside 由 maskVisibilityOk() 整块隐藏，
                 //     Outside 保持原样全显（相当于原图直通）。
                 const stencilRef = this.maskStencilRef();
-                if (stencilRef > 0 && this.config.maskingType === MaskingType.Mask) {
+                if (this.config.maskingType === MaskingType.Mask) {
+                    // 官方 SetVisible：spriteRenderer.enabled = !isMask() && visible，
+                    // Mask 自身永远不可见，只通过 SpriteMask 写 stencil。之前 ref=0 的
+                    // mask 会落到普通绘制路径，把 mask 图本身显示出来（"不该显示的
+                    // 装饰出现了"）。这里无条件关闭颜色/深度写入，只有命中目标时才写 stencil。
                     mat.colorWrite = false;
                     mat.depthWrite = false;
-                    mat.stencilWrite = true;
-                    mat.stencilRef = stencilRef;
-                    mat.stencilFunc = AlwaysStencilFunc;
-                    mat.stencilZPass = ReplaceStencilOp;
+                    if (stencilRef > 0) {
+                        mat.stencilWrite = true;
+                        mat.stencilRef = stencilRef;
+                        mat.stencilFunc = AlwaysStencilFunc;
+                        mat.stencilZPass = ReplaceStencilOp;
+                    } else {
+                        mat.stencilWrite = false;
+                    }
                 } else if (stencilRef > 0 && this.config.maskingType === MaskingType.VisibleInsideMask) {
                     mat.stencilWrite = true;
                     mat.stencilRef = stencilRef;
@@ -826,9 +946,6 @@ class DecorationInstance {
                     mat.stencilRef = stencilRef;
                     mat.stencilFunc = NotEqualStencilFunc;
                     mat.stencilZPass = KeepStencilOp;
-                } else if (this.config.maskingType === MaskingType.Mask) {
-                    // 官方：NO TAG 的 mask 不遮任何东西；但它自身仍然正常绘制（maskInteraction 0）
-                    mat.stencilWrite = false;
                 }
                 const mesh = new Mesh(new PlaneGeometry(1, 1), mat);
                 mesh.scale.set(this.baseSizeX, this.baseSizeY, 1);
@@ -837,15 +954,18 @@ class DecorationInstance {
                 this.visualGroup.add(mesh);
             }
         }
-        // 贴图到位后真实尺寸已知 → 让静态网格查询外扩覆盖该装饰的画布范围
+        // 贴图到位后真实尺寸已知 → 让静态网格查询外扩覆盖该装饰的画布范围。
+        // pivotOffset 会把可见内容整体推离 container 锚点，剔除时也必须算进去。
         this._manager?.noteDecoExtent(
-            this.baseSizeX * Math.abs(this.config.scale[0]) / 200,
-            this.baseSizeY * Math.abs(this.config.scale[1]) / 200,
+            this.baseSizeX * Math.abs(this.config.scale[0]) / 200
+                + Math.abs(this.config.pivotOffset[0]) * Math.abs(this.config.scale[0]) / 100,
+            this.baseSizeY * Math.abs(this.config.scale[1]) / 200
+                + Math.abs(this.config.pivotOffset[1]) * Math.abs(this.config.scale[1]) / 100,
         );
         this.updateTransform();
     }
 
-    private clearVisual(): void {
+    public clearVisual(): void {
         if (this.backdropMat) this._manager?.detachFromBackdrop(this);
         this.backdropMat = null;
         this.backdropMode = BackdropBlendMode.None;
@@ -1004,6 +1124,45 @@ class DecorationInstance {
         );
     }
 
+    /** 编辑器修改 pivotOffset：同步视觉组和实例化 slot。 */
+    public updatePivotOffset(px: number, py: number): void {
+        const crop = this.getCropPivotOffsetLocal();
+        const x = px + crop[0];
+        const y = py + crop[1];
+        this.visualGroup.position.set(x, y, 0);
+        if (this.instSlot && this.instRenderer) {
+            this.instRenderer.updatePivot(this.instSlot, x, y);
+        }
+    }
+
+    /** 编辑器拾取/包围框用：装饰可视四角的世界坐标（含 pivot/scale/rotation）。 */
+    public getEditorWorldCorners(): Array<[number, number]> {
+        const hw = Math.max(0, this.baseSizeX) / 2;
+        const hh = Math.max(0, this.baseSizeY) / 2;
+        const [px, py] = this.getEffectivePivotOffset();
+        if (hw <= 0 || hh <= 0) return [];
+        this.container.updateMatrixWorld(true);
+        const pts: Array<[number, number]> = [
+            [px - hw, py - hh], [px + hw, py - hh],
+            [px + hw, py + hh], [px - hw, py + hh],
+        ];
+        return pts.map(([x, y]) => {
+            const v = new Vector3(x, y, 0);
+            this.container.localToWorld(v);
+            return [v.x, v.y];
+        });
+    }
+
+    /** 编辑器修改 currentScale 后立即写回容器（不依赖下一帧 updatePosition）。 */
+    public applyEditorScale(): void {
+        this.container.scale.set(
+            this.currentScale.x * this._scaleMul,
+            this.currentScale.y * this._scaleMulY,
+            1,
+        );
+        if (this.instSlot) this.syncInstance();
+    }
+
     public updateTransform(): void {
         this.container.rotation.z = this.currentRotation * Math.PI / 180;
         const [z, roBase] = this.depthZ();
@@ -1103,92 +1262,66 @@ class DecorationInstance {
         // parentFloor.transform.localScale : 1)，逐轴相乘（非等比缩放的砖不能压成标量）。
         this._scaleMul = camScaleMul * floorScaleX;
         this._scaleMulY = camScaleMul * floorScaleY;
-        // Parallax offset multiplier = decoration.camScaleMultiplier
-        const parallaxOffsetMul = camScaleMul;
         const ct = this.config.relativeTo;
-        let posX = 0, posY = 0;
-        if (ct === DecPlacementType.Camera || ct === DecPlacementType.CameraAspect) {
-            // 相机定位：像素坐标 → 世界坐标（UpdateScreenClamp + SetTrans 的屏幕锚定分支）
-            // pixelX / 20 * viewWidth, then rotate by camera angle
-            const viewH = 8 / camZoom;
-            const aspect = runtime && runtime.viewportHeight > 0
-                ? runtime.viewportWidth / runtime.viewportHeight
-                : 16 / 9;
-            const viewW = viewH * aspect;
-            // UpdateScreenClamp + SetTrans(clampToScreen):
-            //   screenRelativePos.x = pivotX/20 (+aspect pre-division for CameraAspect),
-            //   worldOffsetX = screenRelX × pixelWidth × worldPerPixel.
-            // Camera → X extent is the FULL view width; CameraAspect's pre-divided X makes
-            // its effective X extent equal the view HEIGHT.
-            const xExtent = ct === DecPlacementType.Camera ? viewW : viewH;
-            // UpdateScreenClamp: screenRelativePos = (pivotPosVec + pivotOffsetVec)/20 + 0.5
-            // —— 屏幕锚点用的是 pivotPos 与 pivotOffset 的【和】（复刻原来漏了 pivotOffset）。
-            const screenX = this.currentPosition.x + this.config.pivotOffset[0];
-            const screenY = this.currentPosition.y + this.config.pivotOffset[1];
-            const worldOffsetX = screenX / 20 * xExtent;
-            const worldOffsetY = screenY / 20 * viewH;
-            const cosR = Math.cos(camRot);
-            const sinR = Math.sin(camRot);
-            const rotatedX = worldOffsetX * cosR - worldOffsetY * sinR;
-            const rotatedY = worldOffsetX * sinR + worldOffsetY * cosR;
-            posX = camPos.x + rotatedX + this.currentParallaxOffset.x * parallaxOffsetMul;
-            posY = camPos.y + rotatedY + this.currentParallaxOffset.y * parallaxOffsetMul;
-            // 旋转优先级与 SetRotation 相同：stickToFloor > lockRotation > 无
-            if (this.config.stickToFloor && tilePositions?.has(this.config.floor ?? -1)) {
-                const tp = tilePositions!.get(this.config.floor ?? -1)!;
-                this.container.rotation.z = tp.rotation + this.currentRotation * Math.PI / 180;
-            } else if (this.config.lockRotation) {
-                this.container.rotation.z = camRot + this.currentRotation * Math.PI / 180;
-            } else {
-                this.container.rotation.z = this.currentRotation * Math.PI / 180;
+        const followCt = this._followOverride ?? ct;
+        let followOffsetX = 0, followOffsetY = 0;
+        if (followCt === DecPlacementType.Player) {
+            // 原版 relativeTo: Player → 跟随玩家控制的球（position 是相对球的偏移）
+            const pp = runtime?.playerPosition;
+            if (pp && !runtime?.paused) {
+                followOffsetX = pp.x;
+                followOffsetY = pp.y;
             }
-        } else {
-            let followOffsetX = 0, followOffsetY = 0;
-            const followCt = this._followOverride ?? ct;
-            if (followCt === DecPlacementType.Player) {
-                // 原版 relativeTo: Player → 跟随玩家控制的球（position 是相对球的偏移）
-                const pp = runtime?.playerPosition;
-                if (pp && !runtime?.paused) {
-                    followOffsetX = pp.x;
-                    followOffsetY = pp.y;
-                }
-            } else if (followCt === DecPlacementType.RedPlanet || followCt === DecPlacementType.BluePlanet || followCt === DecPlacementType.GreenPlanet) {
-                const planet = runtime?.planetPositions?.[followCt];
-                // paused 时 planet follow 归零。
-                if (planet && !runtime?.paused) {
-                    followOffsetX = planet.x;
-                    followOffsetY = planet.y;
-                }
-            }
-            let stickOffsetX = 0, stickOffsetY = 0;
-            if (this.config.stickToFloor && tilePositions?.has(this.config.floor ?? -1)) {
-                const tp = tilePositions!.get(this.config.floor ?? -1)!;
-                stickOffsetX = tp.x - this.startPos.x;
-                stickOffsetY = tp.y - this.startPos.y;
-            }
-            // UpdatePosition + SetTrans:
-            //   decoBase = pivotPos + planetFollow + stickToFloor offset;
-            //   final = decoBase + (camPos − decoBase) × parallax + parallaxOffset × csm
-            // Both interpolation anchors are decoBase itself (posCamAtStart == startPosition).
-            const baseX = this.currentPosition.x + followOffsetX + stickOffsetX;
-            const baseY = this.currentPosition.y + followOffsetY + stickOffsetY;
-            const px = (camPos.x - baseX) * this.currentParallax.x;
-            const py = (camPos.y - baseY) * this.currentParallax.y;
-            posX = baseX + px + this.currentParallaxOffset.x * parallaxOffsetMul;
-            posY = baseY + py + this.currentParallaxOffset.y * parallaxOffsetMul;
-            // Rotation priority: stickToFloor (floor rot) > lockRotation (camera rot) > none
-            if (this.config.stickToFloor && tilePositions?.has(this.config.floor ?? -1)) {
-                const tp = tilePositions!.get(this.config.floor ?? -1)!;
-                this.container.rotation.z = tp.rotation + this.currentRotation * Math.PI / 180;
-            } else if (this.config.lockRotation) {
-                this.container.rotation.z = camRot + this.currentRotation * Math.PI / 180;
-            } else {
-                this.container.rotation.z = this.currentRotation * Math.PI / 180;
+        } else if (followCt === DecPlacementType.RedPlanet || followCt === DecPlacementType.BluePlanet || followCt === DecPlacementType.GreenPlanet) {
+            const planet = runtime?.planetPositions?.[followCt];
+            // paused 时 planet follow 归零。
+            if (planet && !runtime?.paused) {
+                followOffsetX = planet.x;
+                followOffsetY = planet.y;
             }
         }
-        this.container.position.x = posX;
-        this.container.position.y = posY;
-        this.container.scale.set(this.currentScale.x * this._scaleMul, this.currentScale.y * this._scaleMulY, 1);
+
+        const viewH = (this._manager?.baseFrustumSize ?? BASE_FRUSTUM_SIZE) / camZoom;
+        const aspect = runtime && runtime.viewportHeight > 0
+            ? runtime.viewportWidth / runtime.viewportHeight
+            : 16 / 9;
+        const tp = this.config.stickToFloor && tilePositions?.has(this.config.floor ?? -1)
+            ? tilePositions!.get(this.config.floor ?? -1)!
+            : null;
+        // 纯数据摆放公式（对应 ADOUAC DecorationPose）。Three 的 visualGroup
+        // 继续负责 pivotOffset，所以这里拿到的是 container 的位置/旋转/缩放。
+        const pose = evaluateDecorationPose({
+            placement: ct,
+            position: { x: this.currentPosition.x, y: this.currentPosition.y },
+            pivotOffset: { x: this.config.pivotOffset[0], y: this.config.pivotOffset[1] },
+            rotation: this.currentRotation,
+            scale: { x: this.currentScale.x, y: this.currentScale.y },
+            parallax: { x: this.currentParallax.x, y: this.currentParallax.y },
+            parallaxOffset: { x: this.currentParallaxOffset.x, y: this.currentParallaxOffset.y },
+            scaleFactor: camScaleMul,
+            lockRotation: this.config.lockRotation,
+            lockScale: this.config.lockScale,
+            stickToFloor: this.config.stickToFloor,
+            floor: tp ? {
+                x: tp.x, y: tp.y, scaleX: tp.sx, scaleY: tp.sy, rotation: tp.rotation,
+            } : null,
+            startPos: { x: this.startPos.x, y: this.startPos.y },
+            follow: { x: followOffsetX, y: followOffsetY },
+            camera: {
+                x: camPos.x, y: camPos.y, rotation: camRot,
+                viewWidth: viewH * aspect, viewHeight: viewH, aspect,
+            },
+        });
+        this._scaleMul = pose.factorX;
+        this._scaleMulY = pose.factorY;
+        this.container.position.x = pose.x;
+        this.container.position.y = pose.y;
+        this.container.rotation.z = pose.rotation;
+        this.container.scale.set(
+            pose.scaleX * pose.factorX,
+            pose.scaleY * pose.factorY,
+            1,
+        );
         if (this.instSlot) this.syncInstance();
     }
 
@@ -1341,11 +1474,15 @@ class DecorationInstance {
         }
         const op = sampleAny('opacity');
         if (op !== undefined) {
+            const wasMaskActive = this.config.maskingType === MaskingType.Mask ? this.isMaskActive() : false;
             this._opacityProp = op;
             // Object 的最终 alpha 走 trackOpacity/planetColor（GetAlpha），
             // Image/Text/Particle 才用 color.a × opacity 合成。
             if (this.config.decorationType === DecorationType.Object) this.currentOpacity = op;
             else this.recomputeOpacity();
+            if (this.config.maskingType === MaskingType.Mask && wasMaskActive !== this.isMaskActive()) {
+                this._manager.notifyMaskStateChanged();
+            }
             dirty = true;
         }
         const parX = sampleAny('parallaxX');
@@ -1402,6 +1539,8 @@ class DecorationInstance {
         const dpt = sampleAnyDiscrete('depth');
         if (typeof dpt === 'number' && dpt !== this.config.depth) {
             this.config.depth = dpt;
+            if (this.config.maskingType !== MaskingType.None) this._manager.notifyMaskStateChanged();
+            this._manager.syncDecorationParent(this);
             dirty = true;
         }
         // SetPlacementType (MoveDecorations: movementTypeUsed &&
@@ -1450,13 +1589,16 @@ class DecorationInstance {
         }
         const vis = sampleAnyDiscrete('visible');
         if (typeof vis === 'boolean' && vis !== this.config.visible) {
+            const wasMaskActive = this.isMaskActive();
             this.config.visible = vis;
             // 重新合成可见性（culling && user-visible）
             this.setCulledVisible(this._culledVisible);
+            if (this.config.maskingType === MaskingType.Mask && wasMaskActive !== this.isMaskActive()) {
+                this._manager.notifyMaskStateChanged();
+            }
             if (this.particles) {
+                // 可见性切换不负责启动粒子；autoPlay:false 的粒子不能被这里误启动。
                 this.particles.setVisible(vis);
-                if (vis) { this.particles.play(); }
-                else { this.particles.stop(); }
             }
         }
         // 遮罩：MoveDecorations 可改 maskingType / useMaskingDepth /
@@ -1472,6 +1614,7 @@ class DecorationInstance {
         if (typeof mBd === 'number' && mBd !== this.config.maskingBackDepth) { this.config.maskingBackDepth = mBd; maskDirty = true; }
         if (maskDirty && this._manager) {
             this._manager.markMaskRegistryDirty();
+            this._manager.markMaskTargetsDirty();
             this._manager.applyMaskTo(this);
         }
 
@@ -1503,11 +1646,6 @@ class DecorationInstance {
             this.config.trackColor2 = '#' + this.objColor2.getHexString();
             if (this._manager) this._manager.applyObjectFloorColors(this);
             dirty = true;
-        }
-        // Object(Floor) 的动画颜色类型（Glow/Blink/Switch/Rainbow/Volume）随时间变化，
-        // 需要每帧用 TileColorManager 的相位模型重算顶点色（地板的脉冲）。
-        if (this.config.decorationType === DecorationType.Object && this.objColorAnimated && this.objTileMesh) {
-            this._manager?.applyObjectFloorColors(this);
         }
 
         // SetObject：统一收集所有变化的属性，一次性重建 Object 视觉。
@@ -1607,8 +1745,14 @@ export class DecorationManager {
     private backdropScene: Scene = new Scene();
     private backdropGroup: Group = new Group();
     private backdropDecos: DecorationInstance[] = [];
+    /** 背景层（depth >= 0）独立场景：先和背景图/背景色合成，再画轨道。 */
+    private backgroundScene: Scene = new Scene();
+    private backgroundGroup: Group = new Group();
+    private _backgroundPassEnabled = false;
     /** 是否启用 backdrop pass（Player 按渲染后端设置：仅 WebGL 支持）。 */
     public backdropBlendEnabled = false;
+    /** 背景层是否走 independent pass（depth >= 0 的装饰） */
+    public backgroundBlendEnabled = false;
     /** 有逐帧时间轴的装饰（refreshAnimatedDecos 预算；每帧只遍历这一小撮）。 */
     private _animatedDecos: DecorationInstance[] = [];
 
@@ -1634,7 +1778,19 @@ export class DecorationManager {
     // 装饰事件源（AddDecoration/AddText/AddObject/AddParticle）与分帧创建游标
     private _decoSources: any[] = [];
     private _materializeIndex = 0;
-    private tileSize: number = 1.0;
+    /** 普通装饰的位置单位：官方 raw × 官方砖距，再映射到本地 1.0 砖距 → 恒为 1.0。 */
+    private tileSize: number = LOCAL_TILE_SPACING;
+    /** 官方游戏世界的一格砖距（Long 1.5 / Short 1.0），用于 Camera 的屏幕单位。 */
+    private officialTileSize: number = 1.5;
+    /**
+     * 图片像素 → 本地世界单位（相对砖距）：Long 1/1.5、Short 1/1。
+     * 与 tileSize 分开：尺寸和位置都必须相对轨道一致，而不是套用相机视口比例。
+     */
+    public decorationSizeScale: number = DECO_SIZE_SCALE;
+    /** Camera / CameraAspect 装饰的屏幕占比换算；动态相机下与 decorationSizeScale 相同。 */
+    public cameraSizeScale: number = BASE_FRUSTUM_SIZE / 10;
+    /** 本地相机基准可视高度（Long 6.6667 / Short 10），由 tileShape 动态决定。 */
+    public baseFrustumSize: number = BASE_FRUSTUM_SIZE;
     /**
      * 歌曲 pitch（settings.pitch 百分比，默认 1）。
      * crotchet = 60/(bpm*pitch*speed)，tileBPM 只含 speed，
@@ -1647,6 +1803,8 @@ export class DecorationManager {
     public objectFloorBatch: ObjectFloorBatchManager | null = null;
     /** 批次需要重刷一次（新建装饰后，即使相机没动也要写一遍实例数据）。 */
     private _objFloorDirty = true;
+    /** 编辑器直接改 transform 后，下一帧强制走完整位置/剔除刷新。 */
+    private _editorDirty = false;
     private floorGeoCache: Map<string, { positions: Float32Array; indices: Uint32Array; mask: Float32Array; vertexCount: number }> = new Map();
     private trailGeoCache: Map<string, Mesh> = new Map();
     private customImages: Map<string, string> = new Map();
@@ -1689,9 +1847,17 @@ export class DecorationManager {
         this.tileStartTimes = tileStartTimes;
         this.tileBPM = tileBPM;
         const s = levelData.settings || {};
-        // 装饰物的所有世界单位（position / positionOffset / parallaxOffset / pivotOffset）
-        // 都由 tileSize 推导，统一乘换算系数（世界→ADOJAS），和装饰尺寸保持一致。
-        this.tileSize = (s.tileShape === 'Long' ? 1.5 : 1.0) * DECO_POSITION_SCALE;
+        // 官方位置/偏移 = raw × official tileSize（Long 1.5 / Short 1.0）。
+        // 本地砖心间距固定为 1.0：官方 (raw × officialTileSize) 映射到本地
+        // (raw × 1.0)，所以位置单位与 tileShape 无关。
+        // 图片尺寸则按 LOCAL_TILE_SPACING / officialTileSize 换算，保证
+        // 图片相对轨道的比例与官方一致（Long 1/1.5，Short 1/1）。
+        this.officialTileSize = officialTileSizeForShape(s.tileShape);
+        this.tileSize = LOCAL_TILE_SPACING * DECO_POSITION_SCALE;
+        this.baseFrustumSize = baseFrustumSizeForShape(s.tileShape);
+        this.decorationSizeScale = decoSizeScaleForShape(s.tileShape);
+        // 本地视口和图片尺寸都按同一比例缩放，屏幕占比保持不变。
+        this.cameraSizeScale = this.baseFrustumSize / 10;
         this.songPitch = s.pitch != null && isFinite(Number(s.pitch))
             ? Math.max(0.1, Number(s.pitch) / 100)
             : 1.0;
@@ -1705,7 +1871,64 @@ export class DecorationManager {
         // 背景混合（Overlay/SoftLight）装饰的独立场景，单独渲染一遍。
         this.backdropGroup.name = 'BackdropBlendContainer';
         this.backdropScene.add(this.backdropGroup);
+        this.backgroundGroup.name = 'BackgroundDecorationContainer';
+        this.backgroundScene.add(this.backgroundGroup);
     }
+
+    private isBackgroundDeco(deco: DecorationInstance): boolean {
+        return (deco.config.depth ?? 0) >= 0
+            && deco.config.decorationType !== DecorationType.Object;
+    }
+
+    /** 当前是否存在必须移到背景 pass 的 depth >= 0 装饰。 */
+    public hasBackgroundDecorations(): boolean {
+        for (const d of this.decoList) {
+            if (this.isBackgroundDeco(d)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Player 在 WebGL 下开启背景独立 pass。depth >= 0 的 Image/Text/Particle
+     * 不再留在主场景，否则背景图/轨道会与它们的叠放顺序错误。
+     */
+    public setBackgroundPassEnabled(enabled: boolean): void {
+        this.backgroundBlendEnabled = enabled;
+        if (this._backgroundPassEnabled === enabled) return;
+        this._backgroundPassEnabled = enabled;
+        for (const d of this.decoList) {
+            this.syncDecorationParent(d);
+            // 背景 pass 开关会改变 Image 的实例化/backdrop 材质选择，必须重建。
+            if (this.isBackgroundDeco(d) && d.config.decorationType === DecorationType.Image) {
+                const key = this.decoTextureKey(d, d.config.decorationImage);
+                d.setupVisual(d.config.decorationImage ? (this.textures.get(key) ?? null) : null);
+            } else if (this.isBackgroundDeco(d) && d.config.decorationType === DecorationType.Text) {
+                this.setupTextVisual(d, {
+                    decText: d.config.decText ?? '',
+                    font: d.config.font,
+                    color: d.config.color,
+                });
+            }
+        }
+        this.markMaskTargetsDirty();
+        this.flushMaskTargets();
+    }
+
+    /** 把装饰挂回所属层（背景 / 前景 backdrop / 主场景）。 */
+    public syncDecorationParent(deco: DecorationInstance): void {
+        const background = this._backgroundPassEnabled && this.isBackgroundDeco(deco);
+        if (background) {
+            if (deco.container.parent !== this.backgroundGroup) this.backgroundGroup.add(deco.container);
+            return;
+        }
+        if (deco.backdropMat) {
+            this.attachToBackdrop(deco);
+            return;
+        }
+        if (deco.container.parent !== this.container) this.container.add(deco.container);
+    }
+
+    public getBackgroundScene(): Scene { return this.backgroundScene; }
 
     private static isDecoEvent(dec: any): boolean {
         return !!dec && (dec.eventType === 'AddDecoration' || dec.eventType === 'AddText'
@@ -1716,13 +1939,20 @@ export class DecorationManager {
     public collectDecoSources(): void {
         this._decoSources = [];
         this._materializeIndex = 0;
+        // `adofai` 的 Level 会同时保留根级 __decorations，并把同一批装饰复制到
+        // tiles[*].addDecorations / decorationsByFloor。两边都收会创建两份实例；
+        // 之前的 WeakSet 去重对 createTiles 产生的副本无效，表现为所有 Add* 装饰
+        // 重叠显示两遍（粒子/遮罩还会成倍）。根级数组是权威导出源；只有它不存在/
+        // 为空时才回退到逐砖装饰（兼容只写 tile 的旧格式）。
         const rootDecos = this.levelData.decorations || (this.levelData as any).__decorations || [];
         const tiles = this.levelData.tiles;
+        const hasRootDecorations = Array.isArray(rootDecos) && rootDecos.length > 0;
 
-        for (const dec of rootDecos) {
-            if (DecorationManager.isDecoEvent(dec)) this._decoSources.push(dec);
-        }
-        if (tiles && (tiles as any).decorationsByFloor && typeof (tiles as any).decorationsByFloor.forEach === 'function') {
+        if (hasRootDecorations) {
+            for (const dec of rootDecos) {
+                if (DecorationManager.isDecoEvent(dec)) this._decoSources.push(dec);
+            }
+        } else if (tiles && (tiles as any).decorationsByFloor && typeof (tiles as any).decorationsByFloor.forEach === 'function') {
             // 紧凑存储：装饰是稀疏 Map（逐砖对象不存在）
             for (const [floor, decos] of (tiles as any).decorationsByFloor as Map<number, any[]>) {
                 for (const dec of decos) {
@@ -1731,7 +1961,7 @@ export class DecorationManager {
                     }
                 }
             }
-        } else {
+        } else if (tiles) {
             for (const tile of (tiles as any[])) {
                 if (tile.addDecorations) {
                     const floor = tile.seqID ?? (tiles as any[]).indexOf(tile);
@@ -1748,7 +1978,8 @@ export class DecorationManager {
         // 2048 上限下要 ~2.0GB 显存，直接丢 WebGL 上下文（canvas 卡死、页面仍流畅）。
         const uniqueImages = new Set<string>();
         for (const s of this._decoSources) {
-            const img = s?.decorationImage ?? s?.image;
+            const img = s?.decorationImage ?? s?.image
+                ?? (s?.eventType === 'AddDecoration' ? s?.decText : undefined);
             if (typeof img === 'string' && img) uniqueImages.add(img);
         }
         const maxDim = this.textures.setTextureBudget(uniqueImages.size);
@@ -1775,6 +2006,8 @@ export class DecorationManager {
     /** 创建完成后收尾：构建装饰事件时间轴 + 日志。 */
     public finishMaterialize(): void {
         this.buildDecorationEventsTimeline();
+        // 此时装饰集合已稳定；补齐因创建顺序（目标先于 Mask）缺失的 stencil 引用。
+        this.flushMaskTargets();
         debugLog('[DecorationManager] Spatial grid Patch: enabled | total=' + this.decoList.length
             + ' static=' + this._staticDecos.length
             + ' dynamic=' + this._dynamicDecos.length
@@ -1796,6 +2029,12 @@ export class DecorationManager {
         // tag → 事件索引。否则每个装饰都要扫描完整事件表，复杂度 O(decos × events)，
         // 大关卡（上万装饰 × 数万事件）会直接卡死。事件顺序与 entries 一致；
         // 单个事件含多个 tag 时会进入多个列表。
+        // 全局事件顺序：同一时刻、同一装饰命中多个 tag 的事件必须按谱面事件顺序
+        // 应用，不能按 tag 遍历顺序。否则「parent 隐藏」会被后遍历到的
+        // 「child 显示」覆盖，表现为该隐藏的背景装饰一直显示。
+        const entryOrder = new Map<any, number>();
+        for (let i = 0; i < entries.length; i++) entryOrder.set(entries[i], i);
+
         const byTag = new Map<string, { time: number; event: any }[]>();
         for (const entry of entries) {
             const event = entry.event;
@@ -1829,7 +2068,11 @@ export class DecorationManager {
                         matched.push(e);
                     }
                 }
-                matched.sort((a, b) => a.time - b.time);
+                matched.sort((a, b) => {
+                    const dt = a.time - b.time;
+                    if (Math.abs(dt) > 1e-6) return dt;
+                    return (entryOrder.get(a) ?? 0) - (entryOrder.get(b) ?? 0);
+                });
             }
 
             const [baseColorHex] = parseDecoColor(deco.config.color, 'ffffff');
@@ -1838,12 +2081,13 @@ export class DecorationManager {
             // 最终 alpha 时相乘（见 DecorationInstance.recomputeOpacity）。
             const baseCA = parseDecoColor(deco.config.color, 'ffffff')[1];
             const baseOp0 = deco.config.opacity / 100;
-            // Camera / CameraAspect 的位置/支点偏移用的是**另一套单位**：
-            // 创建路径是 `pivotOffset: raw * (isCam ? 1 : ts)`、computeStartPos 对
-            // cam 还会 /ts。关键帧必须用同一套系数，否则做位置/支点动画时会整体放大 ts 倍。
-            const isCamPlacement = deco.config.relativeTo === DecPlacementType.Camera
-                || deco.config.relativeTo === DecPlacementType.CameraAspect;
-            const offScale = OFFICIAL_UNIFORM_TILE_SIZE_OFFSETS ? ts : (isCamPlacement ? 1 : ts);
+            // Camera / CameraAspect 的 startPos/pivotOffset 是官方屏幕单位（raw），
+            // 而普通装饰已换算成本地世界单位。MoveDecorations 的
+            // positionOffset/pivotOffset 在官方里会乘官方 tileSize：cam 直接乘
+            // officialTileSize，普通装饰乘本地 tileSize，才能与各自的 startPos 对齐。
+            // SetPlacementType 可能中途切换参考系，因此 offScale 必须按事件时的
+            // placement 计算，不能只在装饰创建时算一次。
+            let placementForOffset = deco.config.relativeTo;
             const basePosX = deco.startPos.x;
             const basePosY = deco.startPos.y;
             // Events trigger chronologically at runtime: once a SetPlacementType
@@ -1952,7 +2196,12 @@ export class DecorationManager {
                         deco.config.anchorFloor ?? deco.config.floor);
                     curStartX = sp.x;
                     curStartY = sp.y;
+                    placementForOffset = movementType;
                 }
+
+                const isCamPlacement = placementForOffset === DecPlacementType.Camera
+                    || placementForOffset === DecPlacementType.CameraAspect;
+                const offScale = isCamPlacement ? this.officialTileSize : ts;
 
                 if (event.positionOffset !== undefined && !event.disabled?.positionOffset) {
                     // [null, x] = "这一轴不改"（原版 schema 是 nullable）。不能把 null 当 0：
@@ -1972,8 +2221,8 @@ export class DecorationManager {
                     }
                 }
 
-                if (event.rotationOffset !== undefined && !event.disabled?.rotationOffset) {
-                    const endRot = event.rotationOffset;
+                if (event.rotationOffset !== undefined && event.rotationOffset !== null && !event.disabled?.rotationOffset) {
+                    const endRot = Number(event.rotationOffset);
                     const startRot = tm.sample(kv, 'rotation', eventTime) ?? 0;
                     if (hasDur) {
                         tm.addTweenKillComplete(kv, 'rotation', eventTime, endTime, startRot, endRot, ease);
@@ -2029,15 +2278,19 @@ export class DecorationManager {
 
                 if (event.parallaxOffset !== undefined && !event.disabled?.parallaxOffset) {
                     const po = this.parseVec2Nullable(event.parallaxOffset);
+                    // scrParallax.SetTrans 在屏幕锚定分支里也是把 parallaxOffset
+                    // 加到世界坐标上，因此它始终是本地世界单位（不能按 Camera 的
+                    // 屏幕单位处理）。
+                    const poScale = ts;
                     const startPOX = tm.sample(kv, 'parallaxOffsetX', eventTime) ?? deco.config.parallaxOffset[0];
                     const startPOY = tm.sample(kv, 'parallaxOffsetY', eventTime) ?? deco.config.parallaxOffset[1];
                     if (po[0] !== null) {
-                        const endPOX = po[0] * ts;
+                        const endPOX = po[0] * poScale;
                         if (hasDur) tm.addTweenKillComplete(kv, 'parallaxOffsetX', eventTime, endTime, startPOX, endPOX, ease);
                         else tm.addInstantEvent(kv, 'parallaxOffsetX', eventTime, endPOX);
                     }
                     if (po[1] !== null) {
-                        const endPOY = po[1] * ts;
+                        const endPOY = po[1] * poScale;
                         if (hasDur) tm.addTweenKillComplete(kv, 'parallaxOffsetY', eventTime, endTime, startPOY, endPOY, ease);
                         else tm.addInstantEvent(kv, 'parallaxOffsetY', eventTime, endPOY);
                     }
@@ -2144,18 +2397,28 @@ export class DecorationManager {
     }
 
     private computeStartPos(position: [number, number], relativeTo: DecPlacementType, floor?: number, liveTile?: { x: number; y: number } | null): Vector2 {
-        const ts = this.tileSize;
-        let pos = new Vector2(position[0] * ts, position[1] * ts);
+        const isCamera = relativeTo === DecPlacementType.Camera || relativeTo === DecPlacementType.CameraAspect;
+        // Camera 的 position 是屏幕单位（官方 SetPlacementType 会先 *tileSize 再 /tileSize，
+        // 净效果为 raw）；其它 placement 使用本地砖距 1.0（官方 raw × officialTileSize
+        // 再映射到本地砖距，净效果同样是 raw × 1.0）。
+        let pos = isCamera
+            ? new Vector2(position[0], position[1])
+            : new Vector2(position[0] * this.tileSize, position[1] * this.tileSize);
         if (relativeTo === DecPlacementType.Tile && floor !== undefined) {
+            // 官方 SetPlacementType 会把 floor clamp 到 [0, listFloors.Count-1]。
+            // 不 clamp 时，越界 floor 的装饰会 fallback 到 (0,0)，在关卡起点
+            // 冒出一份本不该存在的装饰（尾段事件/重复展开常见）。
+            const tileCount = this.levelData.tiles?.length ?? 0;
+            const safeFloor = tileCount > 0 ? Math.max(0, Math.min(tileCount - 1, floor)) : floor;
             // SetPlacementType 用 listFloors[floor].transform.position（运行期，含
             // MoveTrack/PositionTrack），不是关卡静态 position —— 有 liveTile 就用它。
             const tp = liveTile
-                ?? (this.tilePositions ? { x: this.tilePositions.getX(floor), y: this.tilePositions.getY(floor) } : null);
+                ?? (this.tilePositions
+                    ? { x: this.tilePositions.getX(safeFloor), y: this.tilePositions.getY(safeFloor) }
+                    : null);
             if (tp) { pos.x += tp.x; pos.y += tp.y; }
-        } else if (relativeTo === DecPlacementType.Camera || relativeTo === DecPlacementType.CameraAspect) {
-            pos.x /= ts; pos.y /= ts;
         }
-        // Global/LastPosition/Planet: startPos = position * tileSize (no floor offset)
+        // Global/LastPosition/Planet: startPos = position * local tile size (no floor offset)
         return pos;
     }
 
@@ -2167,6 +2430,8 @@ export class DecorationManager {
         const rawPositionOffset = this.parseVec2(event.positionOffset, [0, 0]);
         const rawParallaxOffset = this.parseVec2(event.parallaxOffset, [0, 0]);
         const rawPivotOffset = this.parseVec2(event.pivotOffset, [0, 0]);
+        const rawCropPivotOffset = this.parseVec2(event.cropPivotOffset, [0, 0]);
+        const parsedOriginalSize = this.parseVec2Nullable(event.originalSize);
         const ts = this.tileSize;
         const isCam = relativeTo === DecPlacementType.Camera || relativeTo === DecPlacementType.CameraAspect;
 
@@ -2184,6 +2449,12 @@ export class DecorationManager {
         const floor = event.floor !== undefined ? event.floor
             : event.parentFloorNum !== undefined ? event.parentFloorNum
                 : 0;
+        // 官方 LevelEvent.FixDefaultValues：老格式 AddDecoration 把图片名放在
+        // `decText` 里（没有 decorationImage），加载时应迁移到 decorationImage。
+        // 不迁移会让这批老谱面的装饰直接变成“无图装饰”而被丢弃。
+        const decorationImage = event.decorationImage
+            || (event.eventType === 'AddDecoration' && typeof event.decText === 'string' ? event.decText : '')
+            || '';
         // relativeTo 的元组形式 [n, 参考]：$n = 偏移、参考取 [1]。
         // 原版 eh() 里**只有 ThisTile 会用到这个偏移**（锚点砖 = 事件砖 + n），
         // Tile 时偏移被忽略。事件砖（floor）仍用于 stickToFloor / 事件归属，
@@ -2202,8 +2473,9 @@ export class DecorationManager {
             decorationType: decoType,
             id: `dec_${event.eventType}_${floor ?? 0}_${Math.random().toString(36).slice(2, 6)}`,
             tag: event.tag || '',
-            decorationImage: event.decorationImage || '',
+            decorationImage,
             decText: event.decText || '',
+            font: typeof event.font === 'string' ? event.font : 'Default',
             position: rawPos,
             positionOffset: rawPositionOffset,
             relativeTo,
@@ -2215,8 +2487,17 @@ export class DecorationManager {
                 return [sc[0] ?? 100, sc[1] ?? 100] as [number, number];
             })(),
             parallax: decoParallax,
-            parallaxOffset: parallaxZero ? [0, 0] : [rawParallaxOffset[0] * ts, rawParallaxOffset[1] * ts],
+            // parallaxOffset 是加到世界坐标上的偏移（Camera 的屏幕锚定分支也是
+            // 加在 ScreenToWorldPoint 结果之后），统一换算到本地世界单位。
+            parallaxOffset: parallaxZero ? [0, 0] : [
+                rawParallaxOffset[0] * ts,
+                rawParallaxOffset[1] * ts,
+            ],
             pivotOffset: [rawPivotOffset[0] * (isCam ? 1 : ts), rawPivotOffset[1] * (isCam ? 1 : ts)],
+            cropPivotOffset: [rawCropPivotOffset[0], rawCropPivotOffset[1]],
+            originalSize: parsedOriginalSize[0] != null && parsedOriginalSize[1] != null
+                ? [parsedOriginalSize[0], parsedOriginalSize[1]]
+                : undefined,
             depth: event.depth || 0,
             color: (() => {
                 // v15 某些事件（如 AddParticle）的 color 是对象/数组结构 → 归一化为字符串
@@ -2230,11 +2511,20 @@ export class DecorationManager {
                 }
                 return 'ffffff';
             })(),
-            opacity: event.opacity !== undefined ? event.opacity : 100,
+            opacity: (() => {
+                // 部分转换器会把 opacity/scaleMultiplier 写成 null；不能直接参与
+                // 除法/乘法，否则 null/100 = 0 会让整块装饰透明、null 倍缩放会消失。
+                const n = Number(event.opacity);
+                return event.opacity !== undefined && event.opacity !== null && Number.isFinite(n) ? n : 100;
+            })(),
             lockScale: isEnabled(event.lockScale),
             lockRotation: isEnabled(event.lockRotation),
             visible: parseEventVisible(event.visible),
-            scaleMultiplier: event.scaleMultiplier !== undefined ? event.scaleMultiplier : 1,
+            scaleMultiplier: (() => {
+                const n = Number(event.scaleMultiplier);
+                return event.scaleMultiplier !== undefined && event.scaleMultiplier !== null && Number.isFinite(n)
+                    ? n : 1;
+            })(),
             stickToFloor: isEnabled(event.stickToFloor),
             syncFloorDepth: isEnabled(event.syncFloorDepth),
             floor,
@@ -2276,12 +2566,20 @@ export class DecorationManager {
         };
 
         const deco = new DecorationInstance(config);
+        // 必须在 setupVisual 之前挂 manager：缓存贴图可能同步回调 setupVisual，
+        // 否则 Mask/Backdrop 拿不到 manager（stencil ref / backdrop pass 失效）。
+        deco._manager = this;
+        deco.originEvent = event;
         deco.sourceEvent = { ...event };
         deco.setInstancedRenderer(this.instancedRenderer);
-        const initialPosition: [number, number] = [rawPos[0] + rawPositionOffset[0], rawPos[1] + rawPositionOffset[1]];
-        deco.startPos.copy(this.computeStartPos(initialPosition, relativeTo, anchorFloor));
+        // 官方 scrDecoration.Setup 的初始位置只读 `position`；`positionOffset`
+        // 只属于 MoveDecorations。旧实现把 AddDecoration 自带的 positionOffset
+        // 再加一次，会让这类装饰整体偏移（部分谱面带默认/残留字段时尤其明显）。
+        deco.startPos.copy(this.computeStartPos(rawPos, relativeTo, anchorFloor));
         deco.pivotPos.copy(deco.startPos);
         deco.currentPosition.copy(deco.startPos);
+        // setupTextVisual 需要异步字体加载完成后回写 manager。
+        deco._manager = this;
 
         if (decoType === DecorationType.Text) {
             if (!this.setupTextVisual(deco, event)) { deco.dispose(); return null; }
@@ -2304,24 +2602,42 @@ export class DecorationManager {
         const canvas = document.createElement('canvas');
         const ctx = canvas.getContext('2d');
         if (!ctx) return false;
-        const fontSize = Math.max(8, Number(event.fontSize) || 48);
-        const fontFamily = event.font && typeof event.font === 'string' ? event.font : 'Arial';
-        const fontWeight = event.fontWeight || 'bold';
-        ctx.font = `${fontWeight} ${fontSize}px ${fontFamily}`;
+
+        // 官方 TextDecoration prefab：Canvas 960×540、字号 100、整体 scale 0.01，
+        // 即字号 1 对应 1 个世界单位（再乘以装饰自身 scale）。事件里的 fontSize
+        // 不是原版 AddText 的字段，不能拿它当字号；否则文字会整体偏小。
+        const fontSize = 100;
+        const fontFamily = decorationFontFamily(event.font);
+        if (!isDefaultDecorationFontReady()) {
+            void ensureDefaultDecorationFont().then((ok) => {
+                if (ok) this.refreshTextDecorations();
+            });
+        }
+        const fontWeight = 'normal';
+        const lineSpacing = 0.75; // ADOUAC DecorationFonts：拉丁/默认行距
+        const lineHeight = fontSize * lineSpacing;
         const lines = String(event.decText ?? '').split('\n');
-        const lineHeight = fontSize * 1.25;
-        const measuredWidth = Math.max(fontSize, ...lines.map((line) => ctx.measureText(line).width));
-        const padding = Math.ceil(fontSize * 0.35);
-        canvas.width = Math.ceil(measuredWidth + padding * 2);
-        canvas.height = Math.ceil(lines.length * lineHeight + padding * 2);
+
         ctx.font = `${fontWeight} ${fontSize}px ${fontFamily}`;
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        // Sprite 的颜色由 DecorationInstance 统一相乘，文字纹理保持白色，避免重复染色。
+        const measuredWidth = Math.max(fontSize, ...lines.map((line) => ctx.measureText(line).width));
+        // 贴图只包住字形；排版锚点仍是画面中心，和 UGUI MiddleCenter 一致。
+        const padding = Math.ceil(fontSize * 0.18);
+        const width = Math.ceil(measuredWidth + padding * 2);
+        const height = Math.min(540, Math.ceil(lines.length * lineHeight + padding * 2));
+        canvas.width = width;
+        canvas.height = height;
+
+        ctx.font = `${fontWeight} ${fontSize}px ${fontFamily}`;
+        ctx.clearRect(0, 0, width, height);
         ctx.fillStyle = '#ffffff';
-        ctx.textAlign = event.textAlign === 'Left' ? 'left' : event.textAlign === 'Right' ? 'right' : 'center';
+        // 原版 TextAnchor.MiddleCenter / HorizontalWrapMode.Overflow，
+        // 不跟随事件 textAlign 左右移动。
+        ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        const x = ctx.textAlign === 'left' ? padding : ctx.textAlign === 'right' ? canvas.width - padding : canvas.width / 2;
-        lines.forEach((line, index) => ctx.fillText(line, x, padding + lineHeight * (index + 0.5)));
+        const centerYOffset = (height - lines.length * lineHeight) / 2;
+        lines.forEach((line, index) => {
+            ctx.fillText(line, width / 2, centerYOffset + lineHeight * (index + 0.5));
+        });
         const texture = new CanvasTexture(canvas);
         texture.colorSpace = SRGBColorSpace;
         deco.setupVisual(texture);
@@ -2355,9 +2671,12 @@ export class DecorationManager {
             const bodyTex = configurePlanetTexture(getPlanetTexture(pType));
             applyPlanetFrame(bodyTex, performance.now() * 0.001);
             deco.objPlanetTex = bodyTex;
+            // planetColor 可能是 #RRGGBBAA / 数字 / 数组；THREE.Color 不吃 8 位
+            // alpha 字符串，会报 Invalid hex 并变成黑/白。统一先拆出 RGB。
+            const [bodyRgb] = parseDecoColor(bodyColorHex, 'ffffff');
             const mat = new MeshBasicMaterial({
                 map: bodyTex,
-                color: new Color(isPresetTex ? '#ffffff' : bodyColorHex),
+                color: new Color(isPresetTex ? '#ffffff' : bodyRgb),
                 transparent: true,
                 side: DoubleSide,
                 depthWrite: false,
@@ -2505,7 +2824,13 @@ export class DecorationManager {
         this.textures.request(filename, url, tex => {
             if (deco.textureRequestId !== reqId) return;
             this.applyTextureOptions(filename, tex);
-            if (!deco.particles) this.createParticleSystem(deco, event, tex);
+            // 粒子贴图/图片重新导入时，清掉可能残留的 plane，再重建粒子网格。
+            deco.clearVisual();
+            if (deco.particles) {
+                deco.particles.dispose();
+                deco.particles = null;
+            }
+            this.createParticleSystem(deco, event, tex);
         });
     }
 
@@ -2542,7 +2867,7 @@ export class DecorationManager {
             playDuration: event.playDuration ?? 5,
             simulationSpeed: event.simulationSpeed ?? 100,
             randomSeed: event.randomSeed ?? 0,
-            autoPlay: event.autoPlay !== false,
+            autoPlay: isEnabled(event.autoPlay, true),
             simulationSpace: event.simulationSpace || 'Local',
             tileSize: this.tileSize,
             // 粒子 mesh 位于装饰 transform 下，缩放由父级统一应用，不能重复乘相机倍率。
@@ -2733,10 +3058,12 @@ export class DecorationManager {
         deco._manager = this;
         this.decorations.set(deco.config.id!, deco);
         this.decoList.push(deco);
-        // 遮罩注册表：新装饰可能是 Mask（或改了 maskingType），下一帧重建
+        // 遮罩注册表：新装饰可能是 Mask（或改了 maskingType），下一帧重建。
+        // Mask 晚于目标创建时还要重挂目标的 stencil 材质。
         this.markMaskRegistryDirty();
+        if (deco.config.maskingType === MaskingType.Mask) this.markMaskTargetsDirty();
         // Keep logical container for position tracking; instanced visuals live on InstancedMesh
-        this.container.add(deco.container);
+        this.syncDecorationParent(deco);
         if (deco.isStaticWorld) {
             this._staticDecos.push(deco);
             this._staticGrid.insert(deco, deco.startPos.x, deco.startPos.y);
@@ -2768,6 +3095,10 @@ export class DecorationManager {
     public attachToBackdrop(deco: DecorationInstance): void {
         this.backdropGroup.add(deco.container);
         if (!this.backdropDecos.includes(deco)) this.backdropDecos.push(deco);
+    }
+
+    public attachToBackground(deco: DecorationInstance): void {
+        if (deco.container.parent !== this.backgroundGroup) this.backgroundGroup.add(deco.container);
     }
 
     public detachFromBackdrop(deco: DecorationInstance): void {
@@ -2824,8 +3155,17 @@ export class DecorationManager {
                     const m: any = (d as any).mesh?.material ?? (d as any).sprite?.material;
                     return typeof m?.opacity === 'number' ? m.opacity : null;
                 })(),
+                materialColorWrite: (() => {
+                    const m: any = (d as any).mesh?.material ?? (d as any).sprite?.material;
+                    return typeof m?.colorWrite === 'boolean' ? m.colorWrite : null;
+                })(),
+                materialStencil: (() => {
+                    const m: any = (d as any).mesh?.material ?? (d as any).sprite?.material;
+                    return m ? { write: m.stencilWrite, ref: m.stencilRef, func: m.stencilFunc } : null;
+                })(),
                 configVisible: d.config.visible,
                 effVisible,
+                particles: d.particles?.debugState,
                 depth: d.config.depth,
                 z, renderOrder: ro,
                 blend: d.config.blendMode,
@@ -2846,6 +3186,124 @@ export class DecorationManager {
     /** 纯色装饰（无贴图但需要采样）用的 1x1 白纹理。 */
     public getPlaceholderTexture(): Texture { return this.textures.placeholder; }
 
+    // ── Editor decoration inspector ─────────────────────────────────────────
+
+    public getDecorationEditorInfo(): DecorationEditorInfo[] {
+        return this.decoList.map(d => {
+            const c = d.config;
+            const isCam = c.relativeTo === DecPlacementType.Camera
+                || c.relativeTo === DecPlacementType.CameraAspect;
+            const ev = d.sourceEvent || {};
+            return {
+                id: c.id!,
+                eventType: String(ev.eventType || c.decorationType),
+                objectType: c.objectType,
+                tag: c.tag || '',
+                image: c.decorationImage || '',
+                floor: c.floor,
+                relativeTo: String(c.relativeTo),
+                position: [c.position[0], c.position[1]],
+                scale: [c.scale[0], c.scale[1]],
+                rotation: c.rotation,
+                depth: c.depth,
+                opacity: c.opacity,
+                pivotOffset: [c.pivotOffset[0], c.pivotOffset[1]],
+                visible: c.visible !== false,
+                maskingType: String(c.maskingType),
+                blendMode: String(c.blendMode),
+                baseWidth: d.baseSizeX,
+                baseHeight: d.baseSizeY,
+                worldPosition: [d.container.position.x, d.container.position.y, d.container.position.z],
+                positionUnit: isCam ? this.baseFrustumSize / 20 : this.tileSize,
+                defaultPosition: [...d.defaultPosition] as [number, number],
+                defaultScale: [...d.defaultScale] as [number, number],
+                defaultRotation: d.defaultRotation,
+                defaultDepth: d.defaultDepth,
+                defaultPivotOffset: [...d.defaultPivotOffset] as [number, number],
+            };
+        });
+    }
+
+    public getDecorationEditorCorners(id: string): Array<[number, number]> {
+        return this.decorations.get(id)?.getEditorWorldCorners() ?? [];
+    }
+
+    public updateDecorationTransform(id: string, patch: DecorationEditorPatch): boolean {
+        const d = this.decorations.get(id);
+        if (!d) return false;
+        const c = d.config;
+        const ev: any = d.sourceEvent || (d.sourceEvent = {});
+        const origin: any = d.originEvent;
+        const setBoth = (key: string, value: any): void => {
+            ev[key] = value;
+            if (origin) origin[key] = value;
+        };
+
+        if (patch.position) {
+            const pos: [number, number] = [Number(patch.position[0]) || 0, Number(patch.position[1]) || 0];
+            c.position = pos;
+            setBoth('position', [pos[0], pos[1]]);
+            d.startPos.copy(this.computeStartPos(c.position, c.relativeTo, c.anchorFloor));
+            d.currentPosition.copy(d.startPos);
+            d.pivotPos.copy(d.startPos);
+        }
+        if (patch.scale) {
+            const sc: [number, number] = [
+                Number.isFinite(patch.scale[0]) ? patch.scale[0] : c.scale[0],
+                Number.isFinite(patch.scale[1]) ? patch.scale[1] : c.scale[1],
+            ];
+            c.scale = sc;
+            d.currentScale.set(sc[0] / 100, sc[1] / 100);
+            setBoth('scale', [sc[0], sc[1]]);
+        }
+        if (patch.rotation !== undefined && Number.isFinite(patch.rotation)) {
+            c.rotation = patch.rotation;
+            d.currentRotation = c.rotation + c.rotationOffset;
+            setBoth('rotation', patch.rotation);
+        }
+        if (patch.depth !== undefined && Number.isFinite(patch.depth)) {
+            c.depth = patch.depth;
+            setBoth('depth', patch.depth);
+        }
+        if (patch.opacity !== undefined && Number.isFinite(patch.opacity)) {
+            c.opacity = patch.opacity;
+            d.setOpacityPercent(patch.opacity);
+            setBoth('opacity', patch.opacity);
+        }
+        if (patch.pivotOffset) {
+            const px = Number(patch.pivotOffset[0]) || 0;
+            const py = Number(patch.pivotOffset[1]) || 0;
+            c.pivotOffset = [px, py];
+            d.updatePivotOffset(px, py);
+            const isCam = c.relativeTo === DecPlacementType.Camera
+                || c.relativeTo === DecPlacementType.CameraAspect;
+            setBoth('pivotOffset', [px / (isCam ? 1 : this.tileSize), py / (isCam ? 1 : this.tileSize)]);
+        }
+        if (patch.visible !== undefined) {
+            c.visible = patch.visible;
+            setBoth('visible', patch.visible);
+            d.container.visible = patch.visible;
+        }
+
+        d.updateTransform();
+        d.applyEditorScale();
+        if (d.instSlot) d.syncInstance();
+        this._editorDirty = true;
+        return true;
+    }
+
+    public resetDecorationTransform(id: string): boolean {
+        const d = this.decorations.get(id);
+        if (!d) return false;
+        return this.updateDecorationTransform(id, {
+            position: [...d.defaultPosition] as [number, number],
+            scale: [...d.defaultScale] as [number, number],
+            rotation: d.defaultRotation,
+            depth: d.defaultDepth,
+            pivotOffset: [...d.defaultPivotOffset] as [number, number],
+        });
+    }
+
     /**
      * stencil ref 分配（对齐 WAD 的 stencilRefForMaskingTarget）：
      * 按 key 去重后**顺序**分配 1..254。原来的哈希实现会碰撞 —— 两个不同的遮罩
@@ -2865,9 +3323,38 @@ export class DecorationManager {
     /** 当前所有 `maskingType === Mask` 的装饰。 */
     private _maskDecos: DecorationInstance[] = [];
     private _maskRegistryDirty = true;
+    /**
+     * 新 Mask 或 mask 属性变化后，被遮罩装饰的 stencil 材质需要重挂。
+     * 仅重建 registry 不够：目标先于 Mask 创建时，它的材质在 setup 阶段
+     * 拿不到 ref，会绕过 stencil 全屏显示（“遮罩外的装饰不该出现却出现”）。
+     */
+    private _maskTargetsDirty = false;
 
     /** 装饰创建/销毁/改 maskingType 后调用，下一帧解析时重建。 */
     public markMaskRegistryDirty(): void { this._maskRegistryDirty = true; }
+
+    /** Mask 的 visible/opacity 导致 activeSelf 变化时，必须让所有目标重挂 stencil。 */
+    public notifyMaskStateChanged(): void {
+        this._maskRegistryDirty = true;
+        this._maskTargetsDirty = true;
+    }
+
+    /** 标记需要重挂所有 mask/被遮罩装饰的材质。 */
+    public markMaskTargetsDirty(): void { this._maskTargetsDirty = true; }
+
+    /** 在装饰集合稳定后重挂 mask 材质（避免创建顺序影响 stencil ref）。 */
+    public flushMaskTargets(): void {
+        if (!this._maskTargetsDirty) return;
+        this._maskTargetsDirty = false;
+        this.markMaskRegistryDirty();
+        for (const d of this.decoList) {
+            const mt = d.config.maskingType;
+            if (mt !== MaskingType.Mask
+                && mt !== MaskingType.VisibleInsideMask
+                && mt !== MaskingType.VisibleOutsideMask) continue;
+            this.applyMaskTo(d);
+        }
+    }
 
     private ensureMaskRegistry(): void {
         if (!this._maskRegistryDirty) return;
@@ -2928,6 +3415,15 @@ export class DecorationManager {
             if (!mat) continue;
             mat.uniforms.uBackdrop.value = texture;
             (mat.uniforms.uResolution.value as Vector2).set(width, height);
+        }
+    }
+
+    /** 背景 pass 的混合材质采样「背景图/背景色」RT。 */
+    public updateBackgroundUniforms(texture: Texture, width: number, height: number): void {
+        for (const d of this.decoList) {
+            if (!d.backdropMat || (d.config.depth ?? 0) < 0) continue;
+            d.backdropMat.uniforms.uBackdrop.value = texture;
+            (d.backdropMat.uniforms.uResolution.value as Vector2).set(width, height);
         }
     }
 
@@ -3059,7 +3555,15 @@ export class DecorationManager {
         // （smoothing/tile）请求。**这一步不能省**：省了的话，等图注册的装饰会
         // 永远停在"透明兜底"，表现为"该显示的装饰不出现（消失）"。
         for (const d of this.decoList) {
-            if (d.config.decorationImage === filename) this.loadDecoTexture(filename, d);
+            if (d.config.decorationImage !== filename) continue;
+            // AddParticle 只能用粒子系统/图集渲染；不能把整张粒子图当普通图片
+            // 贴到一个 plane 上。旧实现图片后导入时会走 loadDecoTexture，
+            // 导致 autoPlay:false 的粒子在开场直接显示整张 Bokeh/chick 图。
+            if (d.config.decorationType === DecorationType.Particle) {
+                this.setupParticle(d, d.sourceEvent || d.originEvent || {});
+            } else {
+                this.loadDecoTexture(filename, d);
+            }
         }
         this.retryPending();
     }
@@ -3122,7 +3626,9 @@ export class DecorationManager {
             d.particles.setVisible(vis);
             if (vis) {
                 try {
-                    if (this._lastNow > 0 && !this._particlesStarted.has(d)) {
+                    // autoPlay:false 的粒子必须等 SetParticle(start) / 显式触发；
+                    // 之前这里无条件 play，导致"谱面里设了不自动播放的粒子一开始就出现"。
+                    if (this._lastNow > 0 && !this._particlesStarted.has(d) && d.particles.autoPlay) {
                         d.particles.play();
                         this._particlesStarted.add(d);
                     }
@@ -3150,6 +3656,7 @@ export class DecorationManager {
         const len = list.length;
         let animCount = 0;
         let needsTilePositions = false;
+        let needsObjectColorUpdate = false;
         // Same-depth tie-break ranks: rebuilt every frame in creation order so
         // equal-depth overlaps resolve deterministically (later creation on top).
         this._rankCounters.clear();
@@ -3170,7 +3677,12 @@ export class DecorationManager {
                 needsTilePositions = true;
                 this._stickFloors.add(d.config.floor ?? -1);
             }
+            if (d.config.decorationType === DecorationType.Object && d.objColorAnimated) {
+                needsObjectColorUpdate = true;
+            }
         }
+        // maskingType / useMaskingDepth 等在时间轴上变化后，统一重挂相关材质。
+        this.flushMaskTargets();
         // Build current tile positions for stickToFloor/followPlanet decorations
         let needsStickRotation = false;
         if (needsTilePositions) {
@@ -3196,12 +3708,13 @@ export class DecorationManager {
                 });
             }
         }
-        if (!camMoved && animCount === 0 && !tilePositions && !this._objFloorDirty) {
+        if (!camMoved && animCount === 0 && !tilePositions && !this._objFloorDirty
+            && !needsObjectColorUpdate && !this._editorDirty) {
             this.instancedRenderer.flush();
             return;
         }
         // Compute camera visible area in world units
-        const viewH = 8 / camZ;
+        const viewH = this.baseFrustumSize / camZ;
         const aspect = runtime && runtime.viewportHeight > 0
             ? runtime.viewportWidth / runtime.viewportHeight
             : 16 / 9;
@@ -3253,7 +3766,9 @@ export class DecorationManager {
                     const predX = bx + (camX - bx) * px;
                     const predY = by + (camY - by) * py;
                     const camShift = Math.max(Math.abs(camX - prevCamX), Math.abs(camY - prevCamY));
-                    const padP = (d.baseSizeX * Math.abs(d.config.scale[0]) + d.baseSizeY * Math.abs(d.config.scale[1])) / 100 + 8;
+                    const padP = (d.baseSizeX * Math.abs(d.config.scale[0]) + d.baseSizeY * Math.abs(d.config.scale[1])) / 100
+                        + Math.abs(d.config.pivotOffset[0]) * Math.abs(d.currentScale.x)
+                        + Math.abs(d.config.pivotOffset[1]) * Math.abs(d.currentScale.y) + 8;
                     const slack = padP + camShift * 2;
                     const p = d.container.position;
                     const drift = Math.max(Math.abs(p.x - predX), Math.abs(p.y - predY));
@@ -3282,9 +3797,16 @@ export class DecorationManager {
                 } else {
                     hw = csx * 0.5; hh = csy * 0.5;
                 }
+                // pivotOffset 把可视内容整体推离 container 锚点；剔除的包围盒
+                // 必须同时包含“内容尺寸 + 支点偏移”，否则贴边的大图会偶发消失。
+                hw += Math.abs(d.config.pivotOffset[0]) * csx;
+                hh += Math.abs(d.config.pivotOffset[1]) * csy;
                 if (hw > this._staticQueryPad || hh > this._staticQueryPad) this.noteDecoExtent(hw, hh);
                 const vis = p.x + hw >= minX && p.x - hw <= maxX && p.y + hh >= minY && p.y - hh <= maxY;
                 d.setCulledVisible(vis);
+                // Object(Floor) 的 Glow/Blink/Switch/Rainbow/Volume/Pulse 颜色要按
+                // 当前时间重算；只对最终可见的少数实例做，避免上万个地板每帧全算。
+                if (d.container.visible && d.objColorAnimated) this.applyObjectFloorColors(d);
                 this.collectObjectFloor(d, vis);
             } else {
                 d.setCulledVisible(false);
@@ -3311,9 +3833,16 @@ export class DecorationManager {
                 } else {
                     hw = csx * 0.5; hh = csy * 0.5;
                 }
+                // pivotOffset 把可视内容整体推离 container 锚点；剔除的包围盒
+                // 必须同时包含“内容尺寸 + 支点偏移”，否则贴边的大图会偶发消失。
+                hw += Math.abs(d.config.pivotOffset[0]) * csx;
+                hh += Math.abs(d.config.pivotOffset[1]) * csy;
                 if (hw > this._staticQueryPad || hh > this._staticQueryPad) this.noteDecoExtent(hw, hh);
                 const vis = p.x + hw >= minX && p.x - hw <= maxX && p.y + hh >= minY && p.y - hh <= maxY;
                 d.setCulledVisible(vis);
+                // Object(Floor) 的 Glow/Blink/Switch/Rainbow/Volume/Pulse 颜色要按
+                // 当前时间重算；只对最终可见的少数实例做，避免上万个地板每帧全算。
+                if (d.container.visible && d.objColorAnimated) this.applyObjectFloorColors(d);
                 this.collectObjectFloor(d, vis);
             } else {
                 d.setCulledVisible(false);
@@ -3325,6 +3854,7 @@ export class DecorationManager {
             this._objFloorDirty = false;
         }
         this.instancedRenderer.flush();
+        this._editorDirty = false;
     }
 
     /**
@@ -3359,8 +3889,12 @@ export class DecorationManager {
     /** 时间轴采样驱动：切换 decorationImage 贴图。 */
     public applyImageTo(deco: DecorationInstance, filename: string): void {
         deco.config.decorationImage = filename;
-        if (deco.config.decorationType === DecorationType.Image
-            || deco.config.decorationType === DecorationType.Particle) {
+        if (deco.config.decorationType === DecorationType.Particle) {
+            if (!filename) return;
+            this.setupParticle(deco, deco.originEvent || deco.sourceEvent || {});
+            return;
+        }
+        if (deco.config.decorationType === DecorationType.Image) {
             if (!filename) { deco.setupVisual(null); return; }
             this.loadDecoTexture(filename, deco);
         }
@@ -3393,9 +3927,19 @@ export class DecorationManager {
     }
 
     /** MoveDecorations 可在播放中切换 stencil 角色，需从实例批次迁移到独立 sprite。 */
-    public applyMaskTo(deco: DecorationInstance): void {        if (deco.config.decorationType !== DecorationType.Image && deco.config.decorationType !== DecorationType.Text) return;
+    public applyMaskTo(deco: DecorationInstance): void {
+        const isMask = deco.config.maskingType === MaskingType.Mask;
+        if (!isMask && deco.config.decorationType !== DecorationType.Image
+            && deco.config.decorationType !== DecorationType.Text) return;
         const texture = this.textures.get(this.decoTextureKey(deco, deco.config.decorationImage));
-        if (texture) { this.configureTextureRepeat(texture, deco); deco.setupVisual(texture); }
+        if (texture) {
+            this.configureTextureRepeat(texture, deco);
+            deco.setupVisual(texture);
+        } else if (isMask) {
+            // Mask 不显示颜色，但即使贴图未就绪也必须重建带 stencil 的材质；
+            // 否则 mask 参数变化后仍沿用旧的 stencilRef。
+            deco.setupVisual(null);
+        }
     }
 
     /**
@@ -3410,16 +3954,38 @@ export class DecorationManager {
             if (!list) continue;
             for (const d of list) {
                 if (!d.particles) continue;
-                if (ev.eventType === 'EmitParticle') d.particles.burst(ev.count ?? 1);
-                else d.particles.applySetParticle(ev);
+                if (ev.eventType === 'EmitParticle') {
+                    d.particles.burst(ev.count ?? 1);
+                    continue;
+                }
+                d.particles.applySetParticle(ev);
+                // SetParticle.targetMode：Start=Play、Stop=停止发射、Clear=停止并清空。
+                // autoPlay:false 的粒子只能靠这里启动；旧实现只改参数，永远不会出现。
+                const mode = String(ev.targetMode ?? '');
+                if (mode === 'Start') d.particles.play();
+                else if (mode === 'Stop') d.particles.stop(false);
+                else if (mode === 'Clear') d.particles.stop(true);
             }
         }
     }
 
     /** 时间轴采样驱动：SetText。 */
+    /** 默认字体 godoMaum 异步加载完成后，重建所有文字纹理。 */
+    public refreshTextDecorations(): void {
+        for (const deco of this.decoList) {
+            if (deco.config.decorationType !== DecorationType.Text) continue;
+            this.setupTextVisual(deco, {
+                decText: deco.config.decText ?? '',
+                font: deco.config.font,
+                color: deco.config.color,
+            });
+            deco.updateTransform();
+        }
+    }
+
     public applyTextTo(deco: DecorationInstance, text: string): void {
         deco.config.decText = text;
-        const ev: any = { decText: text, color: deco.config.color, fontSize: 48, font: undefined };
+        const ev: any = { decText: text, color: deco.config.color, font: deco.config.font };
         this.setupTextVisual(deco, ev);
     }
 
@@ -3576,10 +4142,18 @@ export class DecorationManager {
         for (let i = 0; i < list.length; i++) { list[i].dispose(); list[i].container.removeFromParent(); }
         this.backdropDecos.length = 0;
         this.backdropGroup.clear();
+        this.backgroundGroup.clear();
         this._animatedDecos.length = 0;
         this.maskStencilRefs.clear();
+        this._maskTargetsDirty = false;
+        this._maskRegistryDirty = true;
         this._objFloorDirty = true;
+        // clear() 用于 init/重新载入；批次必须重建，否则第一次 init 后
+        // objectFloorBatch 指向已 dispose 的旧管理器，Object(Floor) 全部不渲染。
         this.objectFloorBatch?.dispose();
+        this.objectFloorBatch = USE_OBJECT_FLOOR_BATCH
+            ? new ObjectFloorBatchManager(this.container)
+            : null;
         this.decorations.clear();
         this.decoList.length = 0;
         this._staticDecos.length = 0;
@@ -3602,6 +4176,9 @@ export class DecorationManager {
 
     public dispose(): void {
         this.clear();
+        // clear() 会为下一次 init 重建批次；最终销毁时再释放它。
+        this.objectFloorBatch?.dispose();
+        this.objectFloorBatch = null;
         this.instancedRenderer.dispose();
         this.textures.dispose();
         this.scene.remove(this.container);
@@ -3658,38 +4235,51 @@ export class DecorationManager {
      * MoveDecorations/SetObject 用这个解析，绝不能用 `parseVec2`（它会把 null 变成 0）。
      */
     private parseVec2Nullable(v: any): [number | null, number | null] {
+        const toNum = (x: any): number | null => {
+            if (x === undefined || x === null || x === '') return null;
+            const n = Number(x);
+            return Number.isFinite(n) ? n : null;
+        };
         if (v === undefined || v === null || v === '') return [null, null];
         if (Array.isArray(v)) {
             const a = v[0];
             const b = v.length >= 2 ? v[1] : v[0];
-            return [
-                (a === null || a === undefined) ? null : Number(a),
-                (b === null || b === undefined) ? null : Number(b),
-            ];
+            return [toNum(a), toNum(b)];
         }
         if (typeof v === 'string') {
             const m = v.match(/-?\d+\.?\d*/g);
             if (!m || m.length === 0) return [null, null];
             const a = parseFloat(m[0]);
             const b = m.length >= 2 ? parseFloat(m[1]) : a;
-            return [a, b];
+            return [toNum(a), toNum(b)];
         }
-        const n = Number(v);
-        return Number.isFinite(n) ? [n, n] : [null, null];
+        const n = toNum(v);
+        return [n, n];
     }
 
     private parseVec2(v: any, def: [number, number]): [number, number] {
+        const toNum = (x: any, fallback: number): number => {
+            if (x === undefined || x === null || x === '') return fallback;
+            const n = Number(x);
+            return Number.isFinite(n) ? n : fallback;
+        };
         if (v === undefined || v === null || v === '') return def;
-        if (Array.isArray(v) && v.length >= 2) return [Number(v[0]), Number(v[1])];
-        if (Array.isArray(v) && v.length === 1) return [Number(v[0]), Number(v[0])];
+        if (Array.isArray(v)) {
+            const a = toNum(v[0], def[0]);
+            const b = v.length >= 2 ? toNum(v[1], def[1]) : a;
+            return [a, b];
+        }
         // Handle string vectors like "[1, 2]" or "(1, 2)"
         if (typeof v === 'string') {
             const m = v.match(/-?\d+\.?\d*/g);
-            if (m && m.length >= 2) return [parseFloat(m[0]), parseFloat(m[1])];
-            if (m && m.length === 1) return [parseFloat(m[0]), parseFloat(m[0])];
+            if (m && m.length >= 2) return [toNum(m[0], def[0]), toNum(m[1], def[1])];
+            if (m && m.length === 1) {
+                const a = toNum(m[0], def[0]);
+                return [a, a];
+            }
         }
         // Handle single number as uniform value (e.g., scale: 50 → [50, 50])
-        if (typeof v === 'number') return [v, v];
+        if (typeof v === 'number') return [toNum(v, def[0]), toNum(v, def[1])];
         return def;
     }
 }

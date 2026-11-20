@@ -1,5 +1,5 @@
 import { EasingFunctions } from './Easing';
-import { isEventActive, isFieldEnabled } from './EventUtils';
+import { isEnabled, isEventActive, isFieldEnabled } from './EventUtils';
 import type { TilePositions } from './TileAccess';
 
 // ──── 类型定义 ──────────────────────────────────────────────────────────────
@@ -16,6 +16,21 @@ export type CamMovementType = (typeof CamMovementTypes)[keyof typeof CamMovement
 
 const MOVEMENT_TYPES: CamMovementType[] = ['Player', 'Tile', 'Global', 'LastPosition', 'LastPositionNoRotation'];
 const TILE_SIZE = 1.0;
+
+/**
+ * ADOUAC CameraFollow constants (Unity world units):
+ * - normal orthographic half-size 5
+ * - hit pulse starts at 4.9 and returns to 5 over one second
+ * - follow position takes two beats
+ * These are tuned defaults; keep them in one place instead of scattering
+ * magic numbers through the renderer.
+ */
+export const ADOUAC_CAMERA_DEFAULTS = {
+    baseSize: 5.0,
+    pulseSize: 4.9,
+    pulseSeconds: 1.0,
+    followBeats: 2.0,
+} as const;
 
 function parseMovementType(raw: any): CamMovementType | undefined {
     if (raw === undefined || raw === null) return undefined;
@@ -118,6 +133,8 @@ export class CameraController {
     // ── Level settings ─────────────────────────────────────────────────────
     private legacyRelativeTo = false;
     private followMovingPlatforms = false;
+    private pulseOnFloor = false;
+    private currentPitch = 1;
 
     // ── Four independent tween tracks ──────────────────────────────────────
     private moveXTween: TweenState = idleTween();
@@ -159,6 +176,20 @@ export class CameraController {
     /** ADOFAI zoom (100 = normal view). */
     public getCameraZoom(): number {
         return this.zoomSize * 100;
+    }
+
+    /**
+     * ADOUAC CameraFollow.BaseSize pulse: after a floor hit, orthographic
+     * half-size goes from 4.9 back to 5 over one real second.
+     * Returns the multiplier applied to the base camera size.
+     */
+    public getPulseScale(timeInLevel: number, tileIndex: number): number {
+        if (!this.pulseOnFloor || tileIndex <= 0) return 1;
+        const start = this.tileStartTimes[tileIndex] ?? 0;
+        const p = clamp01((timeInLevel - start) / Math.max(1e-6, this.currentPitch) / ADOUAC_CAMERA_DEFAULTS.pulseSeconds);
+        const size = ADOUAC_CAMERA_DEFAULTS.pulseSize
+            + (ADOUAC_CAMERA_DEFAULTS.baseSize - ADOUAC_CAMERA_DEFAULTS.pulseSize) * p;
+        return size / ADOUAC_CAMERA_DEFAULTS.baseSize;
     }
 
     /** Set the zoom directly (editor zoom controls). */
@@ -219,6 +250,10 @@ export class CameraController {
         const s = this.levelData?.settings ?? {};
         this.legacyRelativeTo = s.legacyCamRelativeTo === true;
         this.followMovingPlatforms = false;
+        // CameraSettings.pulseOnFloor: original default is false when the
+        // serialized field is absent.
+        this.pulseOnFloor = isEnabled(s.pulseOnFloor, false);
+        this.currentPitch = Math.max(0.1, Number(s.pitch ?? 100) / 100);
 
         this.moveXTween = idleTween();
         this.moveYTween = idleTween();
@@ -280,6 +315,7 @@ export class CameraController {
     // ── Seek ───────────────────────────────────────────────────────────────
 
     public seek(timeSeconds: number, planetWorldPos: { x: number; y: number }, currentTileIndex: number, pitch: number = 1): void {
+        this.currentPitch = Math.max(0.1, pitch);
         this.resetCameraState();
 
         let idx = -1;
@@ -331,6 +367,7 @@ export class CameraController {
 
     public update(params: CameraUpdateParams): void {
         const { nowSeconds, deltaSeconds, bpm, pitch, planetWorldPos, currentTileIndex } = params;
+        this.currentPitch = Math.max(0.1, pitch);
 
         // Rewind guard: if time went backwards, restart from settings.
         if (this.lastCameraTimelineIndex >= 0) {
@@ -370,7 +407,7 @@ export class CameraController {
         // tileBPM already folds in planetSpeed, so use bpm * pitch.
         const effectiveBpm = Math.max(bpm, 1e-6);
         const effectivePitch = Math.max(pitch, 1e-6);
-        const camspeed = (60 / (effectiveBpm * effectivePitch)) * 2;
+        const camspeed = (60 / (effectiveBpm * effectivePitch)) * ADOUAC_CAMERA_DEFAULTS.followBeats;
 
         this.timer += deltaSeconds;
 

@@ -481,12 +481,20 @@ export function useFileHandlers({
         // Collect all decoration image filenames from the level
         const decorationImages = new Set<string>()
 
+        // 老格式 AddDecoration 可能把图片名放在 decText（官方 FixDefaultValues
+        // 会迁移到 decorationImage）；图片收集也必须同步兼容，否则 ZIP 里图片
+        // 永远不会注册，装饰会一直透明。
+        const decorImageOf = (dec: any): string => {
+          const img = dec?.decorationImage
+            || (dec?.eventType === 'AddDecoration' && typeof dec?.decText === 'string' ? dec.decText : '')
+          return typeof img === 'string' ? img : ''
+        }
+
         // Check root decorations
         const rootDecorations = loadedLevel.decorations || loadedLevel.__decorations || []
         rootDecorations.forEach((dec: any) => {
-          if (dec.decorationImage) {
-            decorationImages.add(dec.decorationImage)
-          }
+          const img = decorImageOf(dec)
+          if (img) decorationImages.add(img)
         })
 
         // Check tile decorations
@@ -496,16 +504,16 @@ export function useFileHandlers({
             // 紧凑存储：装饰稀疏 Map
             for (const [, decos] of tiles.decorationsByFloor) {
               for (const dec of decos) {
-                if (dec.decorationImage) decorationImages.add(dec.decorationImage)
+                const img = decorImageOf(dec)
+                if (img) decorationImages.add(img)
               }
             }
           } else {
             tiles.forEach((tile: any) => {
               if (tile.addDecorations) {
                 tile.addDecorations.forEach((dec: any) => {
-                  if (dec.decorationImage) {
-                    decorationImages.add(dec.decorationImage)
-                  }
+                  const img = decorImageOf(dec)
+                  if (img) decorationImages.add(img)
                 })
               }
             })

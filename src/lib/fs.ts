@@ -266,21 +266,27 @@ export async function autoLoadAssets(
 
 function collectDecImages(level: any): Set<string> {
   const s = new Set<string>()
+  const imageOf = (d: any): string => {
+    // 兼容老格式：AddDecoration.decText 是图片名（官方 FixDefaultValues）
+    const img = d?.decorationImage
+      || (d?.eventType === 'AddDecoration' && typeof d?.decText === 'string' ? d.decText : '')
+    return typeof img === 'string' ? img : ''
+  }
 
   const rootDec = level.decorations || level.__decorations || []
-  for (const d of rootDec) { if (d.decorationImage) s.add(d.decorationImage) }
+  for (const d of rootDec) { const img = imageOf(d); if (img) s.add(img) }
 
   const tiles = level.tiles
   if (tiles) {
     if (tiles.decorationsByFloor && typeof tiles.decorationsByFloor.forEach === 'function') {
       // 紧凑存储：装饰是稀疏 Map（没有逐砖对象）
       for (const [, decos] of tiles.decorationsByFloor) {
-        for (const d of decos) { if (d.decorationImage) s.add(d.decorationImage) }
+        for (const d of decos) { const img = imageOf(d); if (img) s.add(img) }
       }
     } else {
       for (const tile of tiles) {
         if (tile.addDecorations) {
-          for (const d of tile.addDecorations) { if (d.decorationImage) s.add(d.decorationImage) }
+          for (const d of tile.addDecorations) { const img = imageOf(d); if (img) s.add(img) }
         }
       }
     }

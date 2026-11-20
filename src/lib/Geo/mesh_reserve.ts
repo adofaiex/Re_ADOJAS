@@ -6,55 +6,67 @@ const TILE_WIDTH = 0.2695;
 const TILE_LENGTH = 0.49;
 const OUTLINE = 0.0125;
 
-// 游戏世界 → ADOJAS 本地世界的换算系数（装饰图按游戏世界的尺寸公式，需换算）。
-// 游戏世界 Long 砖块网格 0.75 / ADOJAS 0.49 ≈ 0.6533。
-// 下面拆成两个可独立调整的旋钮，便于分别校准"尺寸"和"位置偏移"。
-export const OFFICIAL_TO_ADOJAS_SCALE = 0.49 / 0.75;
-// 装饰物【尺寸】系数（baseSizeX/Y）
-// 游戏世界比 ADOJAS 本地大 1/0.6533 倍：装饰图内部画的砖块是按游戏世界的砖块尺寸画的，
-// 要让它和 ADOJAS 的真砖块对齐，装饰图整体乘 0.6533。
 /**
- * 装饰尺寸换算（官方像素 → 我们的世界单位）。
- *
- * 官方的可视高度 = 2 × orthographicSize = 2 × 5 = **10**（官方单位，zoom=100）；
- * 我们的可视高度 = Player 的 baseFrustumSize = **8**；位置换算是 1:1（DECO_POSITION_SCALE）。
- * 要让"装饰占屏比"与官方一致，尺寸必须满足 K/H = 1/10 → **K = H/10 = 8/10 = 0.8**。
- *
- * 旧值 0.49/0.75 ≈ 0.6533 会让装饰比官方小约 18%（0.6533 × 10/8 = 0.8167）。
- * 注意：这个常量**只影响装饰尺寸**，砖块几何用的是 TILE_WIDTH 那一组独立常量；
- * 若 baseFrustumSize 以后改成 10，这里应同步改成 1.0。
- */
-/**
- * 装饰尺寸换算（官方像素 → 我们的世界单位）。
- *
- * 官方的可视高度 = 2 × orthographicSize = 2 × 5 = **10**（官方单位，zoom=100）；
- * 我们的可视高度 = Player.baseFrustumSize（见 Player.setSize）。
- * 位置换算是 1:1（DECO_POSITION_SCALE），所以要让"装饰占屏比"与官方一致：
- *     K / H = 1 / 10   →   K = H / 10
- * 即这个常数必须与 baseFrustumSize 同步：
- *     H = 10（与官方一致） → K = 1.0
- *     H = 8（旧值）        → K = 0.8
- * 旧值 0.49/0.75 ≈ 0.6533 与任一 H 都不匹配，会让装饰比官方小约 18%。
- */
-export const DECO_SIZE_SCALE = 0.547;
-
-/**
- * 官方可视高度（zoom=100，官方单位）：2 × camsizenormal(5) = 10。
- *
- * 但**官方 1 个世界单位 ≠ 我们 1 个世界单位**：官方砖块间距 = tileSize ≈ 1.71
- * （= 2 × baseFloorDimensions.x，实测同 zoom 下官方视野里 5.85 块砖 → 10/5.85），
- * 而我们的砖块间距固定 1.0（calculateBasicTilePositions 每步走 1.0）。
- * 于是换算比 = 1.0 / 1.71 ≈ 0.585：
- *   - 相机：可视高度 = 10（官方单位）× 0.585 ≈ 5.7（我们的单位），
- *     这样同 zoom 下我们也能看到 5.85 块砖；
- *   - 尺寸：装饰占屏比 = K·(texW/100)/H 要与官方 (texW/100)/10 一致 → K/H = 1/10 → K = 0.57。
- * 若以后把砖块间距改成 tileSize（走官方单位），这两个值要一起改成 10 / 1.0。
+ * 官方基准可视高度：2 × orthographicSize(5) = 10（zoom = 100）。
  */
 export const OFFICIAL_VIEW_HEIGHT = 10;
-export const OFFICIAL_TILE_SPACING = 1.71;
-/** 官方单位 → 我们的单位（我们的世界用 1.0 当砖距）。 */
-export const OFFICIAL_TO_OURS = 1.0 / OFFICIAL_TILE_SPACING;
-// 装饰物【位置/偏移】系数（position / positionOffset / parallaxOffset / pivotOffset，经由 tileSize）
+
+/**
+ * 本地砖心间距固定为 1.0（见 calculateBasicTilePositions）。
+ * 官方砖心间距由 tileShape 决定：Long = 1.5，Short = 1.0。
+ *
+ * 所有「以砖距为单位」的官方量都要先映射到本地砖距：
+ *     local = official × (LOCAL_TILE_SPACING / officialTileSize)
+ */
+export const LOCAL_TILE_SPACING = 1.0;
+
+/** 官方 tileShape 对应的砖心间距。 */
+export function officialTileSizeForShape(tileShape?: string): number {
+    return tileShape === 'Short' ? 1.0 : 1.5;
+}
+
+/**
+ * ADOFAI → ADOJAS 的相机缩放换算。
+ *
+ * 官方相机高度固定为 10，但轨道砖距是 Long 1.5 / Short 1.0；
+ * 本地轨道砖距固定为 1.0。要让「视野内能看到多少块砖」与官方一致：
+ *     localViewHeight = OFFICIAL_VIEW_HEIGHT × LOCAL_TILE_SPACING / officialTileSize
+ * 即 Long = 10 × 1 / 1.5 = 6.6667，Short = 10 × 1 / 1 = 10。
+ *
+ * 之前固定用 5.47（≈ 10 × 0.547），会让 Long 谱面比官方多放大 1.219 倍：
+ * 轨道显得更大、靠右的文字装饰被推出屏幕、装饰位置/尺寸也要手动补偿。
+ */
+export function baseFrustumSizeForShape(tileShape?: string): number {
+    return OFFICIAL_VIEW_HEIGHT * (LOCAL_TILE_SPACING / officialTileSizeForShape(tileShape));
+}
+
+/** 兜底值（Long）。运行时 Player / DecorationManager 使用动态值。 */
+export const BASE_FRUSTUM_SIZE = baseFrustumSizeForShape('Long');
+
+/**
+ * 装饰尺寸换算（官方像素 → 本地世界单位）。
+ *
+ * 官方图片尺寸 = 像素 / 100（与砖距无关），再乘 scale%。
+ * 本地图片尺寸必须同时满足：
+ *   1. 相对轨道：像素 / 100 × LOCAL_TILE_SPACING / officialTileSize
+ *   2. 相对屏幕：因为 localViewHeight 也按同一比例缩放了，
+ *      尺寸 / localViewHeight 仍等于官方的 尺寸 / 10。
+ * 所以这里就是 LOCAL_TILE_SPACING / officialTileSize：
+ *   Long = 1/1.5 = 0.6667，Short = 1/1 = 1.0。
+ */
+export function decoSizeScaleForShape(tileShape?: string): number {
+    return LOCAL_TILE_SPACING / officialTileSizeForShape(tileShape);
+}
+
+/**
+ * 兜底值（Long）。运行时以 DecorationManager.decorationSizeScale 为准。
+ */
+export const DECO_SIZE_SCALE = decoSizeScaleForShape('Long');
+
+/**
+ * 装饰位置/偏移的附加校准旋钮。位置单位本身已是 LOCAL_TILE_SPACING，
+ * 该值只用于额外的整体微调，默认保持 1.0。
+ */
 export const DECO_POSITION_SCALE = 1.0;
 
 const fmod = (a: number, b: number): number => {

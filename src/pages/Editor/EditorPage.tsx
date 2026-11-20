@@ -2,10 +2,11 @@
 
 import { useState, useEffect, useCallback, useRef } from "react"
 import { Button } from "@/components/ui/button"
-import { ArrowLeft, Settings, Save, Upload, Download, Music, Video, Image, Maximize, Minimize } from "lucide-react"
+import { ArrowLeft, Settings, Save, Upload, Download, Music, Video, Image, Maximize, Minimize, Box } from "lucide-react"
 import { SettingsModal } from "@/components/SettingsModal"
 import { FindDialog } from "@/components/FindDialog"
 import { ExportDialog } from "./ExportDialog"
+import { DecorationEditorPanel } from "./DecorationEditorPanel"
 import { LoadingModal } from "@/components/LoadingModal"
 import { NotificationSystem } from "./NotificationSystem"
 import { useEditorState } from "./useEditorState"
@@ -96,6 +97,7 @@ export default function EditorPage() {
   } = useEditorState()
 
   const [timelineOpen, setTimelineOpen] = useState(false)
+  const [decorationPanelOpen, setDecorationPanelOpen] = useState(false)
   // 高级查找（Ctrl+F）
   const [findOpen, setFindOpen] = useState(false)
   const [sliderValue, setSliderValue] = useState(0)
@@ -137,6 +139,11 @@ export default function EditorPage() {
     setSliderValue(0)
   }, [adofaiFile])
 
+  // 播放/退出预览时关闭装饰编辑面板，避免编辑 gizmo 与播放输入抢事件。
+  useEffect(() => {
+    if (playModeActive) setDecorationPanelOpen(false)
+  }, [playModeActive])
+
   // Sync slider when tile is selected via click/keyboard
   useEffect(() => {
     if (!timelineOpen || !previewerRef.current) return
@@ -177,6 +184,7 @@ export default function EditorPage() {
   }, [])
 
   const handlePlayWithSeek = useCallback(() => {
+    setDecorationPanelOpen(false)
     const p = previewerRef.current
     const selectedIdx = p?.selectedTileIndex ?? null
     console.log('[Play] selectedTileIndex:', selectedIdx, 'playMode:', playMode)
@@ -368,6 +376,19 @@ export default function EditorPage() {
           <Button
             variant="ghost"
             size="icon"
+            onClick={() => setDecorationPanelOpen(v => !v)}
+            disabled={!adofaiFile || playModeActive}
+            className={`${isDark
+              ? "text-slate-300 hover:text-white hover:bg-slate-700"
+              : "text-slate-700 hover:text-slate-900 hover:bg-slate-100"
+              } bg-black/20 backdrop-blur-sm ${decorationPanelOpen ? "ring-1 ring-blue-400/70" : ""}`}
+            title="装饰编辑器 / Decoration Inspector"
+          >
+            <Box className="w-4 h-4" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
             onClick={() => setSettingsOpen(true)}
             className={`${isDark
               ? "text-slate-300 hover:text-white hover:bg-slate-700"
@@ -555,6 +576,14 @@ export default function EditorPage() {
 
       {/* Full-screen Canvas Area */}
       <div ref={containerRef} className="absolute inset-0">
+        {!recordingMode && (
+          <DecorationEditorPanel
+            player={player}
+            isDark={isDark}
+            open={decorationPanelOpen}
+            onClose={() => setDecorationPanelOpen(false)}
+          />
+        )}
         {/* 右下角：判定选择 / 不死模式 / 自动播放（otto）——编辑器布局（录制模式隐藏） */}
         {!recordingMode && (
         <div className="absolute bottom-4 right-4 flex items-end gap-3 select-none">

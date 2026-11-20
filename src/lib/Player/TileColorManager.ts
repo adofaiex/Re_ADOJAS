@@ -17,7 +17,10 @@ const RAINBOW_PROCESS: Record<string, [string, number, number]> = {
 };
 
 function toHex(n: number): string {
-  return Math.round(n).toString(16).padStart(2, '0');
+  // 颜色插值/Glow 在边界可能过冲（负值或 >255）；不钳位会生成 `#ff-24-24`
+  // 之类的非法颜色，THREE.Color 解析失败后整块变成黑/白（日志里大量 Invalid hex）。
+  const v = Number.isFinite(n) ? Math.max(0, Math.min(255, Math.round(n))) : 0;
+  return v.toString(16).padStart(2, '0');
 }
 
 function parseHex(hex: string): number[] {

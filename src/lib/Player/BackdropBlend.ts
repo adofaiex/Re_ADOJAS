@@ -1,19 +1,18 @@
 /**
- * BackdropBlend — 需要「读取背景」才能实现的混合模式（Overlay / SoftLight）。
+ * BackdropBlend — 需要「读取背景」才能实现的装饰混合模式。
  *
- * 这两种模式的结果取决于**背景像素**（`f(backdrop, source)`），固定管线（blendFunc /
- * blendEquation）表达不了，必须把已经画好的画面当成纹理采样：
+ * 原版 Screen / LinearDodge / Overlay / SoftLight / Difference / Multiply 都是
+ * `f(backdrop, source)`；固定管线只能表达其中一部分，而且半透明 alpha 的公式
+ * 容易和原版不一致。这里统一按 ADOUAC Decoration.shader：
  *
- *   1. 主场景（不含这些装饰）先渲染进一个 RenderTarget；
- *   2. 把该 RT 贴到屏幕；
- *   3. 把这些装饰**单独一遍**画上去：片元着色器按屏幕坐标采样步骤 1 的 RT 作为
- *      backdrop，算出 Overlay/SoftLight 结果，再按装饰自身 alpha 与 backdrop 混合。
+ *   1. 主场景（不含这些装饰）先渲染进 RenderTarget；
+ *   2. 把 RT 贴到屏幕；
+ *   3. 这些装饰单独一遍：片元采样 RT 作为 backdrop，按原版公式混合。
  *
- * 装饰自身的 world 变换仍由 three 的常规管线处理（它就是一个普通 Mesh），
- * 所以位置/旋转/缩放/视差/跟随砖块全部沿用既有逻辑，只有"混合"这一步换成着色器。
+ * 装饰自身的 world 变换仍由 three 常规管线处理，只有混合这一步换成着色器。
  *
- * 颜色空间：RT 用 NoColorSpace（存线性值），装饰贴图由 GPU 采样即得到线性值，
- * 于是混合在线性空间完成；最后用 `<colorspace_fragment>` 转回渲染器的输出空间。
+ * 颜色空间：RT 是线性值，装饰贴图采样后也是线性值；混合在线性空间完成，
+ * 最后用 `<colorspace_fragment>` 转回渲染器输出空间。
  */
 import {
     ShaderMaterial, Mesh, MeshBasicMaterial, PlaneGeometry, Texture,
@@ -24,13 +23,23 @@ export enum BackdropBlendMode {
     None = 0,
     Overlay = 1,
     SoftLight = 2,
+    Difference = 3,
+    Screen = 4,
+    LinearDodge = 5,
+    Multiply = 6,
 }
 
 /** 装饰的 blendMode 字符串 → 需要 backdrop 的模式（不需要则 None）。 */
 export function backdropBlendModeOf(blendMode: unknown): BackdropBlendMode {
-    if (blendMode === 'Overlay') return BackdropBlendMode.Overlay;
-    if (blendMode === 'SoftLight') return BackdropBlendMode.SoftLight;
-    return BackdropBlendMode.None;
+    switch (blendMode) {
+        case 'Overlay': return BackdropBlendMode.Overlay;
+        case 'SoftLight': return BackdropBlendMode.SoftLight;
+        case 'Difference': return BackdropBlendMode.Difference;
+        case 'Screen': return BackdropBlendMode.Screen;
+        case 'LinearDodge': return BackdropBlendMode.LinearDodge;
+        case 'Multiply': return BackdropBlendMode.Multiply;
+        default: return BackdropBlendMode.None;
+    }
 }
 
 const VERT = `
@@ -42,11 +51,13 @@ void main() {
 `;
 
 /**
- * Overlay（b: backdrop, s: source）：
- *   b <= 0.5 ? 2*b*s : 1 - 2*(1-b)*(1-s)
- * SoftLight（W3C/Photoshop 近似）：
- *   d = b <= 0.25 ? ((16b-12)b+4)b : sqrt(b)
- *   s <= 0.5 ? b - (1-2s)*b*(1-b) : b + (2s-1)*(d-b)
+ * ADOUAC Decoration.shader 的 BlendColors：
+ *   Overlay:     b > 0.5 ? 1 - 2(1-b)(1-s) : 2bs
+ *   SoftLight:   (1-b)b s + b(1-(1-b)(1-s))
+ *   Difference:  abs(b-s)
+ *   Screen:      1-(1-b)(1-s)
+ *   LinearDodge: b+s
+ *   Multiply:    b*s
  */
 const FRAG = `
 uniform sampler2D uMap;
@@ -63,10 +74,17 @@ vec3 blendOverlay( vec3 b, vec3 s ) {
 }
 
 vec3 blendSoftLight( vec3 b, vec3 s ) {
-    vec3 d = mix( ( ( 16.0 * b - 12.0 ) * b + 4.0 ) * b, sqrt( b ), step( 0.25, b ) );
-    return mix( b - ( 1.0 - 2.0 * s ) * b * ( 1.0 - b ),
-                b + ( 2.0 * s - 1.0 ) * ( d - b ),
-                step( 0.5, s ) );
+    return ( 1.0 - b ) * b * s + b * ( 1.0 - ( 1.0 - b ) * ( 1.0 - s ) );
+}
+
+vec3 blendForMode( int mode, vec3 b, vec3 s ) {
+    if ( mode == 1 ) return blendOverlay( b, s );
+    if ( mode == 2 ) return blendSoftLight( b, s );
+    if ( mode == 3 ) return abs( b - s );
+    if ( mode == 4 ) return 1.0 - ( 1.0 - b ) * ( 1.0 - s );
+    if ( mode == 5 ) return min( b + s, vec3( 1.0 ) );
+    if ( mode == 6 ) return b * s;
+    return s;
 }
 
 void main() {
@@ -76,7 +94,7 @@ void main() {
     float alpha = tex.a * uColor.a * uOpacity;
 
     vec4 bd = texture2D( uBackdrop, gl_FragCoord.xy / uResolution );
-    vec3 blended = ( uMode == 1 ) ? blendOverlay( bd.rgb, src ) : blendSoftLight( bd.rgb, src );
+    vec3 blended = blendForMode( uMode, bd.rgb, src );
 
     gl_FragColor = vec4( mix( bd.rgb, blended, alpha ), bd.a );
     #include <colorspace_fragment>

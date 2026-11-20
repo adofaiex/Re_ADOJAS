@@ -89,8 +89,10 @@ export class DecorationInstancedRenderer {
     this.parent = parent;
   }
 
-  private makeKey(tex: Texture, blending: Blending, renderOrder: number): string {
-    return `${tex.uuid}|${blendKey(blending)}|${renderOrder}`;
+  private makeKey(tex: Texture, blending: Blending, renderOrder: number, repeatX = 1, repeatY = 1): string {
+    // repeat 必须进 key：同一张图可能被不同 tile 设置的装饰共用，否则后创建
+    // 的装饰会沿用第一批的 uUvRepeat，图片被错误拉满/裁切。
+    return `${tex.uuid}|${blendKey(blending)}|${renderOrder}|${repeatX}x${repeatY}`;
   }
 
   private createBatch(key: string, tex: Texture, blending: Blending, renderOrder: number, capacity: number, repeatX = 1, repeatY = 1): Batch {
@@ -107,7 +109,10 @@ export class DecorationInstancedRenderer {
       vertexShader: decoVert,
       fragmentShader: decoFrag,
       transparent: true,
-      depthWrite: true,
+      // 图片/文字装饰是透明 sprite 语义：不能写深度。写深度时，前景图的
+      // 透明像素也会把后面的图片挡住（表现为“有些图片装饰不显示/层级错”）。
+      // 与 DecorationInstance 的非实例化 Mesh 路径保持 depthWrite:false 一致。
+      depthWrite: false,
       depthTest: true,
       side: DoubleSide,
       blending,
@@ -222,7 +227,7 @@ export class DecorationInstancedRenderer {
     repeatX: number = 1,
     repeatY: number = 1,
   ): DecoInstanceSlot {
-    const key = this.makeKey(tex, blending, renderOrder);
+    const key = this.makeKey(tex, blending, renderOrder, repeatX, repeatY);
     let batch = this.batches.get(key);
     if (!batch) batch = this.createBatch(key, tex, blending, renderOrder, 16, repeatX, repeatY);
 
